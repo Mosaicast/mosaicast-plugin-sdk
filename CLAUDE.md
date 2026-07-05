@@ -9,12 +9,18 @@ Versioned plugin contract SDK (Java plugin-api + @mosaicast/plugin-sdk TS) plus 
 Read both fully before writing code. Work in plan mode first.
 
 ## Tech stack
-Java 21 (Gradle) · TypeScript (tsc/Vite)
+Java 21 (Gradle, multi-module) · TypeScript (tsc)
+
+## Structure
+- `plugin-api/` — Java contract (`dev.mosaicast.plugin.api.*`), no impl. Deps `pf4j` + `jackson-databind` as `api`.
+- `plugin-testkit/` — Java test doubles (`dev.mosaicast.plugin.testkit.*`), separate artifact (`testImplementation`).
+- `src/index.ts` — `@mosaicast/plugin-sdk`; `src/testing.ts` — `/testing` subpath. Tests: `src/*.test.ts` (Vitest).
+- Version = one SemVer anchor mirrored in `build.gradle.kts`, `package.json`, `PlatformApi.VERSION`, `PLATFORM_API_VERSION`; CI job `version-parity` enforces it.
 
 ## Commands
 ```
-./gradlew build publishToMavenLocal   # Java
-npm run build                              # TypeScript
+./gradlew build publishToMavenLocal   # Java (both JARs + sources/javadoc)
+npm ci && npm run build                    # TypeScript (src → dist)
 ./gradlew test  &&  npm test
 ```
 
