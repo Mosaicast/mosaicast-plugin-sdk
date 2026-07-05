@@ -1,0 +1,69 @@
+# Build + test both artifacts on every PR and push to master (CLAUDE.md: green CI is part of DoD).
+# The separate dco.yml + license-header.yml workflows guard sign-off and SPDX headers.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  java:
+    name: Java (plugin-api + plugin-testkit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build + test
+        run: ./gradlew build --no-daemon --stacktrace
+
+  ts:
+    name: TypeScript (@mosaicast/plugin-sdk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  version-parity:
+    name: Version parity (SemVer anchor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert all four versions match
+        run: |
+          set -euo pipefail
+          gradle_v=$(grep -oP 'version\s*=\s*"\K[^"]+' build.gradle.kts | head -1)
+          npm_v=$(node -p "require('./package.json').version")
+          java_v=$(grep -oP 'VERSION\s*=\s*"\K[^"]+' plugin-api/src/main/java/dev/mosaicast/plugin/api/PlatformApi.java)
+          ts_v=$(grep -oP "PLATFORM_API_VERSION\s*=\s*'\K[^']+" src/index.ts)
+          echo "gradle=$gradle_v npm=$npm_v java=$java_v ts=$ts_v"
+          if [ "$gradle_v" != "$npm_v" ] || [ "$gradle_v" != "$java_v" ] || [ "$gradle_v" != "$ts_v" ]; then
+            echo "::error::platformApi version mismatch — the SemVer anchor must be identical in all four places."
+            exit 1
+          fi
+          echo "All versions aligned at $gradle_v ✅"
