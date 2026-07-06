@@ -61,5 +61,18 @@ subprojects {
                 from(components["java"])
             }
         }
+        repositories {
+            // Remote target for CI releases. Local devs use `publishToMavenLocal` (mavenLocal, no creds).
+            // In GitHub Actions the built-in GITHUB_ACTOR/GITHUB_TOKEN are used; locally set gpr.user/gpr.token
+            // (or the same env vars) with a PAT that has `write:packages`.
+            maven {
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/Mosaicast/mosaicast-plugin-sdk")
+                credentials {
+                    username = System.getenv("GITHUB_ACTOR") ?: (findProperty("gpr.user") as String?)
+                    password = System.getenv("GITHUB_TOKEN") ?: (findProperty("gpr.token") as String?)
+                }
+            }
+        }
     }
 }

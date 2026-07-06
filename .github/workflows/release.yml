@@ -1,0 +1,106 @@
+# Publish the SDK when a GitHub Release is published (NOT on PR merge).
+#
+# Flow: draft a Release with a tag like `v0.1.0`. This workflow verifies the tag matches the version
+# anchor mirrored in all four sources, rebuilds + tests both stacks, then publishes:
+#   - @mosaicast/plugin-sdk → npm (OIDC trusted publishing, with provenance)
+#   - plugin-api + plugin-testkit → GitHub Packages (Maven)
+#
+# The version anchor is the source of truth; the tag must equal it. Bump with scripts/set-version.sh.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  verify:
+    name: Verify tag == version anchor
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert tag matches the mirrored version
+        id: check
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag_v="${TAG#v}"   # strip an optional leading 'v'
+          gradle_v=$(grep -oP 'version\s*=\s*"\K[^"]+' build.gradle.kts | head -1)
+          npm_v=$(node -p "require('./package.json').version")
+          java_v=$(grep -oP 'VERSION\s*=\s*"\K[^"]+' plugin-api/src/main/java/dev/mosaicast/plugin/api/PlatformApi.java)
+          ts_v=$(grep -oP "PLATFORM_API_VERSION\s*=\s*'\K[^']+" src/index.ts)
+          echo "tag=$tag_v gradle=$gradle_v npm=$npm_v java=$java_v ts=$ts_v"
+          for v in "$gradle_v" "$npm_v" "$java_v" "$ts_v"; do
+            if [ "$v" != "$tag_v" ]; then
+              echo "::error::Release tag '$TAG' ($tag_v) does not match version anchor '$v'. Bump all four with scripts/set-version.sh and re-tag."
+              exit 1
+            fi
+          done
+          echo "version=$tag_v" >> "$GITHUB_OUTPUT"
+          echo "All sources aligned at $tag_v ✅"
+
+  publish-npm:
+    name: Publish @mosaicast/plugin-sdk to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required for OIDC trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@mosaicast'
+          cache: npm
+
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@latest   # OIDC/provenance needs npm >= 11.5
+
+      - name: Install, build, test
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      - name: Publish (OIDC, public, with provenance; skip if already on npm)
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "@mosaicast/plugin-sdk@${VERSION}" version >/dev/null 2>&1; then
+            echo "@mosaicast/plugin-sdk@${VERSION} already published — skipping (idempotent)."
+          else
+            npm publish --provenance --access public
+          fi
+
+  publish-maven:
+    name: Publish Java artifacts to GitHub Packages
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # required to push to GitHub Packages
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build, test, publish
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew build publishMavenPublicationToGitHubPackagesRepository --no-daemon --stacktrace

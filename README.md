@@ -27,17 +27,45 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
 ```
 
 ## Using it
-- **Java (plugin backend):** `./gradlew publishToMavenLocal`, then in the plugin build:
+- **Java (plugin backend)** — three ways to obtain the artifacts:
+  - Composite build (nicest during parallel dev): `includeBuild("../mosaicast-plugin-sdk")`.
+  - Local: `./gradlew publishToMavenLocal`, then depend on `dev.mosaicast:plugin-api:<version>`.
+  - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
       compileOnly("dev.mosaicast:plugin-api:0.1.0")           // contract, provided by the host
       testImplementation("dev.mosaicast:plugin-testkit:0.1.0") // test doubles only
   }
   ```
-  Or, nicer during parallel development, a composite build: `includeBuild("../mosaicast-plugin-sdk")`.
   Sources + Javadoc JARs give IDE hover docs automatically.
-- **TypeScript (plugin frontend):** `npm link @mosaicast/plugin-sdk` (or a tarball). `.d.ts` + TSDoc give IDE hover docs.
+- **TypeScript (plugin frontend):** `npm install @mosaicast/plugin-sdk` (published on npm), or `npm link` / a tarball for local dev. `.d.ts` + TSDoc give IDE hover docs.
 - **The source of truth for signatures** is this built SDK + its docs.
+
+### Consuming released Java artifacts (GitHub Packages)
+GitHub Packages requires authentication even for public reads. In the consumer's `build.gradle.kts`:
+```kotlin
+repositories {
+    mavenCentral()
+    maven {
+        url = uri("https://maven.pkg.github.com/Mosaicast/mosaicast-plugin-sdk")
+        credentials {
+            username = providers.gradleProperty("gpr.user").orNull ?: System.getenv("GITHUB_ACTOR")
+            password = providers.gradleProperty("gpr.token").orNull ?: System.getenv("GITHUB_TOKEN")
+        }
+    }
+}
+```
+The token is any GitHub PAT with `read:packages`. (Anonymous-pull via Maven Central is a possible future move.)
+
+## Releasing (maintainers)
+Publishing is automated and fires on a **published GitHub Release**, not on PR merge
+(`.github/workflows/release.yml`).
+1. `scripts/set-version.sh <version>` — bumps the SemVer anchor in all four sources at once.
+2. Commit on a branch, open a PR, merge to `master` (CI `version-parity` guards drift).
+3. Draft a **GitHub Release** with tag `v<version>` and publish it.
+4. The release workflow verifies the tag equals the anchor, rebuilds + tests, then publishes
+   `@mosaicast/plugin-sdk` to npm (OIDC trusted publishing, with provenance) and the Java artifacts to
+   GitHub Packages. A tag/anchor mismatch fails the release before anything is published.
 
 ## Test kit — mini examples
 
