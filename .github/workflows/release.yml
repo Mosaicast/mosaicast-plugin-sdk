@@ -69,8 +69,16 @@ jobs:
           npm run build
           npm test
 
-      - name: Publish (OIDC, public, with provenance)
-        run: npm publish --provenance --access public
+      - name: Publish (OIDC, public, with provenance; skip if already on npm)
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          if npm view "@mosaicast/plugin-sdk@${VERSION}" version >/dev/null 2>&1; then
+            echo "@mosaicast/plugin-sdk@${VERSION} already published — skipping (idempotent)."
+          else
+            npm publish --provenance --access public
+          fi
 
   publish-maven:
     name: Publish Java artifacts to GitHub Packages
