@@ -18,7 +18,7 @@
  * version. The host rejects a plugin whose manifest `platformApi` is incompatible with this value
  * (ARCHITECTURE §7.2). **These move together — a breaking change is a major bump.**
  */
-export const PLATFORM_API_VERSION = '0.1.0' as const;
+export const PLATFORM_API_VERSION = '0.1.1' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';

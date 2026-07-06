@@ -33,8 +33,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.1.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.1.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.1.1")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.1.1") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.

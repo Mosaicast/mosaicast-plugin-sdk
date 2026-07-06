@@ -37,5 +37,8 @@ sed -i -E "s/(VERSION = \")[^\"]+(\")/\1${version}\2/" \
 # 4. TypeScript constant
 sed -i -E "s/(PLATFORM_API_VERSION = ')[^']+(')/\1${version}\2/" src/index.ts
 
-echo "Set version to ${version} in build.gradle.kts, package.json, PlatformApi.java, src/index.ts."
+# 5. TypeScript version tripwire test (asserts the constant above)
+sed -i -E "s/(PLATFORM_API_VERSION\)\.toBe\(')[^']+(')/\1${version}\2/" src/index.test.ts
+
+echo "Set version to ${version} in build.gradle.kts, package.json, PlatformApi.java, src/index.ts (+ its test)."
 echo "Next: git add -A && git commit -s -m \"chore: release v${version}\" && open a PR; then publish Release v${version}."
