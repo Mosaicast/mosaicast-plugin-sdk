@@ -1,8 +1,16 @@
 {
   "name": "@mosaicast/plugin-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Versioned plugin contract for Mosaicast: the frontend PluginContext types, a Web Component base helper, an i18n helper, plus a test kit under the /testing subpath.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mosaicast/mosaicast-plugin-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mosaicast/mosaicast-plugin-sdk/issues"
+  },
+  "homepage": "https://github.com/Mosaicast/mosaicast-plugin-sdk#readme",
   "type": "module",
   "sideEffects": false,
   "files": [
