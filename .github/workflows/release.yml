@@ -55,13 +55,13 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'   # npm 11/12 require Node >= 22 (npm@latest dropped Node 20)
           registry-url: 'https://registry.npmjs.org'
           scope: '@mosaicast'
           cache: npm
 
       - name: Ensure npm supports trusted publishing
-        run: npm install -g npm@latest   # OIDC/provenance needs npm >= 11.5
+        run: npm install -g npm@11   # pinned major: OIDC/provenance needs npm >= 11.5; avoids npm@latest engine churn
 
       - name: Install, build, test
         run: |
@@ -99,8 +99,24 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build, test, publish
+      - name: Build, test, publish (skip publish if this version is already on GitHub Packages)
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./gradlew build publishMavenPublicationToGitHubPackagesRepository --no-daemon --stacktrace
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          # GitHub Packages rejects re-publishing an existing release version (409), so a re-run of a
+          # partially-succeeded release would fail. Guard: if both artifacts already exist, build+test
+          # for a green gate but don't re-publish.
+          published() {
+            gh api "/orgs/Mosaicast/packages/maven/dev.mosaicast.$1/versions" -q '.[].name' 2>/dev/null \
+              | grep -qx "$VERSION"
+          }
+          if published plugin-api && published plugin-testkit; then
+            echo "Java $VERSION already on GitHub Packages — building/testing only (idempotent)."
+            ./gradlew build --no-daemon --stacktrace
+          else
+            ./gradlew build publishMavenPublicationToGitHubPackagesRepository --no-daemon --stacktrace
+          fi
