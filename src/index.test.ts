@@ -8,13 +8,25 @@ import {
   createPluginI18n,
   defineMosaicastElement,
   PLATFORM_API_VERSION,
+  resolveArtwork,
+  type DisplaySnapshot,
   type PluginContext,
 } from './index.js';
 import { makeMockCtx } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.1.1');
+    expect(PLATFORM_API_VERSION).toBe('0.2.0');
+  });
+});
+
+describe('resolveArtwork', () => {
+  const base: DisplaySnapshot = { title: 't', description: 'd' };
+
+  it('prefers the episode cover, falls back to the feed cover, then undefined', () => {
+    expect(resolveArtwork({ ...base, imageUrl: 'ep.jpg', feedImageUrl: 'feed.jpg' })).toBe('ep.jpg');
+    expect(resolveArtwork({ ...base, feedImageUrl: 'feed.jpg' })).toBe('feed.jpg');
+    expect(resolveArtwork(base)).toBeUndefined();
   });
 });
 

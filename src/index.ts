@@ -18,7 +18,7 @@
  * version. The host rejects a plugin whose manifest `platformApi` is incompatible with this value
  * (ARCHITECTURE §7.2). **These move together — a breaking change is a major bump.**
  */
-export const PLATFORM_API_VERSION = '0.1.1' as const;
+export const PLATFORM_API_VERSION = '0.2.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -91,6 +91,49 @@ export interface PluginApiClient {
   put<T = unknown>(path: string, body?: unknown): Promise<T>;
   /** DELETE a path, resolving to the parsed JSON response. */
   delete<T = unknown>(path: string): Promise<T>;
+}
+
+/**
+ * The presentation layer of an episode — the feed-derived snapshot the core UI shows (ARCHITECTURE §4.2),
+ * mirrored from the Java `dev.mosaicast.plugin.api.DisplaySnapshot` record.
+ *
+ * **Not authoritative:** the host overwrites it on every fetch from the raw feed, so a feed change
+ * propagates automatically. `publishedAt` and `duration` are serialized as ISO-8601 strings (an instant
+ * and an ISO-8601 duration respectively). Optional fields are absent when the feed declares nothing.
+ */
+export interface DisplaySnapshot {
+  /** The episode title from the feed. */
+  title: string;
+  /** The episode description/show notes; may be empty. */
+  description: string;
+  /** The enclosure audio URL; absent for a `PLANNED` episode with no audio yet. */
+  audioUrl?: string;
+  /** The publication timestamp (ISO-8601 instant); absent for a `PLANNED` episode. */
+  publishedAt?: string;
+  /** The declared runtime (ISO-8601 duration); absent when the feed declares none. */
+  duration?: string;
+  /** The episode's own artwork (`itunes:image` on the item); absent if the episode declares none. */
+  imageUrl?: string;
+  /** The feed/show cover (`itunes:image` on the channel); absent if the feed declares none. */
+  feedImageUrl?: string;
+  /** The episode author (`itunes:author`); absent if the feed declares none. */
+  author?: string;
+  /** A short episode subtitle (`itunes:subtitle`); absent if the feed declares none. */
+  subtitle?: string;
+}
+
+/**
+ * The artwork to display for an episode: its own {@link DisplaySnapshot.imageUrl} if present, otherwise
+ * the {@link DisplaySnapshot.feedImageUrl feed cover}, otherwise `undefined`.
+ *
+ * Mirror of the Java `DisplaySnapshot.artwork()` accessor. Use the two fields directly when you
+ * specifically need the episode- or feed-level value.
+ *
+ * @param snapshot the display snapshot to resolve artwork for
+ * @returns the resolved artwork URL, or `undefined` when neither the episode nor the feed declares one
+ */
+export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
+  return snapshot.imageUrl ?? snapshot.feedImageUrl;
 }
 
 /**
