@@ -95,13 +95,21 @@ class TestKitTest {
     void feedAccessResolvesScopeAndDisplay() {
         Scope feed = Scope.feed("f1");
         DisplaySnapshot snap = new DisplaySnapshot("Ep 1", "notes", "http://a/1.mp3",
-                Instant.parse("2026-01-01T00:00:00Z"), Duration.ofMinutes(42));
+                Instant.parse("2026-01-01T00:00:00Z"), Duration.ofMinutes(42),
+                "http://a/ep1.jpg", "http://a/feed.jpg", "Ada Lovelace", "First episode");
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(feed, List.of("ep-1", "ep-2")))
                 .withDisplay("ep-1", snap);
 
         assertEquals(List.of("ep-1", "ep-2"), feeds.episodesIn(feed));
         assertEquals(snap, feeds.display("ep-1"));
         assertThrows(IllegalArgumentException.class, () -> feeds.display("ep-unknown"));
+
+        // artwork() prefers the episode cover, falls back to the feed cover, then null.
+        assertEquals("http://a/ep1.jpg", snap.artwork());
+        assertEquals("http://a/feed.jpg", new DisplaySnapshot("t", "d", null, null, null,
+                null, "http://a/feed.jpg", null, null).artwork());
+        assertEquals(null, new DisplaySnapshot("t", "d", null, null, null,
+                null, null, null, null).artwork());
     }
 
     @Test
