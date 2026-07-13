@@ -11,5 +11,5 @@
 
 dependencies {
     api("org.pf4j:pf4j:3.15.0")
-    api("com.fasterxml.jackson.core:jackson-databind:2.17.2")
+    api("com.fasterxml.jackson.core:jackson-databind:2.22.1")
 }
