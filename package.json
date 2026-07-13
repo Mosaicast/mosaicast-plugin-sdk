@@ -33,9 +33,9 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "jsdom": "^24.1.0",
+    "jsdom": "^29.1.1",
     "typescript": "^7.0.2",
-    "vitest": "^2.0.5"
+    "vitest": "^4.1.10"
   },
   "publishConfig": {
     "access": "public"
