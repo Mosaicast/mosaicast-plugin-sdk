@@ -13,22 +13,53 @@ import java.util.Objects;
  *
  * @param type the level; never {@code null}
  * @param id   the id of the entity at that level (e.g. the {@code EpisodeRef} ID for
- *             {@link ScopeType#EPISODE}); never {@code null}. For {@link ScopeType#SITE} the host uses a
- *             stable singleton id.
+ *             {@link ScopeType#EPISODE}); never {@code null}. For {@link ScopeType#SITE} it is always
+ *             {@link #SITE_ID} — see {@link #site()}.
  */
 public record Scope(ScopeType type, String id) {
 
     /**
-     * Canonical constructor validating that neither component is {@code null}.
+     * The id of the one and only {@link ScopeType#SITE} scope: {@value}.
+     *
+     * <p>There is a single site, so its scope is a singleton. The host normalizes every {@code SITE}
+     * scope to this id, and it is what appears in the frontend's data path — {@code …/data/site/main/{key}}
+     * addresses exactly the document a backend writes with {@code store().put(Scope.site(), key, value)}.
+     */
+    public static final String SITE_ID = "main";
+
+    /**
+     * Canonical constructor: validates that neither component is {@code null} and normalizes the
+     * {@link ScopeType#SITE} scope to its singleton {@link #SITE_ID}, exactly as the host does — so
+     * {@code new Scope(SITE, anything).id()} is {@code "main"} and every site scope is {@code equals} to
+     * every other.
      */
     public Scope {
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(id, "id");
+        if (type == ScopeType.SITE) {
+            id = SITE_ID;
+        }
     }
 
-    /** Convenience factory for a {@link ScopeType#SITE} scope. */
+    /**
+     * The {@link ScopeType#SITE} scope — the singleton, with id {@link #SITE_ID}.
+     *
+     * @return the site scope
+     */
+    public static Scope site() {
+        return new Scope(ScopeType.SITE, SITE_ID);
+    }
+
+    /**
+     * Convenience factory for a {@link ScopeType#SITE} scope.
+     *
+     * @param id ignored — the site scope is a singleton, so the result is always {@link #site()}
+     * @return the site scope
+     * @deprecated the site scope takes no id; use {@link #site()}.
+     */
+    @Deprecated(since = "0.3.0", forRemoval = true)
     public static Scope site(String id) {
-        return new Scope(ScopeType.SITE, id);
+        return site();
     }
 
     /** Convenience factory for a {@link ScopeType#FEED} scope. */

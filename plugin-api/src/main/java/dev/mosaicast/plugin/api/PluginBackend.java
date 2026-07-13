@@ -14,6 +14,17 @@ import org.pf4j.ExtensionPoint;
  *
  * <p>Implementations do their setup in {@link #register(PluginContext)}: read config, seed the doc
  * store, register scheduled tasks. They must not reach outside the provided context.
+ *
+ * <p><strong>A plugin's server side is {@code register(ctx)} — nothing else.</strong> There is no
+ * route-registration or HTTP-handler API in this contract, and that is deliberate: a v1 plugin does
+ * <em>not</em> declare its own HTTP endpoints. All persistence goes through {@link PluginContext#store()}
+ * (the {@link DocStore}), and anything derived, aggregated or validated server-side is precomputed here
+ * or in a {@link PluginContext#onSchedule(java.time.Duration, Runnable) scheduled task} and then read
+ * back from the store. The frontend reaches that same data through the host's fixed, generic data
+ * endpoints — see {@link PluginContext#store()} for the full picture.
+ *
+ * <p>Custom plugin-defined server routes may arrive in a later {@code platformApi} version; v1 plugins
+ * use the doc store.
  */
 public interface PluginBackend extends ExtensionPoint {
 

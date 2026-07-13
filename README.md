@@ -45,8 +45,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.2.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.2.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.3.0")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.3.0") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -69,6 +69,47 @@ repositories {
 ```
 The token is any GitHub PAT with `read:packages`. (Anonymous-pull via Maven Central is a possible future move.)
 
+## Plugin data access (v1) — plugins do not define HTTP routes
+
+This is the part plugin authors most often guess wrong, so it is stated plainly. **A plugin's server side is `register(ctx)` — that is the whole of it.** There is no route-registration or HTTP-handler API in the contract, and its absence is a design decision, not a gap (ARCHITECTURE §7.4/§7.5; the generic doc store is the default).
+
+**Backend.** A plugin persists *everything* through `ctx.store()` — the hard-scoped `DocStore`, addressed by `(Scope, key)` — and does any aggregation in `ctx.onSchedule(...)`. (The only alternative is a relational schema *declared in the manifest* and reached via `ctx.schema()`; still not a route.)
+
+**Frontend.** A Web Component reaches plugin data through `ctx.api` (`PluginApiClient`). Those calls do **not** hit plugin-authored routes — they hit a fixed, generic surface the **host** exposes over that same doc store, namespaced per plugin. It mirrors `DocStore` one-to-one — `get` / `put` / `list` / `delete`, and no more:
+
+```text
+GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
+         → one JSON doc; 404 if absent
+GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
+         → { items: [{ key, value }], page, size, totalElements, totalPages }
+PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
+         → upsert, last-write-wins
+DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
+         → remove; idempotent
+```
+
+| Operation | Backend (Java) | Frontend (TS) |
+|---|---|---|
+| read one | `store().get(scope, key, T.class)` → `Optional<T>` | `ctx.api.get<T>('data/…/{key}')` |
+| list by prefix | `store().query(scope, prefix)` → `List<DocEntry>` | `ctx.api.get<PagedDocs<T>>('data/…?prefix=…')` |
+| upsert | `store().put(scope, key, value)` | `ctx.api.put('data/…/{key}', value)` |
+| remove | `store().delete(scope, key)` → `boolean` | `ctx.api.delete('data/…/{key}')` |
+
+- `scopeType` is `site | feed | season | episode` and `scopeId` is that entity's id — mirroring `Scope`/`ScopeType`, the same addressing the backend uses. **`site`'s `scopeId` is always `main`** (`Scope.SITE_ID`): there is only one site, so both the SDK and the host normalize every site scope to that singleton — `Scope.site()` and `…/data/site/main/{key}` address the same document, and the path always has four non-empty segments.
+- `key` must match `DocStore.KEY_PATTERN` = `^[A-Za-z0-9._:-]{1,200}$` and is the final path segment, verbatim — no `/`, and no percent-encoded slash either (servlet containers reject `%2F` there). Structure keys with `:` / `.` / `-` instead, e.g. `mark:userId:cell`. The host answers 400 on a bad key, and `InMemoryDocStore` throws `IllegalArgumentException` — so it fails in your tests, not in production.
+- The list is **paginated** (core's standard `PagedResponse` envelope) and **carries keys** (`DocEntry`), because neither end can address a doc without one.
+- `delete` is **idempotent**: removing an absent doc is not an error. The Java call returns whether anything was actually removed.
+
+**The two ends see one store.** The doc a backend writes with `ctx.store().put(scope, key, value)` is exactly what the frontend reads at `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`.
+
+**What the host enforces**, so a plugin doesn't have to:
+- Data is **hard-scoped to the plugin id** — a plugin can only ever see its own data.
+- **Reads** are gated by the slot's `visibleTo`; **writes** require the mapped role. The host validates that the scope exists (and that the feed is enabled). `ctx.api` carries the user's auth (session or personal access token).
+
+**No request-time server logic.** A write is plain persistence — no plugin code runs on the request. Anything derived, validated or aggregated server-side is **precomputed** in `register`/`onSchedule` and read back from the store.
+
+> Roadmap: custom plugin-defined server routes may arrive in a later `platformApi` version; plugins use the doc store.
+
 ## Releasing (maintainers)
 Publishing is automated and fires on a **published GitHub Release**, not on PR merge
 (`.github/workflows/release.yml`).
@@ -86,7 +127,7 @@ Publishing is automated and fires on a **published GitHub Release**, not on PR m
 var ctx = new FakePluginContext();               // in-memory store, config, feeds; sync onSchedule
 myPlugin.register(ctx);                            // exercise the backend
 assertEquals(Optional.of("world"),
-        ctx.store().get(Scope.site("main"), "hello", String.class));
+        ctx.store().get(Scope.site(), "hello", String.class));
 ```
 
 **TypeScript** (`@mosaicast/plugin-sdk/testing`, jsdom):
