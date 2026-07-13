@@ -18,7 +18,7 @@
  * version. The host rejects a plugin whose manifest `platformApi` is incompatible with this value
  * (ARCHITECTURE §7.2). **These move together — a breaking change is a major bump.**
  */
-export const PLATFORM_API_VERSION = '0.2.0' as const;
+export const PLATFORM_API_VERSION = '0.3.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -76,6 +76,36 @@ export interface ThemeTokens {
 }
 
 /**
+ * One document in the plugin's doc store: its key plus its value.
+ *
+ * Mirror of the Java `dev.mosaicast.plugin.api.DocEntry` record, and the element type of the host's
+ * paged list endpoint — the key is carried because you cannot address a document without it.
+ */
+export interface DocEntry<T = unknown> {
+  /** The document's key within its scope; matches `^[A-Za-z0-9._:-]{1,200}$`. */
+  key: string;
+  /** The document's JSON value. */
+  value: T;
+}
+
+/**
+ * The host's standard paged envelope, as returned by the doc-store list endpoint
+ * (`GET /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=`).
+ */
+export interface PagedDocs<T = unknown> {
+  /** The documents on this page, keyed. */
+  items: DocEntry<T>[];
+  /** The zero-based page index. */
+  page: number;
+  /** The requested page size. */
+  size: number;
+  /** Total number of matching documents across all pages. */
+  totalElements: number;
+  /** Total number of pages. */
+  totalPages: number;
+}
+
+/**
  * A thin authenticated REST client for the **host-provided** endpoints of this plugin's namespace.
  *
  * All paths are relative to the plugin's base (`/api/plugins/<id>/`); the host attaches the base path and
@@ -84,29 +114,27 @@ export interface ThemeTokens {
  *
  * **These are not plugin-authored routes.** A v1 plugin cannot declare HTTP endpoints — its server side
  * is `register(ctx)` and nothing else (see the Java `PluginBackend`). What this client talks to is a
- * fixed, generic surface the host exposes over the plugin's hard-scoped doc store, mirroring `DocStore`
- * exactly — get / put / list, nothing more:
+ * fixed, generic surface the host exposes over the plugin's hard-scoped doc store, mirroring the Java
+ * `DocStore` one-to-one — get / put / list / delete, nothing more:
  *
  * ```text
- * GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
- *       → one JSON doc; 404 if absent
- * GET /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
- *       → { items: [{ key, value }], page, size, totalElements, totalPages }
- * PUT /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
- *       → upsert, last-write-wins
+ * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
+ *          → one JSON doc; 404 if absent
+ * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
+ *          → { items: [{ key, value }], page, size, totalElements, totalPages }
+ * PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
+ *          → upsert, last-write-wins
+ * DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
+ *          → remove; idempotent
  * ```
  *
  * `scopeType` is `site | feed | season | episode` and `scopeId` the id of that entity — i.e. the
  * {@link Scope} the backend addresses with. For `site` the id is the literal `main` (one site, one
  * singleton scope), so the path always has four non-empty segments. `key` must match
  * `^[A-Za-z0-9._:-]{1,200}$` — the host answers 400 otherwise — and is the final path segment verbatim:
- * no `/`, so structure keys with `:` / `.` / `-` (e.g. `mark:userId:cell`). The list is paginated and
- * carries each doc's key, since you cannot address a doc without it.
- *
- * **No `DELETE` in v1:** `DocStore` has no `delete`, and this surface stays symmetric with it. Removal
- * comes with `DocStore.delete(scope, key)` in 0.3.0 and the `DELETE` endpoint alongside it — don't fake
- * it with tombstone values. (`delete`/`post` exist on this client as plain HTTP verbs; the v1 data
- * surface simply exposes no endpoint for them.)
+ * no `/`, so structure keys with `:` / `.` / `-` (e.g. `mark:userId:cell`). The list is paginated
+ * ({@link PagedDocs}) and carries each doc's key ({@link DocEntry}), since you cannot address a doc
+ * without it.
  *
  * The doc a backend writes with `ctx.store().put(scope, key, value)` is the one read here at
  * `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`: one store, two ends.
@@ -120,19 +148,18 @@ export interface ThemeTokens {
  * Custom plugin-defined server routes may arrive in a later `platformApi` version; v1 plugins use the
  * doc store.
  *
- * @example Read, list and write docs from a Web Component
+ * @example Read, list, write and remove docs from a Web Component
  * ```ts
  * const base = `data/${ctx.scope.type}/${ctx.scope.id}`;   // scope.id is `main` on the site scope
  * const key = `board:${ctx.user!.id}`;                     // no `/` in keys
  *
- * const board = await ctx.api.get<Board>(`${base}/${key}`);        // rejects with a 404 problem if absent
- * await ctx.api.put(`${base}/${key}`, { ...board, marked });       // upsert, last-write-wins
+ * const board = await ctx.api.get<Board>(`${base}/${key}`);   // rejects with a 404 problem if absent
+ * await ctx.api.put(`${base}/${key}`, { ...board, marked });  // upsert, last-write-wins
  *
- * // the SDK ships no type for the envelope — declare the shape you expect at the call site
- * type Paged<T> = { items: { key: string; value: T }[]; page: number; size: number;
- *                   totalElements: number; totalPages: number };
- * const page = await ctx.api.get<Paged<Board>>(`${base}?prefix=board:&page=0&size=50`);
+ * const page = await ctx.api.get<PagedDocs<Board>>(`${base}?prefix=board:&page=0&size=50`);
  * page.items.forEach(({ key, value }) => render(key, value));
+ *
+ * await ctx.api.delete(`${base}/${key}`);                     // idempotent
  * ```
  */
 export interface PluginApiClient {

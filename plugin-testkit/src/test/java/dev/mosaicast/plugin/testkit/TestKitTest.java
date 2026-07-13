@@ -9,9 +9,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.mosaicast.plugin.api.DisplaySnapshot;
+import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.PluginBackend;
 import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.Scope;
+import dev.mosaicast.plugin.api.ScopeType;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -55,20 +57,63 @@ class TestKitTest {
     }
 
     @Test
+    void docStoreQueryCarriesKeys() {
+        InMemoryDocStore store = new InMemoryDocStore();
+        Scope ep = Scope.episode("ep-1");
+        store.put(ep, "vote:alice", new Vote("alice", 1));
+
+        List<DocEntry> entries = store.query(ep, "vote:");
+
+        assertEquals(1, entries.size());
+        assertEquals("vote:alice", entries.get(0).key());
+        assertEquals("alice", entries.get(0).value().get("user").asText());
+    }
+
+    @Test
+    void docStoreDeleteRemovesAndIsIdempotent() {
+        InMemoryDocStore store = new InMemoryDocStore();
+        Scope ep = Scope.episode("ep-1");
+        store.put(ep, "vote:alice", new Vote("alice", 1));
+
+        assertTrue(store.delete(ep, "vote:alice"));   // removed
+        assertFalse(store.delete(ep, "vote:alice"));  // nothing left to remove — not an error
+        assertTrue(store.get(ep, "vote:alice", Vote.class).isEmpty());
+        assertFalse(store.delete(Scope.episode("never-written"), "nope")); // unknown scope
+    }
+
+    @Test
+    void docStoreRejectsKeysTheFrontendCouldNotAddress() {
+        InMemoryDocStore store = new InMemoryDocStore();
+        Scope ep = Scope.episode("ep-1");
+
+        // A '/' would not survive the host's …/data/{scopeType}/{scopeId}/{key} path.
+        assertThrows(IllegalArgumentException.class, () -> store.put(ep, "vote/alice", new Vote("a", 1)));
+        assertThrows(IllegalArgumentException.class, () -> store.put(ep, "", new Vote("a", 1)));
+        store.put(ep, "vote:alice.v2-final_", new Vote("a", 1)); // ':' '.' '-' '_' are all allowed
+    }
+
+    @Test
     void missingKeyIsEmpty() {
         InMemoryDocStore store = new InMemoryDocStore();
-        assertFalse(store.get(Scope.site("main"), "nope", Vote.class).isPresent());
+        assertFalse(store.get(Scope.site(), "nope", Vote.class).isPresent());
+    }
+
+    @Test
+    void siteScopeIsASingleton() {
+        assertEquals(Scope.SITE_ID, Scope.site().id());
+        // The host normalizes any site scope to the singleton, so these address the same document.
+        assertEquals(Scope.site(), new Scope(ScopeType.SITE, "whatever"));
     }
 
     @Test
     void registerThenAssertStore() {
         // A tiny plugin that seeds a value on register.
-        PluginBackend plugin = ctx -> ctx.store().put(Scope.site("main"), "hello", "world");
+        PluginBackend plugin = ctx -> ctx.store().put(Scope.site(), "hello", "world");
         FakePluginContext ctx = new FakePluginContext();
 
         plugin.register(ctx);
 
-        assertEquals(Optional.of("world"), ctx.store().get(Scope.site("main"), "hello", String.class));
+        assertEquals(Optional.of("world"), ctx.store().get(Scope.site(), "hello", String.class));
     }
 
     @Test
@@ -76,12 +121,12 @@ class TestKitTest {
         FakePluginContext ctx = new FakePluginContext();
         PluginBackend plugin = c ->
                 c.onSchedule(Duration.ofMinutes(15), () ->
-                        c.store().put(Scope.site("main"), "ran", Boolean.TRUE));
+                        c.store().put(Scope.site(), "ran", Boolean.TRUE));
 
         plugin.register(ctx);
 
         assertEquals(1, ctx.scheduledCount());
-        assertEquals(Optional.of(Boolean.TRUE), ctx.store().get(Scope.site("main"), "ran", Boolean.class));
+        assertEquals(Optional.of(Boolean.TRUE), ctx.store().get(Scope.site(), "ran", Boolean.class));
     }
 
     @Test
