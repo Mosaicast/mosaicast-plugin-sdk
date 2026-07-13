@@ -75,26 +75,31 @@ This is the part plugin authors most often guess wrong, so it is stated plainly.
 
 **Backend.** A plugin persists *everything* through `ctx.store()` — the hard-scoped `DocStore`, addressed by `(Scope, key)` — and does any aggregation in `ctx.onSchedule(...)`. (The only alternative is a relational schema *declared in the manifest* and reached via `ctx.schema()`; still not a route.)
 
-**Frontend.** A Web Component reaches plugin data through `ctx.api` (`PluginApiClient`: `get/post/put/delete`). Those calls do **not** hit plugin-authored routes — they hit a fixed, generic surface the **host** exposes over that same doc store, namespaced per plugin:
+**Frontend.** A Web Component reaches plugin data through `ctx.api` (`PluginApiClient`). Those calls do **not** hit plugin-authored routes — they hit a fixed, generic surface the **host** exposes over that same doc store, namespaced per plugin. It mirrors `DocStore` exactly — `get` / `put` / `list`, nothing more:
 
 ```text
-GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}       → one JSON doc (404 if absent)
-GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=…    → docs whose key starts with prefix
-PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}       → upsert JSON body (last-write-wins)
-DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}       → remove
+GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
+      → one JSON doc; 404 if absent
+GET /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
+      → { items: [{ key, value }], page, size, totalElements, totalPages }
+PUT /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
+      → upsert, last-write-wins
 ```
 
-`scopeType` is `site | feed | season | episode` and `scopeId` is that entity's id (site uses a fixed id) — they mirror `Scope`/`ScopeType`, the same addressing the backend uses.
+- `scopeType` is `site | feed | season | episode` and `scopeId` is that entity's id — mirroring `Scope`/`ScopeType`, the same addressing the backend uses. **`site`'s `scopeId` is the literal `main`:** there is only one site, so the host normalizes every `SITE` scope to that singleton — `ctx.store().put(Scope.site(anything), …)` and `…/data/site/main/{key}` address the same row. The path always has four non-empty segments.
+- `key` must match `^[A-Za-z0-9._:-]{1,200}$` (the host rejects anything else with a 400) and is the final path segment, verbatim — no `/`, and no percent-encoded slash either. Structure keys with `:` / `.` / `-` instead, e.g. `mark:userId:cell`.
+- The list is **paginated** (core's standard `PagedResponse` envelope) and **carries keys**, because the frontend cannot address a doc without one.
+- **There is no `DELETE` in v1** — `DocStore` has no `delete`, and the HTTP surface stays symmetric with it rather than growing a capability the backend lacks. Removal arrives with `DocStore.delete(scope, key)` in 0.3.0, and the `DELETE` endpoint lands alongside it. Don't model deletion as a tombstone value; wait for the real thing.
 
 **The two ends see one store.** The doc a backend writes with `ctx.store().put(scope, key, value)` is exactly what the frontend reads at `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`.
 
 **What the host enforces**, so a plugin doesn't have to:
 - Data is **hard-scoped to the plugin id** — a plugin can only ever see its own data.
-- **Reads** are gated by the slot's `visibleTo`; **writes** require the mapped role. The host validates that the scope exists. `ctx.api` carries the user's auth (session or personal access token).
+- **Reads** are gated by the slot's `visibleTo`; **writes** require the mapped role. The host validates that the scope exists (and that the feed is enabled). `ctx.api` carries the user's auth (session or personal access token).
 
 **No request-time server logic in v1.** A write is plain persistence — no plugin code runs on the request. Anything derived, validated or aggregated server-side is **precomputed** in `register`/`onSchedule` and read back from the store.
 
-> Roadmap: custom plugin-defined server routes may arrive in a later `platformApi` version; v1 plugins use the doc store.
+> Roadmap: custom plugin-defined server routes may arrive in a later `platformApi` version; v1 plugins use the doc store. Also queued for **0.3.0**: `DocStore.delete(scope, key)` (plus the `DELETE` endpoint), `DocStore.query` returning keyed entries like the HTTP list does, and a `Scope.SITE_ID` constant for `main`.
 
 ## Releasing (maintainers)
 Publishing is automated and fires on a **published GitHub Release**, not on PR merge

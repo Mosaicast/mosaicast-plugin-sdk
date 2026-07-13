@@ -14,7 +14,9 @@ import java.util.Objects;
  * @param type the level; never {@code null}
  * @param id   the id of the entity at that level (e.g. the {@code EpisodeRef} ID for
  *             {@link ScopeType#EPISODE}); never {@code null}. For {@link ScopeType#SITE} the host uses a
- *             stable singleton id.
+ *             stable singleton id — there is only one site, so it normalizes any {@code SITE} scope to
+ *             it, and that id is what appears in the frontend data path ({@code …/data/site/main/{key}}
+ *             on the current host). A named constant for it is a 0.3.0 item.
  */
 public record Scope(ScopeType type, String id) {
 

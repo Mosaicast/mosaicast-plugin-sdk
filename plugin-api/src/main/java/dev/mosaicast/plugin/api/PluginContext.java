@@ -28,24 +28,41 @@ public interface PluginContext {
      * <p><strong>How the frontend reaches this data.</strong> A plugin's Web Component does not call
      * plugin-authored routes — none exist. It calls {@code ctx.api} (the TypeScript
      * {@code PluginApiClient}), which targets a fixed, generic, per-plugin-namespaced HTTP surface the
-     * <em>host</em> exposes over this very store:
+     * <em>host</em> exposes over this very store. That surface mirrors this interface exactly — get, put,
+     * list, nothing more:
      *
      * <pre>{@code
-     * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}    → one JSON doc (404 if absent)
-     * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=… → docs whose key starts with prefix
-     * PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}    → upsert JSON body (last-write-wins)
-     * DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}    → remove
+     * GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
+     *       → one JSON doc; 404 if absent
+     * GET /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
+     *       → { items: [{ key, value }], page, size, totalElements, totalPages }
+     * PUT /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
+     *       → upsert, last-write-wins
      * }</pre>
      *
-     * <p>{@code scopeType} and {@code scopeId} mirror {@link ScopeType} and {@link Scope#id()}. So the
-     * document a backend writes with {@code ctx.store().put(scope, key, value)} is exactly the one the
-     * frontend reads at {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — backend and
-     * frontend see one store, not two.
+     * <p>{@code scopeType} and {@code scopeId} mirror {@link ScopeType} and {@link Scope#id()}. For
+     * {@link ScopeType#SITE} the host normalizes to a single literal id, {@code main} — there is only one
+     * site, so {@code store().put(Scope.site(anything), …)} and {@code …/data/site/main/{key}} address the
+     * same row, and the path always has four non-empty segments. Keys must match
+     * {@code ^[A-Za-z0-9._:-]{1,200}$} (the host answers 400 otherwise) and travel as the final path
+     * segment verbatim: no {@code /}, so structure them with {@code :}/{@code .}/{@code -}, e.g.
+     * {@code mark:userId:cell}. The list endpoint is paginated and — unlike
+     * {@link DocStore#query(Scope, String)}, which returns values only — carries each document's key,
+     * because the frontend cannot address a document without it.
+     *
+     * <p>So the document a backend writes with {@code ctx.store().put(scope, key, value)} is exactly the
+     * one the frontend reads at {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — backend
+     * and frontend see one store, not two.
+     *
+     * <p><strong>No delete in v1:</strong> this interface has none, and the HTTP surface stays symmetric
+     * with it rather than granting the frontend a capability the backend lacks. Removal arrives with
+     * {@code DocStore.delete(scope, key)} in 0.3.0, with the {@code DELETE} endpoint alongside it; do not
+     * model deletion as a tombstone value in the meantime.
      *
      * <p>The host enforces the boundaries on that surface: data is hard-scoped to the plugin id (a plugin
      * only ever sees its own), reads are gated by the slot's {@code visibleTo} and writes by the mapped
-     * {@link Role}, the scope must exist, and the call carries the user's authentication (session or
-     * personal access token).
+     * {@link Role}, the scope must exist (and its feed be enabled), and the call carries the user's
+     * authentication (session or personal access token).
      *
      * <p><strong>No request-time server logic in v1:</strong> a write through that surface is plain
      * persistence — no plugin code runs on the request. Derive, validate or aggregate in
