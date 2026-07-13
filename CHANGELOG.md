@@ -7,6 +7,21 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+- Documented the **plugin data-access contract** — docs only, no code, no new types, no version bump
+  (`platformApi` stays **0.2.0**). A plugin's server side is `register(ctx)`: it persists exclusively
+  through `ctx.store()` (the `DocStore`) and aggregates in `ctx.onSchedule(...)`. **v1 plugins do not
+  define HTTP routes** — the absence of a route-registration API is by design, not a gap.
+- Spelled out how the frontend reaches plugin data: `ctx.api` (`PluginApiClient`) targets the host's
+  fixed, per-plugin-namespaced generic endpoints over that same doc store
+  (`/api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`, plus a `?prefix=` list), hard-scoped to the
+  plugin id, reads gated by the slot's `visibleTo` and writes by the mapped role. Writes are plain
+  persistence — no plugin code runs at request time. Covered in the README, the TSDoc on
+  `PluginApiClient` / `PluginContext.api`, and the Javadoc on `PluginBackend`, `PluginContext.store()`
+  and `DocStore`.
+
 ## [0.2.0] — 2026-07-11
 
 ### Added

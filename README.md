@@ -69,6 +69,33 @@ repositories {
 ```
 The token is any GitHub PAT with `read:packages`. (Anonymous-pull via Maven Central is a possible future move.)
 
+## Plugin data access (v1) — plugins do not define HTTP routes
+
+This is the part plugin authors most often guess wrong, so it is stated plainly. **A plugin's server side is `register(ctx)` — that is the whole of it.** There is no route-registration or HTTP-handler API in the contract, and its absence is a design decision, not a gap (ARCHITECTURE §7.4/§7.5; the generic doc store is the default).
+
+**Backend.** A plugin persists *everything* through `ctx.store()` — the hard-scoped `DocStore`, addressed by `(Scope, key)` — and does any aggregation in `ctx.onSchedule(...)`. (The only alternative is a relational schema *declared in the manifest* and reached via `ctx.schema()`; still not a route.)
+
+**Frontend.** A Web Component reaches plugin data through `ctx.api` (`PluginApiClient`: `get/post/put/delete`). Those calls do **not** hit plugin-authored routes — they hit a fixed, generic surface the **host** exposes over that same doc store, namespaced per plugin:
+
+```text
+GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}       → one JSON doc (404 if absent)
+GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=…    → docs whose key starts with prefix
+PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}       → upsert JSON body (last-write-wins)
+DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}       → remove
+```
+
+`scopeType` is `site | feed | season | episode` and `scopeId` is that entity's id (site uses a fixed id) — they mirror `Scope`/`ScopeType`, the same addressing the backend uses.
+
+**The two ends see one store.** The doc a backend writes with `ctx.store().put(scope, key, value)` is exactly what the frontend reads at `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`.
+
+**What the host enforces**, so a plugin doesn't have to:
+- Data is **hard-scoped to the plugin id** — a plugin can only ever see its own data.
+- **Reads** are gated by the slot's `visibleTo`; **writes** require the mapped role. The host validates that the scope exists. `ctx.api` carries the user's auth (session or personal access token).
+
+**No request-time server logic in v1.** A write is plain persistence — no plugin code runs on the request. Anything derived, validated or aggregated server-side is **precomputed** in `register`/`onSchedule` and read back from the store.
+
+> Roadmap: custom plugin-defined server routes may arrive in a later `platformApi` version; v1 plugins use the doc store.
+
 ## Releasing (maintainers)
 Publishing is automated and fires on a **published GitHub Release**, not on PR merge
 (`.github/workflows/release.yml`).

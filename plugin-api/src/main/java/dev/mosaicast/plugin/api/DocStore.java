@@ -16,6 +16,14 @@ import java.util.Optional;
  *
  * <p><strong>Concurrency:</strong> writes are <em>last-write-wins</em>. Plugins that need stronger
  * guarantees model it in their key design (e.g. per-user keys), as bingo does (§7.6).
+ *
+ * <p><strong>This is the plugin's sole persistence path</strong> (unless the manifest declares a
+ * {@link SchemaStore schema}), and it is shared with the plugin's frontend: the host exposes a fixed,
+ * generic, per-plugin-namespaced HTTP surface over it, which the Web Component reaches via
+ * {@code ctx.api}. A document written here with {@link #put(Scope, String, Object)} is read by the
+ * frontend at {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — see
+ * {@link PluginContext#store()} for the full endpoint list and its access rules. Plugins do not define
+ * HTTP routes in v1.
  */
 public interface DocStore {
 

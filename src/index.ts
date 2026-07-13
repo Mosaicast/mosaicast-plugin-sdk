@@ -76,11 +76,44 @@ export interface ThemeTokens {
 }
 
 /**
- * A thin authenticated REST client for the plugin's own backend.
+ * A thin authenticated REST client for the **host-provided** endpoints of this plugin's namespace.
  *
- * All paths are relative to the plugin's base (`/api/plugins/<id>/`); the host attaches the auth token
- * and base path. Methods reject on non-2xx responses (RFC 7807 `application/problem+json` body,
- * ARCHITECTURE §13).
+ * All paths are relative to the plugin's base (`/api/plugins/<id>/`); the host attaches the base path and
+ * the user's auth (session or personal access token). Methods reject on non-2xx responses (RFC 7807
+ * `application/problem+json` body, ARCHITECTURE §13).
+ *
+ * **These are not plugin-authored routes.** A v1 plugin cannot declare HTTP endpoints — its server side
+ * is `register(ctx)` and nothing else (see the Java `PluginBackend`). What this client talks to is a
+ * fixed, generic surface the host exposes over the plugin's hard-scoped doc store:
+ *
+ * ```text
+ * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}    → one JSON doc (404 if absent)
+ * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=… → docs whose key starts with prefix
+ * PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}    → upsert JSON body (last-write-wins)
+ * DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}    → remove
+ * ```
+ *
+ * `scopeType` is `site | feed | season | episode` and `scopeId` the id of that entity — i.e. the
+ * {@link Scope} the backend addresses with. The doc a backend writes with
+ * `ctx.store().put(scope, key, value)` is the one read here at
+ * `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`: one store, two ends.
+ *
+ * Data is hard-scoped to the plugin id — a plugin can only ever see its own. Reads are gated by the
+ * slot's `visibleTo`, writes require the mapped {@link Role}, and the host validates that the scope
+ * exists. A write is plain persistence: no plugin code runs at request time, so anything derived or
+ * validated server-side must be precomputed in the backend's `register`/`onSchedule` and read back from
+ * the store.
+ *
+ * Custom plugin-defined server routes may arrive in a later `platformApi` version; v1 plugins use the
+ * doc store.
+ *
+ * @example Read and write a doc from a Web Component
+ * ```ts
+ * const key = `board/${ctx.user!.id}`;
+ * const path = `data/${ctx.scope.type}/${ctx.scope.id}/${key}`;
+ * const board = await ctx.api.get<Board>(path);   // rejects with a 404 problem if absent
+ * await ctx.api.put(path, { ...board, marked });  // upsert, last-write-wins
+ * ```
  */
 export interface PluginApiClient {
   /** GET a path, resolving to the parsed JSON body. */
@@ -149,7 +182,11 @@ export interface PluginContext {
   episode?: { status: 'PLANNED' | 'PUBLISHED' | 'WITHDRAWN' };
   /** The signed-in user, or `null` for anonymous visitors. */
   user: { id: string; role: Role } | null;
-  /** Authenticated client for the plugin's own backend. */
+  /**
+   * Authenticated client for this plugin's host-provided data endpoints — **not** for plugin-authored
+   * routes, which do not exist in v1. It reads and writes the same hard-scoped doc store the backend
+   * uses via `ctx.store()`. See {@link PluginApiClient} for the endpoint shape and access rules.
+   */
   api: PluginApiClient;
   /** Cookie/consent gate for third-party resources (ARCHITECTURE §12.5). */
   consent: { has(cat: string): boolean; onChange(cb: () => void): void };
