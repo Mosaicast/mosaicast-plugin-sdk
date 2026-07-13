@@ -1,6 +1,6 @@
 {
   "name": "@mosaicast/plugin-sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Versioned plugin contract for Mosaicast: the frontend PluginContext types, a Web Component base helper, an i18n helper, plus a test kit under the /testing subpath.",
   "license": "Apache-2.0",
   "repository": {

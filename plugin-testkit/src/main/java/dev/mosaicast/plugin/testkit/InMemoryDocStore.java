@@ -5,6 +5,7 @@ package dev.mosaicast.plugin.testkit;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.DocStore;
 import dev.mosaicast.plugin.api.Scope;
 import java.util.ArrayList;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * An in-memory {@link DocStore} for testing plugin backends without a database (ARCHITECTURE §13.5).
@@ -20,8 +22,14 @@ import java.util.Optional;
  * <p>Values are serialized to JSON on {@link #put} (via Jackson) and deserialized on {@link #get},
  * mirroring the real store's round-trip semantics and last-write-wins behavior. Not thread-safe — test
  * doubles run single-threaded.
+ *
+ * <p>Like the host, it rejects a {@link #put} whose key does not match {@link DocStore#KEY_PATTERN}, so a
+ * key the frontend could never address (e.g. one containing {@code /}) fails in your tests rather than in
+ * production.
  */
 public final class InMemoryDocStore implements DocStore {
+
+    private static final Pattern KEY = Pattern.compile(KEY_PATTERN);
 
     private final ObjectMapper mapper;
     // Insertion-ordered so query() results are deterministic in tests.
@@ -58,18 +66,31 @@ public final class InMemoryDocStore implements DocStore {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
+        if (!KEY.matcher(key).matches()) {
+            throw new IllegalArgumentException(
+                    "key '" + key + "' does not match " + KEY_PATTERN
+                            + " — it would not be addressable from the frontend");
+        }
         data.computeIfAbsent(scope, s -> new LinkedHashMap<>())
                 .put(key, mapper.valueToTree(value));
     }
 
     @Override
-    public List<JsonNode> query(Scope scope, String keyPrefix) {
+    public boolean delete(Scope scope, String key) {
+        Objects.requireNonNull(scope, "scope");
+        Objects.requireNonNull(key, "key");
+        Map<String, JsonNode> inScope = data.get(scope);
+        return inScope != null && inScope.remove(key) != null;
+    }
+
+    @Override
+    public List<DocEntry> query(Scope scope, String keyPrefix) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(keyPrefix, "keyPrefix");
-        List<JsonNode> out = new ArrayList<>();
+        List<DocEntry> out = new ArrayList<>();
         for (Map.Entry<String, JsonNode> e : data.getOrDefault(scope, Map.of()).entrySet()) {
             if (e.getKey().startsWith(keyPrefix)) {
-                out.add(e.getValue());
+                out.add(new DocEntry(e.getKey(), e.getValue()));
             }
         }
         return out;
