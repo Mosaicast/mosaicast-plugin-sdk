@@ -10,6 +10,6 @@
 //   - Jackson databind: `JsonNode` is the return type of DocStore.query(...).
 
 dependencies {
-    api("org.pf4j:pf4j:3.12.0")
+    api("org.pf4j:pf4j:3.15.0")
     api("com.fasterxml.jackson.core:jackson-databind:2.17.2")
 }
