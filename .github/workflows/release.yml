@@ -97,7 +97,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Build, test, publish (skip publish if this version is already on GitHub Packages)
         env:
