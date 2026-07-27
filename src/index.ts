@@ -221,10 +221,23 @@ export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
  * (ARCHITECTURE §7.5). This is the **entire** interface a plugin author must learn.
  */
 export interface PluginContext {
-  /** The scope this plugin instance is mounted in. */
+  /**
+   * The scope this plugin instance is mounted in. For the `episode` scope, `scope.id` is the episode's
+   * **public slug** (e.g. `the-sample-cast-s01e06`) — the same id used in its URL and as the doc-store
+   * partition (`data/episode/{slug}/…`), not the internal UUID.
+   */
   scope: Scope;
-  /** The `EpisodeRef` ids in scope, resolved (and access-filtered) by the host. */
+  /**
+   * The episode ids in scope, resolved (and access-filtered) by the host — the public **slugs** (the same
+   * values used in URLs and doc-store paths). Pair with {@link episodeLabels} for display.
+   */
   episodes: string[];
+  /**
+   * Human-readable labels for {@link episodes}, keyed by slug (e.g. `"S01E06 · The Lighthouse…"`). The host
+   * builds them from the feed's season/episode + title; use them in pickers so users see titles, not slugs.
+   * Optional: absent (or partial) when the host does not provide a label for a given episode.
+   */
+  episodeLabels?: Record<string, string>;
   /** Present on the `episode` scope: lifecycle status of the current episode. */
   episode?: { status: 'PLANNED' | 'PUBLISHED' | 'WITHDRAWN' };
   /** The signed-in user, or `null` for anonymous visitors. */
