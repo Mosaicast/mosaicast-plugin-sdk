@@ -11,6 +11,7 @@
  */
 
 import type {
+  ConsentApi,
   FilterState,
   LogLevel,
   PluginApiClient,
@@ -47,6 +48,9 @@ export interface MockApiClient extends PluginApiClient {
   responses: Record<string, unknown>;
 }
 
+/** The unsubscribe returned by the inert `onChange` doubles — there is nothing to detach. */
+const noop = (): void => {};
+
 function makeMockApi(responses: Record<string, unknown>): MockApiClient {
   const calls: RecordedCall[] = [];
   const resolve = (method: RecordedCall['method'], path: string, body?: unknown): Promise<never> => {
@@ -63,6 +67,85 @@ function makeMockApi(responses: Record<string, unknown>): MockApiClient {
     delete: (path) => resolve('delete', path),
   };
   return api;
+}
+
+/** A {@link ConsentApi} whose grants a test can drive. */
+export interface MockConsent extends ConsentApi {
+  /** Grants a category and notifies subscribers. Granting an already-granted category does nothing. */
+  grant(category: string): void;
+  /** Withdraws a category and notifies subscribers, as the host's settings page can mid-session. */
+  revoke(category: string): void;
+  /** Every category passed to {@link ConsentApi.request}, in order. */
+  readonly requests: string[];
+  /**
+   * What {@link ConsentApi.request} resolves with — i.e. what the visitor decides.
+   *
+   * `false` by default: the visitor says no. Set it to `true` to test the accepted path, which also
+   * grants the category as the host would.
+   */
+  autoGrantOnRequest: boolean;
+}
+
+/**
+ * Builds a {@link ConsentApi} for tests, **denying everything** unless told otherwise.
+ *
+ * Deny is the default on purpose. The host denies until granted, so a component written against a
+ * permissive mock is a component whose placeholder path was never exercised — and that path is the entire
+ * point of the consent contract (ARCHITECTURE §12.5).
+ *
+ * @param initial categories granted from the start
+ * @returns a consent double with `grant`/`revoke` and a recorded `requests` list
+ *
+ * @example
+ * ```ts
+ * const consent = makeMockConsent();
+ * const ctx = makeMockCtx({ consent });
+ *
+ * mount(ctx);                      // renders the click-to-load placeholder
+ * consent.autoGrantOnRequest = true;
+ * await clickPlaceholder();
+ * expect(consent.requests).toEqual(['analytics']);
+ *
+ * consent.revoke('analytics');     // fires onChange; the component should go back to the placeholder
+ * ```
+ */
+export function makeMockConsent(initial: string[] = []): MockConsent {
+  const granted = new Set(initial);
+  const subscribers = new Set<() => void>();
+  const requests: string[] = [];
+  const notify = (): void => {
+    subscribers.forEach((cb) => cb());
+  };
+
+  return {
+    requests,
+    autoGrantOnRequest: false,
+    has: (category) => granted.has(category),
+    granted: () => [...granted],
+    request(category) {
+      requests.push(category);
+      if (this.autoGrantOnRequest && !granted.has(category)) {
+        granted.add(category);
+        notify();
+      }
+      return Promise.resolve(granted.has(category));
+    },
+    grant(category) {
+      if (!granted.has(category)) {
+        granted.add(category);
+        notify();
+      }
+    },
+    revoke(category) {
+      if (granted.delete(category)) {
+        notify();
+      }
+    },
+    onChange(cb) {
+      subscribers.add(cb);
+      return () => subscribers.delete(cb);
+    },
+  };
 }
 
 /** Default theme tokens (neutral light values) used when a test does not override them. */
@@ -100,7 +183,8 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api'>> {
 /**
  * Builds a {@link PluginContext} wired with in-memory doubles for unit tests.
  *
- * Defaults: `site` scope, no episodes, anonymous user, all consent denied, empty filter, a player
+ * Defaults: `site` scope, no episodes, anonymous user, **all consent denied** (a {@link makeMockConsent}
+ * double — pass your own to drive grants), empty filter, a player
  * parked at 0s, empty route, `en` locale, unknown progress, and {@link DEFAULT_THEME}. Pass overrides to
  * change any field; the returned `api` is a {@link MockApiClient} recording every call, and `logs`
  * collects every `ctx.log(...)`.
@@ -127,11 +211,13 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     log: (level, message) => {
       logs.push({ level, message });
     },
-    consent: { has: () => false, onChange: () => {} },
-    filter: { current: () => filter, onChange: () => {} },
-    player: { currentTime: () => 0, seekTo: () => {}, on: () => {} },
-    route: { path: '', onChange: () => {} },
-    locale: { current: () => 'en', onChange: () => {} },
+    consent: makeMockConsent(),
+    // The no-op handles still return a working unsubscribe, so a component that detaches on cleanup
+    // behaves the same against the mock as against the host.
+    filter: { current: () => filter, onChange: () => noop },
+    player: { currentTime: () => 0, seekTo: () => {}, on: () => noop },
+    route: { path: '', onChange: () => noop },
+    locale: { current: () => 'en', onChange: () => noop },
     progress: { get: () => Promise.resolve(null) },
     theme: DEFAULT_THEME,
   };

@@ -234,6 +234,87 @@ export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
 }
 
 /**
+ * The consent gate for anything that stores data on the visitor's device or talks to a third party
+ * (ARCHITECTURE §12.5).
+ *
+ * Consent is **denied until granted**. The core itself runs banner-free — strictly necessary cookies need
+ * no consent — so the only reason a visitor ever sees a consent prompt is a plugin that asked for one.
+ * Treat that as the cost it is.
+ *
+ * The categories are declared per service in your manifest's `consent.services[]` (`necessary`,
+ * `functional`, `analytics`, or one you declare yourself). The host builds the cookie notice from those
+ * declarations, and the `hosts` you list there are also the CSP allow-list: **an origin you did not
+ * declare stays blocked even after consent is given.**
+ *
+ * @example The click-to-load placeholder this exists for
+ * ```ts
+ * function render({ ctx, root }: { ctx: PluginContext; root: HTMLElement }) {
+ *   if (ctx.consent.has('analytics')) {
+ *     mountChart(root);
+ *     return;
+ *   }
+ *
+ *   const button = document.createElement('button');
+ *   button.textContent = 'Load chart (sets a cookie)';
+ *   button.onclick = async () => {
+ *     if (await ctx.consent.request('analytics')) mountChart(root);
+ *   };
+ *   root.append(button);
+ *
+ *   // Someone may flip the purpose in the settings page while this is mounted.
+ *   return ctx.consent.onChange(() => rerender());
+ * }
+ * ```
+ */
+export interface ConsentApi {
+  /**
+   * Whether the visitor has granted a consent category.
+   *
+   * Check it before every load of a consent-requiring resource, not once at startup — consent can be
+   * withdrawn mid-session from the host's settings page.
+   *
+   * @param category the consent category, as declared on a service in your manifest
+   * @returns `true` if the category is currently granted
+   */
+  has(category: string): boolean;
+  /**
+   * Every category currently granted.
+   *
+   * For rendering a summary ("statistics: on, embeds: off"). Prefer {@link has} for a single gate.
+   *
+   * @returns the granted category names, in no guaranteed order
+   */
+  granted(): string[];
+  /**
+   * Asks the visitor to grant a category, and resolves with their answer.
+   *
+   * The host opens its consent settings for this one purpose and resolves once the visitor decides;
+   * dismissing it resolves `false`. **Call this from a user gesture** — the click on your placeholder —
+   * and never on mount: an unprompted call turns a banner-free site into one with a banner, which is
+   * exactly what §12.5 is arranged to avoid.
+   *
+   * Resolving `true` means the category is granted from that moment on; it does not load anything for
+   * you. Load the resource yourself afterwards.
+   *
+   * @param category the consent category to ask for
+   * @returns whether the category is granted after the visitor decided
+   */
+  request(category: string): Promise<boolean>;
+  /**
+   * Subscribes to consent changes.
+   *
+   * Fires on **every** change to any category — including one made in the settings page while your
+   * component is mounted, and including a withdrawal. It carries no payload: re-read {@link has} or
+   * {@link granted} for the current state.
+   *
+   * @param cb called after each change
+   * @returns an {@link Unsubscribe} — return it from your render callback so the subscription dies with
+   *          the component
+   */
+  onChange(cb: () => void): Unsubscribe;
+}
+
+/**
  * Everything a frontend plugin is given, set by the host on the mounted custom element
  * (ARCHITECTURE §7.5). This is the **entire** interface a plugin author must learn.
  */
@@ -286,16 +367,39 @@ export interface PluginContext {
    * ```
    */
   log(level: LogLevel, message: string): void;
-  /** Cookie/consent gate for third-party resources (ARCHITECTURE §12.5). */
-  consent: { has(cat: string): boolean; onChange(cb: () => void): void };
-  /** Read-only access to the host's URL filter state (ARCHITECTURE §6.1). */
-  filter: { current(): FilterState; onChange(cb: (f: FilterState) => void): void };
-  /** Player position + control, for sync plugins (ARCHITECTURE §6.5). */
-  player: { currentTime(): number; seekTo(s: number): void; on(ev: string, cb: (...args: unknown[]) => void): void };
-  /** The subpath under `/p/<pluginId>/`, for deep-linkable plugin content (ARCHITECTURE §6.4). */
-  route: { path: string; onChange(cb: (p: string) => void): void };
-  /** The active UI locale (ARCHITECTURE §12.7). */
-  locale: { current(): string; onChange(cb: (l: string) => void): void };
+  /** Cookie/consent gate for third-party resources — see {@link ConsentApi} (ARCHITECTURE §12.5). */
+  consent: ConsentApi;
+  /**
+   * Read-only access to the host's URL filter state (ARCHITECTURE §6.1).
+   *
+   * Plugins *consume* filters, they never define them: the axes (season, tags, sorting) belong to the
+   * host and live in the URL. `onChange` returns an {@link Unsubscribe}.
+   */
+  filter: { current(): FilterState; onChange(cb: (f: FilterState) => void): Unsubscribe };
+  /**
+   * Player position + control, for sync plugins (ARCHITECTURE §6.5).
+   *
+   * `on` returns an {@link Unsubscribe} — player events outlive a single render, so detaching matters
+   * here more than anywhere else on this context.
+   */
+  player: {
+    currentTime(): number;
+    seekTo(s: number): void;
+    on(ev: string, cb: (...args: unknown[]) => void): Unsubscribe;
+  };
+  /**
+   * The subpath under `/p/<pluginId>/`, for deep-linkable plugin content (ARCHITECTURE §6.4).
+   *
+   * `onChange` returns an {@link Unsubscribe}.
+   */
+  route: { path: string; onChange(cb: (p: string) => void): Unsubscribe };
+  /**
+   * The active UI locale (ARCHITECTURE §12.7).
+   *
+   * `onChange` returns an {@link Unsubscribe}. {@link createPluginI18n} subscribes to this for you and
+   * hands back a `dispose` to undo it.
+   */
+  locale: { current(): string; onChange(cb: (l: string) => void): Unsubscribe };
   /** Core listening progress in seconds, or `null` if unknown (ARCHITECTURE §6.5). */
   progress: { get(episodeId: string): Promise<number | null> };
   /** Host theme tokens, also injected as `--mc-*` CSS custom properties. */
@@ -425,6 +529,14 @@ export interface PluginI18n {
   t(key: string, params?: Record<string, string | number>): string;
   /** The currently active locale code. */
   readonly locale: string;
+  /**
+   * Detaches the translator from `ctx.locale`.
+   *
+   * A translator subscribes to locale changes for its whole life. Call this when the component that owns
+   * it goes away — from the cleanup callback your render returns — or the subscription keeps a dead
+   * translator alive.
+   */
+  dispose(): void;
 }
 
 const SOURCE_LOCALE = 'en';
@@ -445,6 +557,9 @@ function interpolate(template: string, params?: Record<string, string | number>)
  * change — the same convention as the shell, no extra i18n library required. English (`en`) is the
  * source language and the fallback.
  *
+ * The translator subscribes to `locale.onChange` for as long as it lives — call {@link PluginI18n.dispose}
+ * from your render's cleanup callback when the component goes away.
+ *
  * @param catalogs catalogs keyed by locale code
  * @param locale   the host locale handle, i.e. `ctx.locale`; its `onChange` drives re-selection
  * @returns a translator whose `t` and `locale` reflect the currently active locale
@@ -454,13 +569,18 @@ export function createPluginI18n(
   locale: PluginContext['locale'],
 ): PluginI18n {
   let active = locale.current();
-  locale.onChange((l) => {
+  const unsubscribe = locale.onChange((l) => {
     active = l;
   });
 
   return {
     get locale() {
       return active;
+    },
+    dispose() {
+      // Optional call: a host built against 0.3.x returns nothing here, and a translator that cannot be
+      // disposed is better than one that throws while a component is tearing down.
+      unsubscribe?.();
     },
     t(key, params) {
       const template =

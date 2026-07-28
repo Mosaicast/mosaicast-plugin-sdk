@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 The Mosaicast Authors
 
-import { describe, expect, it } from 'vitest';
-import { DEFAULT_THEME, makeMockCtx } from './testing.js';
+import { describe, expect, it, vi } from 'vitest';
+import { DEFAULT_THEME, makeMockConsent, makeMockCtx } from './testing.js';
 
 describe('makeMockCtx', () => {
   it('produces a full context with sensible defaults', () => {
@@ -56,6 +56,36 @@ describe('makeMockCtx', () => {
     ]);
   });
 
+  it('denies consent by default, including request()', async () => {
+    const ctx = makeMockCtx();
+
+    expect(ctx.consent.has('analytics')).toBe(false);
+    expect(ctx.consent.granted()).toEqual([]);
+    // The visitor says no unless the test says otherwise — the placeholder path stays exercised.
+    await expect(ctx.consent.request('analytics')).resolves.toBe(false);
+    expect(ctx.consent.has('analytics')).toBe(false);
+  });
+
+  it('returns a working unsubscribe from every onChange', () => {
+    const ctx = makeMockCtx();
+    const off = [
+      ctx.consent.onChange(() => {}),
+      ctx.filter.onChange(() => {}),
+      ctx.route.onChange(() => {}),
+      ctx.locale.onChange(() => {}),
+      ctx.player.on('timeupdate', () => {}),
+    ];
+
+    // Not just typed as callable — actually callable, and idempotent.
+    off.forEach((unsubscribe) => {
+      expect(typeof unsubscribe).toBe('function');
+      expect(() => {
+        unsubscribe();
+        unsubscribe();
+      }).not.toThrow();
+    });
+  });
+
   it('leaves episodeLabels absent unless supplied', () => {
     expect(makeMockCtx().episodeLabels).toBeUndefined();
 
@@ -64,5 +94,53 @@ describe('makeMockCtx', () => {
       episodeLabels: { 'the-sample-cast-s01e06': 'S01E06 · The Lighthouse' },
     });
     expect(ctx.episodeLabels?.['the-sample-cast-s01e06']).toBe('S01E06 · The Lighthouse');
+  });
+});
+
+describe('makeMockConsent', () => {
+  it('starts denied unless seeded', () => {
+    expect(makeMockConsent().has('analytics')).toBe(false);
+
+    const seeded = makeMockConsent(['functional']);
+    expect(seeded.has('functional')).toBe(true);
+    expect(seeded.granted()).toEqual(['functional']);
+  });
+
+  it('records requests and resolves with what the visitor decides', async () => {
+    const consent = makeMockConsent();
+
+    await expect(consent.request('analytics')).resolves.toBe(false);
+
+    consent.autoGrantOnRequest = true;
+    await expect(consent.request('analytics')).resolves.toBe(true);
+
+    expect(consent.requests).toEqual(['analytics', 'analytics']);
+    expect(consent.has('analytics')).toBe(true);
+  });
+
+  it('notifies subscribers on grant, revoke and an accepted request', async () => {
+    const consent = makeMockConsent();
+    const cb = vi.fn();
+    consent.onChange(cb);
+
+    consent.grant('analytics');
+    consent.grant('analytics');   // already granted — nothing changed, so nothing fires
+    consent.revoke('analytics');
+    consent.autoGrantOnRequest = true;
+    await consent.request('analytics');
+
+    expect(cb).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops delivering once unsubscribed', () => {
+    const consent = makeMockConsent();
+    const cb = vi.fn();
+
+    const off = consent.onChange(cb);
+    consent.grant('analytics');
+    off();
+    consent.revoke('analytics');
+
+    expect(cb).toHaveBeenCalledTimes(1);
   });
 });
