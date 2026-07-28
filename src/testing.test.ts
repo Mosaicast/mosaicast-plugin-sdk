@@ -43,4 +43,26 @@ describe('makeMockCtx', () => {
     const ctx = makeMockCtx();
     await expect(ctx.api.get('/nope')).resolves.toBeUndefined();
   });
+
+  it('records log calls in order', () => {
+    const ctx = makeMockCtx();
+
+    ctx.log('info', 'mounted');
+    ctx.log('warn', 'no board for ep-9');
+
+    expect(ctx.logs).toEqual([
+      { level: 'info', message: 'mounted' },
+      { level: 'warn', message: 'no board for ep-9' },
+    ]);
+  });
+
+  it('leaves episodeLabels absent unless supplied', () => {
+    expect(makeMockCtx().episodeLabels).toBeUndefined();
+
+    const ctx = makeMockCtx({
+      episodes: ['the-sample-cast-s01e06'],
+      episodeLabels: { 'the-sample-cast-s01e06': 'S01E06 · The Lighthouse' },
+    });
+    expect(ctx.episodeLabels?.['the-sample-cast-s01e06']).toBe('S01E06 · The Lighthouse');
+  });
 });

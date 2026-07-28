@@ -12,10 +12,19 @@
 
 import type {
   FilterState,
+  LogLevel,
   PluginApiClient,
   PluginContext,
   ThemeTokens,
 } from './index.js';
+
+/** One recorded {@link PluginContext.log} call. */
+export interface LogRecord {
+  /** The severity it was logged at. */
+  level: LogLevel;
+  /** The logged message. */
+  message: string;
+}
 
 /** One recorded {@link MockApiClient} call. */
 export interface RecordedCall {
@@ -68,6 +77,18 @@ export const DEFAULT_THEME: ThemeTokens = {
   border: '#dddddd',
 };
 
+/** A {@link PluginContext} wired for tests: the mock `api` and the recorded `log` calls are reachable. */
+export type MockPluginContext = PluginContext & {
+  /** The recording client every `api` call goes through. */
+  api: MockApiClient;
+  /**
+   * Every {@link PluginContext.log} call, in order.
+   *
+   * Stays empty if you override `log` yourself — the recording lives in the default implementation.
+   */
+  logs: LogRecord[];
+};
+
 /** Overrides accepted by {@link makeMockCtx}. */
 export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api'>> {
   /** Canned responses for the mock `api`, keyed as described on {@link MockApiClient.responses}. */
@@ -81,21 +102,31 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api'>> {
  *
  * Defaults: `site` scope, no episodes, anonymous user, all consent denied, empty filter, a player
  * parked at 0s, empty route, `en` locale, unknown progress, and {@link DEFAULT_THEME}. Pass overrides to
- * change any field; the returned `api` is a {@link MockApiClient} recording every call.
+ * change any field; the returned `api` is a {@link MockApiClient} recording every call, and `logs`
+ * collects every `ctx.log(...)`.
+ *
+ * `episodeLabels` is deliberately **absent** by default. It is optional on the real context and the host
+ * may supply it partially, so a component that renders labels has to survive their absence — the mock
+ * makes you face that unless you pass labels in.
  *
  * @param overrides partial context plus optional `apiResponses`
- * @returns a full context whose `api` is a {@link MockApiClient}
+ * @returns a full context whose `api` is a {@link MockApiClient} and whose `log` calls are recorded
  */
-export function makeMockCtx(overrides: MockCtxOverrides = {}): PluginContext & { api: MockApiClient } {
+export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext {
   const { apiResponses, api, ...rest } = overrides;
   const mockApi = api ?? makeMockApi(apiResponses ?? {});
   const filter: FilterState = rest.filter?.current() ?? {};
+  const logs: LogRecord[] = [];
 
-  const base: PluginContext & { api: MockApiClient } = {
+  const base: MockPluginContext = {
     scope: { type: 'site', id: 'main' },
     episodes: [],
     user: null,
     api: mockApi,
+    logs,
+    log: (level, message) => {
+      logs.push({ level, message });
+    },
     consent: { has: () => false, onChange: () => {} },
     filter: { current: () => filter, onChange: () => {} },
     player: { currentTime: () => 0, seekTo: () => {}, on: () => {} },
@@ -105,5 +136,5 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): PluginContext & {
     theme: DEFAULT_THEME,
   };
 
-  return { ...base, ...rest, api: mockApi };
+  return { ...base, ...rest, api: mockApi, logs };
 }

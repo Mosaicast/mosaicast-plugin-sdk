@@ -23,6 +23,23 @@ export const PLATFORM_API_VERSION = '0.3.0' as const;
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
 
+/**
+ * The severity of a {@link PluginContext.log} call.
+ *
+ * Mirrors the SLF4J levels a plugin backend gets through the Java `ctx.logger()`, minus `trace` — a
+ * browser has no use for it, and the host would drop it anyway.
+ */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * Unsubscribes a callback registered through one of the `onChange` handles.
+ *
+ * Call it when your component tears down — the cleanup callback returned from your
+ * {@link MosaicastRender} is the natural place. A subscription that outlives its render keeps a
+ * reference to a detached DOM tree and keeps firing into it.
+ */
+export type Unsubscribe = () => void;
+
 /** The level plus concrete entity a view is scoped to (ARCHITECTURE §6.1). */
 export interface Scope {
   /** The scope level. */
@@ -248,6 +265,27 @@ export interface PluginContext {
    * uses via `ctx.store()`. See {@link PluginApiClient} for the endpoint shape and access rules.
    */
   api: PluginApiClient;
+  /**
+   * Writes one line to the host's log, attributed to this plugin.
+   *
+   * The counterpart of the backend's `ctx.logger()`, and the **only** supported way for a frontend
+   * component to log to the host — do not POST to `/api/plugins/{id}/log` through {@link api}, which is a
+   * data endpoint. The host attributes the entry to your plugin, stores `info` and above, surfaces `warn`
+   * and above in the admin log viewer, and rate-limits this path: a render loop logging per frame will be
+   * throttled, not stored.
+   *
+   * Messages are read by site operators, not by you — they land next to core's own output. Keep them
+   * short, and keep personal data out of them.
+   *
+   * @param level   the severity
+   * @param message the message; already-formatted, since there is no placeholder syntax here
+   *
+   * @example
+   * ```ts
+   * ctx.log('warn', `no board for episode ${ctx.scope.id}`);
+   * ```
+   */
+  log(level: LogLevel, message: string): void;
   /** Cookie/consent gate for third-party resources (ARCHITECTURE §12.5). */
   consent: { has(cat: string): boolean; onChange(cb: () => void): void };
   /** Read-only access to the host's URL filter state (ARCHITECTURE §6.1). */

@@ -24,10 +24,14 @@ import java.util.Objects;
  */
 public final class FakePluginContext implements PluginContext {
 
+    /** The logger name the host uses for a plugin; this fake stands in for a concrete plugin id. */
+    private static final String LOGGER_NAME = "plugin.test";
+
     private final InMemoryDocStore store;
     private final SchemaStore schema;
     private final PluginConfig config;
     private final FeedAccess feeds;
+    private final RecordingLogger logger = new RecordingLogger(LOGGER_NAME);
     private int scheduledCount;
 
     /** Creates a context with an empty doc store, empty config, empty feeds and no schema. */
@@ -68,6 +72,20 @@ public final class FakePluginContext implements PluginContext {
     @Override
     public FeedAccess feeds() {
         return feeds;
+    }
+
+    /**
+     * A {@link RecordingLogger} named {@code plugin.test}, so a test can assert on what the plugin logged
+     * rather than watching it scroll past.
+     *
+     * <p>The return type is narrowed from {@link org.slf4j.Logger} on purpose: {@code ctx.logger().events()}
+     * needs no cast.
+     *
+     * @return the recording logger; never {@code null}
+     */
+    @Override
+    public RecordingLogger logger() {
+        return logger;
     }
 
     /**
