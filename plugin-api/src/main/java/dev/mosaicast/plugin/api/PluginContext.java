@@ -72,6 +72,11 @@ public interface PluginContext {
     /**
      * The relational store for plugins that declare a schema in their manifest (ARCHITECTURE §7.6).
      *
+     * <p>Most plugins declare none and get {@code null} here — {@link #store()} is the default and covers
+     * nearly everything. Declare a schema when you need what a JSON document cannot give you: full-text
+     * search, revisions, backlinks. The platform provisions and drops the tables; you address declared
+     * entities by name and never write DDL. See {@link SchemaStore} for the surface.
+     *
      * @return the schema store, or {@code null} when the manifest declares no schema (most plugins)
      */
     SchemaStore schema();
