@@ -3,12 +3,13 @@
 
 package dev.mosaicast.plugin.testkit;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.mosaicast.plugin.api.PluginConfig;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * A map-backed {@link PluginConfig} for testing (ARCHITECTURE §13.5).
@@ -18,7 +19,7 @@ import java.util.Optional;
  */
 public final class MapPluginConfig implements PluginConfig {
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = JsonMapper.builder().build();
     private final Map<String, Object> values;
 
     /** Creates an empty config. */
