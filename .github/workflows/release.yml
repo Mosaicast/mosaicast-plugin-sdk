@@ -98,6 +98,11 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+        with:
+          # See ci.yml: v6 caching is a proprietary component under Gradle's Terms of Use, and it is not
+          # loaded when caching is disabled. This job publishes with `packages: write`, so it is the last
+          # place to add a dependency we haven't chosen deliberately.
+          cache-disabled: true
 
       - name: Build, test, publish (skip publish if this version is already on GitHub Packages)
         env:

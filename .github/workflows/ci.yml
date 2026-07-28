@@ -23,6 +23,12 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
+        with:
+          # Caching in v6+ is `gradle-actions-caching`, a proprietary component under Gradle's Terms of
+          # Use rather than the action's MIT licence. Gradle states it "is not loaded or used when caching
+          # is disabled", so we disable it: this build is ~25s and the cache is a convenience, not a need.
+          # Please don't switch this on without a deliberate licensing decision — see CONTRIBUTING.md.
+          cache-disabled: true
 
       - name: Build + test
         run: ./gradlew build --no-daemon --stacktrace
