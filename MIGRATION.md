@@ -114,8 +114,25 @@ Ignoring the return value still compiles, so nothing breaks; take advantage of i
 ```
 
 **This breaks you only if you hand-roll a context** — a test fake written by hand rather than with
-`makeMockCtx`, or anything else implementing `PluginContext`. Those must now return a function from every
-`onChange`. Switching to `makeMockCtx` is the cheaper fix.
+`makeMockCtx`, or anything else implementing `PluginContext`. Two things then fail to compile:
+
+```diff
+-  consent: { has: () => true, onChange: () => {} },
++  consent: { has: () => true, granted: () => ['analytics'],
++             request: () => Promise.resolve(true), onChange: () => () => {} },
+-  route:   { path: 'highlight/ep-1', onChange: () => {} },
++  route:   { path: 'highlight/ep-1', onChange: () => () => {} },
+```
+
+- every `onChange` (and `player.on`) must return a function, and
+- a hand-rolled `consent` must also supply `granted` and `request`, since it is now a full `ConsentApi`.
+
+Switching those fakes to `makeMockCtx` — overriding only the fields the test cares about — is the cheaper
+fix and survives the next contract change. `makeMockConsent()` gives you a consent double with
+`grant`/`revoke` if a test needs to flip a decision mid-run.
+
+> Measured on `mosaicast-plugin-sample`: the entire migration was **six lines, all of them in one test
+> file**. Its production frontend and its whole Java backend compiled against `0.4.0` untouched.
 
 **`createPluginI18n` gained `dispose()`.** It subscribes to locale changes for its whole life; call
 `dispose()` when the component owning it goes away. Previously that subscription leaked, so this is a
