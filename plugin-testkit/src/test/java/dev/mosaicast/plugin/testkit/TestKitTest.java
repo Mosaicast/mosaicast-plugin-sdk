@@ -66,7 +66,7 @@ class TestKitTest {
 
         assertEquals(1, entries.size());
         assertEquals("vote:alice", entries.get(0).key());
-        assertEquals("alice", entries.get(0).value().get("user").asText());
+        assertEquals("alice", entries.get(0).value().get("user").stringValue());
     }
 
     @Test

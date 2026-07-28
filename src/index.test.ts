@@ -16,7 +16,7 @@ import { makeMockCtx } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.3.0');
+    expect(PLATFORM_API_VERSION).toBe('0.4.0');
   });
 });
 
@@ -91,11 +91,21 @@ describe('createPluginI18n', () => {
     de: { greeting: 'Hallo {{name}}' },
   };
 
+  /** Models the host handle, unsubscribe included, so `dispose` has something real to detach from. */
   function localeHandle(initial: string) {
     let cb: ((l: string) => void) | undefined;
     return {
-      handle: { current: () => initial, onChange: (fn: (l: string) => void) => (cb = fn) },
+      handle: {
+        current: () => initial,
+        onChange: (fn: (l: string) => void) => {
+          cb = fn;
+          return () => {
+            cb = undefined;
+          };
+        },
+      },
       change: (l: string) => cb?.(l),
+      subscribed: () => cb !== undefined,
     };
   }
 
@@ -120,5 +130,18 @@ describe('createPluginI18n', () => {
     change('de');
     expect(i18n.locale).toBe('de');
     expect(i18n.t('greeting', { name: 'X' })).toBe('Hallo X');
+  });
+
+  it('detaches from the locale handle on dispose', () => {
+    const { handle, change, subscribed } = localeHandle('en');
+    const i18n = createPluginI18n(catalogs, handle);
+    expect(subscribed()).toBe(true);
+
+    i18n.dispose();
+
+    expect(subscribed()).toBe(false);
+    change('de');
+    // A disposed translator stops tracking rather than following a locale it no longer belongs to.
+    expect(i18n.locale).toBe('en');
   });
 });

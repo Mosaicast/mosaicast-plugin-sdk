@@ -4,6 +4,7 @@
 package dev.mosaicast.plugin.api;
 
 import java.time.Duration;
+import org.slf4j.Logger;
 
 /**
  * The host-provided handle a plugin backend uses to reach everything it is allowed to touch
@@ -71,6 +72,11 @@ public interface PluginContext {
     /**
      * The relational store for plugins that declare a schema in their manifest (ARCHITECTURE §7.6).
      *
+     * <p>Most plugins declare none and get {@code null} here — {@link #store()} is the default and covers
+     * nearly everything. Declare a schema when you need what a JSON document cannot give you: full-text
+     * search, revisions, backlinks. The platform provisions and drops the tables; you address declared
+     * entities by name and never write DDL. See {@link SchemaStore} for the surface.
+     *
      * @return the schema store, or {@code null} when the manifest declares no schema (most plugins)
      */
     SchemaStore schema();
@@ -88,6 +94,30 @@ public interface PluginContext {
      * @return the feed access; never {@code null}
      */
     FeedAccess feeds();
+
+    /**
+     * The plugin's logger, already named by the host as {@code plugin.<pluginId>}.
+     *
+     * <p>An ordinary SLF4J {@link Logger}, deliberately: plugin authors already know the API, and
+     * parameterised messages ({@code log.info("indexed {} pages", n)}) and throwable overloads come free.
+     *
+     * <p><strong>Attribution rides in the logger name</strong>, which is why the host hands you a named
+     * logger instead of the contract offering a {@code log(level, message)} method. The name travels with
+     * every event, so output is still attributed to your plugin when it comes from a thread you started
+     * yourself or from an {@link #onSchedule(Duration, Runnable)} task — exactly the places where a
+     * thread-local MDC arrives empty.
+     *
+     * <p>The host owns what happens next: it persists {@code INFO} and above, surfaces {@code WARN} and
+     * above in the admin log viewer, and rate-limits this path. Log what an operator needs to diagnose
+     * your plugin; a tight loop logging per item will be throttled, not stored.
+     *
+     * <p>Do not build your own {@code LoggerFactory.getLogger(...)}: a logger you name yourself is not
+     * under the {@code plugin.} prefix, so the host cannot attribute it to you and it will not appear in
+     * the admin viewer as your plugin's output.
+     *
+     * @return the plugin's logger; never {@code null}
+     */
+    Logger logger();
 
     /**
      * Registers a periodic background task.

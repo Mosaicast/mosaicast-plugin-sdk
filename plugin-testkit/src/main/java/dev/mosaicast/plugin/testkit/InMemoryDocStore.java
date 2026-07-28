@@ -3,8 +3,6 @@
 
 package dev.mosaicast.plugin.testkit;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.DocStore;
 import dev.mosaicast.plugin.api.Scope;
@@ -15,6 +13,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Pattern;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * An in-memory {@link DocStore} for testing plugin backends without a database (ARCHITECTURE §13.5).
@@ -37,7 +38,7 @@ public final class InMemoryDocStore implements DocStore {
 
     /** Creates a store with a default {@link ObjectMapper}. */
     public InMemoryDocStore() {
-        this(new ObjectMapper());
+        this(JsonMapper.builder().build());
     }
 
     /**
