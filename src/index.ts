@@ -15,13 +15,33 @@
  * The plugin contract version (SemVer).
  *
  * Mirror of the Java `dev.mosaicast.plugin.api.PlatformApi.VERSION` constant and the npm package
- * version. The host rejects a plugin whose manifest `platformApi` is incompatible with this value
- * (ARCHITECTURE §7.2). **These move together — a breaking change is a major bump.**
+ * version — **these move together**, and CI fails the build if they drift.
+ *
+ * The host compares a plugin manifest's `platformApi` against this value on **`major.minor` exactly** and
+ * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
+ * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.3.0' as const;
+export const PLATFORM_API_VERSION = '0.4.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
+
+/**
+ * The severity of a {@link PluginContext.log} call.
+ *
+ * Mirrors the SLF4J levels a plugin backend gets through the Java `ctx.logger()`, minus `trace` — a
+ * browser has no use for it, and the host would drop it anyway.
+ */
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/**
+ * Unsubscribes a callback registered through one of the `onChange` handles.
+ *
+ * Call it when your component tears down — the cleanup callback returned from your
+ * {@link MosaicastRender} is the natural place. A subscription that outlives its render keeps a
+ * reference to a detached DOM tree and keeps firing into it.
+ */
+export type Unsubscribe = () => void;
 
 /** The level plus concrete entity a view is scoped to (ARCHITECTURE §6.1). */
 export interface Scope {
@@ -217,14 +237,232 @@ export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
 }
 
 /**
+ * The consent gate for anything that stores data on the visitor's device or talks to a third party
+ * (ARCHITECTURE §12.5).
+ *
+ * Consent is **denied until granted**. The core itself runs banner-free — strictly necessary cookies need
+ * no consent — so the only reason a visitor ever sees a consent prompt is a plugin that asked for one.
+ * Treat that as the cost it is.
+ *
+ * The categories are declared per service in your manifest's `consent.services[]` (`necessary`,
+ * `functional`, `analytics`, or one you declare yourself). The host builds the cookie notice from those
+ * declarations, and the `hosts` you list there are also the CSP allow-list: **an origin you did not
+ * declare stays blocked even after consent is given.**
+ *
+ * ## The decision is per category, not per service
+ *
+ * `consent.services[]` is richly per-service — `provider`, `privacyUrl`, `thirdCountryTransfer`, each
+ * `storage[]` item — but every method here takes a **category**. That asymmetry is deliberate and worth
+ * stating plainly, because the schema implies otherwise: **services describe, categories decide.** The
+ * per-service detail exists so the notice can name who stores what for how long; the thing a visitor
+ * actually toggles is the category.
+ *
+ * The consequence: if two plugins each declare a service under `analytics` with different providers, the
+ * visitor sees **one** decision listing both plugins, and granting it grants both. There is no way to
+ * consent to one provider and withhold the other. Do not build a UI that implies otherwise, and don't
+ * assume `has('analytics')` says anything about *which* provider was accepted — it says the category was.
+ *
+ * If you need a visitor to be able to accept one of your services and refuse another, declare them under
+ * **different categories** (a plugin-declared category is allowed, it just has no translated label in the
+ * shell). That is the only lever the contract gives you.
+ *
+ * ## `necessary` is never asked about
+ *
+ * `has('necessary')` is **always `true`** and the host never prompts for it — it is the category the core
+ * itself uses, and a banner-free site stays banner-free. Declaring a service as `necessary` therefore
+ * means "this loads unconditionally"; use it only for what genuinely cannot be refused, and expect
+ * `request('necessary')` to resolve `true` without showing the visitor anything.
+ *
+ * @example The click-to-load placeholder this exists for
+ * ```ts
+ * function render({ ctx, root }: { ctx: PluginContext; root: HTMLElement }) {
+ *   if (ctx.consent.has('analytics')) {
+ *     mountChart(root);
+ *     return;
+ *   }
+ *
+ *   const button = document.createElement('button');
+ *   button.textContent = 'Load chart (sets a cookie)';
+ *   button.onclick = async () => {
+ *     if (await ctx.consent.request('analytics')) mountChart(root);
+ *   };
+ *   root.append(button);
+ *
+ *   // Someone may flip the purpose in the settings page while this is mounted.
+ *   return ctx.consent.onChange(() => rerender());
+ * }
+ * ```
+ */
+export interface ConsentApi {
+  /**
+   * Whether the visitor has granted a consent category.
+   *
+   * Check it before every load of a consent-requiring resource, not once at startup — consent can be
+   * withdrawn mid-session from the host's settings page.
+   *
+   * @param category the consent category, as declared on a service in your manifest
+   * @returns `true` if the category is currently granted
+   */
+  has(category: string): boolean;
+  /**
+   * Every category currently granted.
+   *
+   * For rendering a summary ("statistics: on, embeds: off"). Prefer {@link has} for a single gate.
+   *
+   * Includes `necessary`, which is always granted. These are categories, not service ids — a granted
+   * category covers every service declared under it, across all plugins.
+   *
+   * @returns the granted category names, in no guaranteed order
+   */
+  granted(): string[];
+  /**
+   * Asks the visitor to grant a category, and resolves with their answer.
+   *
+   * The host opens its consent settings for this one purpose and resolves once the visitor decides;
+   * dismissing it resolves `false`. **Call this from a user gesture** — the click on your placeholder —
+   * and never on mount: an unprompted call turns a banner-free site into one with a banner, which is
+   * exactly what §12.5 is arranged to avoid.
+   *
+   * Resolving `true` means the category is granted from that moment on; it does not load anything for
+   * you. Load the resource yourself afterwards.
+   *
+   * ## What a caller may rely on
+   *
+   * A page full of plugin tiles will produce concurrent calls, so the contract is explicit about them:
+   *
+   * - **There is one consent surface, host-wide.** Calling this does not open a dialog of your own, and a
+   *   second call while one is already open does not open a second — it joins the one in flight. You are
+   *   asking the host to surface *its* settings, not opening a modal.
+   * - **The visitor decides every category at once.** The host's settings cover all declared categories,
+   *   so one interaction can change several. Your promise still resolves with the state of *the category
+   *   you asked for* — but other categories may have moved too, which is why {@link onChange} fires for
+   *   every change rather than only yours.
+   * - **Every call resolves exactly once, and always.** Concurrent calls are never dropped or left
+   *   pending: each resolves when the visitor completes the decision, including calls made while the
+   *   surface was already open.
+   * - **Grants are shared across plugins.** If another plugin's `request('analytics')` is what the
+   *   visitor accepted, your pending `request('analytics')` resolves `true` too — the decision is per
+   *   category and site-wide, not per plugin (see the note on granularity above).
+   *
+   * So: don't serialize your calls, don't build a queue, and don't assume the visitor only answered you.
+   * Re-read {@link has} after any change rather than caching what a request resolved with.
+   *
+   * @param category the consent category to ask for
+   * @returns whether the category is granted after the visitor decided
+   */
+  request(category: string): Promise<boolean>;
+  /**
+   * Subscribes to consent changes.
+   *
+   * Fires on **every** change to any category — including one made in the settings page while your
+   * component is mounted, and including a withdrawal. It carries no payload: re-read {@link has} or
+   * {@link granted} for the current state.
+   *
+   * @param cb called after each change
+   * @returns an {@link Unsubscribe} — return it from your render callback so the subscription dies with
+   *          the component
+   */
+  onChange(cb: () => void): Unsubscribe;
+}
+
+/**
+ * One item a service stores on the visitor's device, as declared in `plugin.json`.
+ *
+ * Part of {@link ConsentServiceDeclaration} — see the caveats there before using either type.
+ */
+export interface ConsentStorageDeclaration {
+  /** The cookie or storage key exactly as it appears on the device, e.g. `plausible_ignore`. */
+  name: string;
+  /** Where it is stored. */
+  type: 'cookie' | 'localStorage' | 'sessionStorage';
+  /** What it is for, in language a visitor reads — not an internal description. */
+  purpose: string;
+  /** How long it lasts: `session`, `persistent`, or a human duration such as `12 months`. */
+  duration: string;
+}
+
+/**
+ * The shape of one entry in your manifest's `consent.services[]`.
+ *
+ * **This type is documentation, not enforcement.** The manifest is owned and validated by the host — the
+ * SDK does not read `plugin.json`, and nothing here runs at build or load time. It exists so an author
+ * writing the declaration gets IDE completion and catches a typo before core rejects the plugin at load,
+ * which is otherwise the first feedback you get. Two consequences worth knowing:
+ *
+ * - **The host is authoritative.** If this type and core disagree, core wins. It is kept in step by hand,
+ *   so treat a mismatch as a bug in the SDK rather than permission to ignore the host.
+ * - **It is not a manifest type.** The manifest as a whole stays core-owned and the SDK will not grow one;
+ *   this covers a single nested shape that got deep enough in 0.4.0 to be worth typing.
+ *
+ * Use it by typing a literal you keep next to your manifest, or as a reference while writing the JSON:
+ *
+ * ```ts
+ * const services: ConsentServiceDeclaration[] = [{
+ *   id: 'plausible',
+ *   name: 'Plausible Analytics',
+ *   provider: 'Plausible Insights OÜ',
+ *   category: 'analytics',
+ *   privacyUrl: 'https://plausible.io/privacy',
+ *   hosts: ['https://plausible.example'],
+ *   thirdCountryTransfer: false,
+ *   storage: [{
+ *     name: 'plausible_ignore', type: 'localStorage',
+ *     purpose: 'Remembers that you opted out of statistics', duration: 'persistent',
+ *   }],
+ * }];
+ * ```
+ */
+export interface ConsentServiceDeclaration {
+  /** Stable identifier for this service within your plugin. */
+  id: string;
+  /** The service as a visitor would recognise it, e.g. `Plausible Analytics`. */
+  name: string;
+  /** The **legal entity** operating the service — the company, not your plugin. */
+  provider: string;
+  /**
+   * The consent category this service falls under, and therefore what {@link ConsentApi.has} gates on.
+   *
+   * `necessary` is never prompted for and always granted. Remember that the category — not the service —
+   * is what the visitor decides: two services sharing a category are accepted or refused together.
+   */
+  category: 'necessary' | 'functional' | 'analytics' | (string & {});
+  /** The provider's own privacy policy. */
+  privacyUrl: string;
+  /**
+   * Every origin the service is contacted on, scheme included (`https://plausible.example`).
+   *
+   * **Also the CSP allow-list**: core widens `script-src`/`frame-src`/`connect-src` by exactly these, so
+   * an undeclared or bare-hostname origin stays blocked even after consent is given.
+   */
+  hosts: string[];
+  /** Whether personal data leaves the EU/EEA. */
+  thirdCountryTransfer: boolean;
+  /** Each item the service stores on the visitor's device. */
+  storage: ConsentStorageDeclaration[];
+}
+
+/**
  * Everything a frontend plugin is given, set by the host on the mounted custom element
  * (ARCHITECTURE §7.5). This is the **entire** interface a plugin author must learn.
  */
 export interface PluginContext {
-  /** The scope this plugin instance is mounted in. */
+  /**
+   * The scope this plugin instance is mounted in. For the `episode` scope, `scope.id` is the episode's
+   * **public slug** (e.g. `the-sample-cast-s01e06`) — the same id used in its URL and as the doc-store
+   * partition (`data/episode/{slug}/…`), not the internal UUID.
+   */
   scope: Scope;
-  /** The `EpisodeRef` ids in scope, resolved (and access-filtered) by the host. */
+  /**
+   * The episode ids in scope, resolved (and access-filtered) by the host — the public **slugs** (the same
+   * values used in URLs and doc-store paths). Pair with {@link episodeLabels} for display.
+   */
   episodes: string[];
+  /**
+   * Human-readable labels for {@link episodes}, keyed by slug (e.g. `"S01E06 · The Lighthouse…"`). The host
+   * builds them from the feed's season/episode + title; use them in pickers so users see titles, not slugs.
+   * Optional: absent (or partial) when the host does not provide a label for a given episode.
+   */
+  episodeLabels?: Record<string, string>;
   /** Present on the `episode` scope: lifecycle status of the current episode. */
   episode?: { status: 'PLANNED' | 'PUBLISHED' | 'WITHDRAWN' };
   /** The signed-in user, or `null` for anonymous visitors. */
@@ -235,16 +473,60 @@ export interface PluginContext {
    * uses via `ctx.store()`. See {@link PluginApiClient} for the endpoint shape and access rules.
    */
   api: PluginApiClient;
-  /** Cookie/consent gate for third-party resources (ARCHITECTURE §12.5). */
-  consent: { has(cat: string): boolean; onChange(cb: () => void): void };
-  /** Read-only access to the host's URL filter state (ARCHITECTURE §6.1). */
-  filter: { current(): FilterState; onChange(cb: (f: FilterState) => void): void };
-  /** Player position + control, for sync plugins (ARCHITECTURE §6.5). */
-  player: { currentTime(): number; seekTo(s: number): void; on(ev: string, cb: (...args: unknown[]) => void): void };
-  /** The subpath under `/p/<pluginId>/`, for deep-linkable plugin content (ARCHITECTURE §6.4). */
-  route: { path: string; onChange(cb: (p: string) => void): void };
-  /** The active UI locale (ARCHITECTURE §12.7). */
-  locale: { current(): string; onChange(cb: (l: string) => void): void };
+  /**
+   * Writes one line to the host's log, attributed to this plugin.
+   *
+   * The counterpart of the backend's `ctx.logger()`, and the **only** supported way for a frontend
+   * component to log to the host — do not POST to `/api/plugins/{id}/log` through {@link api}, which is a
+   * data endpoint. The host attributes the entry to your plugin, stores `info` and above, surfaces `warn`
+   * and above in the admin log viewer, and rate-limits this path: a render loop logging per frame will be
+   * throttled, not stored.
+   *
+   * Messages are read by site operators, not by you — they land next to core's own output. Keep them
+   * short, and keep personal data out of them.
+   *
+   * @param level   the severity
+   * @param message the message; already-formatted, since there is no placeholder syntax here
+   *
+   * @example
+   * ```ts
+   * ctx.log('warn', `no board for episode ${ctx.scope.id}`);
+   * ```
+   */
+  log(level: LogLevel, message: string): void;
+  /** Cookie/consent gate for third-party resources — see {@link ConsentApi} (ARCHITECTURE §12.5). */
+  consent: ConsentApi;
+  /**
+   * Read-only access to the host's URL filter state (ARCHITECTURE §6.1).
+   *
+   * Plugins *consume* filters, they never define them: the axes (season, tags, sorting) belong to the
+   * host and live in the URL. `onChange` returns an {@link Unsubscribe}.
+   */
+  filter: { current(): FilterState; onChange(cb: (f: FilterState) => void): Unsubscribe };
+  /**
+   * Player position + control, for sync plugins (ARCHITECTURE §6.5).
+   *
+   * `on` returns an {@link Unsubscribe} — player events outlive a single render, so detaching matters
+   * here more than anywhere else on this context.
+   */
+  player: {
+    currentTime(): number;
+    seekTo(s: number): void;
+    on(ev: string, cb: (...args: unknown[]) => void): Unsubscribe;
+  };
+  /**
+   * The subpath under `/p/<pluginId>/`, for deep-linkable plugin content (ARCHITECTURE §6.4).
+   *
+   * `onChange` returns an {@link Unsubscribe}.
+   */
+  route: { path: string; onChange(cb: (p: string) => void): Unsubscribe };
+  /**
+   * The active UI locale (ARCHITECTURE §12.7).
+   *
+   * `onChange` returns an {@link Unsubscribe}. {@link createPluginI18n} subscribes to this for you and
+   * hands back a `dispose` to undo it.
+   */
+  locale: { current(): string; onChange(cb: (l: string) => void): Unsubscribe };
   /** Core listening progress in seconds, or `null` if unknown (ARCHITECTURE §6.5). */
   progress: { get(episodeId: string): Promise<number | null> };
   /** Host theme tokens, also injected as `--mc-*` CSS custom properties. */
@@ -374,6 +656,14 @@ export interface PluginI18n {
   t(key: string, params?: Record<string, string | number>): string;
   /** The currently active locale code. */
   readonly locale: string;
+  /**
+   * Detaches the translator from `ctx.locale`.
+   *
+   * A translator subscribes to locale changes for its whole life. Call this when the component that owns
+   * it goes away — from the cleanup callback your render returns — or the subscription keeps a dead
+   * translator alive.
+   */
+  dispose(): void;
 }
 
 const SOURCE_LOCALE = 'en';
@@ -394,6 +684,9 @@ function interpolate(template: string, params?: Record<string, string | number>)
  * change — the same convention as the shell, no extra i18n library required. English (`en`) is the
  * source language and the fallback.
  *
+ * The translator subscribes to `locale.onChange` for as long as it lives — call {@link PluginI18n.dispose}
+ * from your render's cleanup callback when the component goes away.
+ *
  * @param catalogs catalogs keyed by locale code
  * @param locale   the host locale handle, i.e. `ctx.locale`; its `onChange` drives re-selection
  * @returns a translator whose `t` and `locale` reflect the currently active locale
@@ -403,13 +696,18 @@ export function createPluginI18n(
   locale: PluginContext['locale'],
 ): PluginI18n {
   let active = locale.current();
-  locale.onChange((l) => {
+  const unsubscribe = locale.onChange((l) => {
     active = l;
   });
 
   return {
     get locale() {
       return active;
+    },
+    dispose() {
+      // Optional call: a host built against 0.3.x returns nothing here, and a translator that cannot be
+      // disposed is better than one that throws while a component is tearing down.
+      unsubscribe?.();
     },
     t(key, params) {
       const template =

@@ -7,6 +7,187 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-28
+
+Five needs had queued up behind one unavoidable break, so they ship as a single cut rather than three
+contract bumps: the host's move to Jackson 3, a `SchemaStore` that can actually be used, plugin logging,
+consent a plugin can *ask for* instead of only read, and the manifest's consent schema.
+
+**Two of the five actually force the bump** — the Jackson 3 change to `DocEntry.value()`, and the manifest
+consent schema replacement. `SchemaStore`'s query surface, `ctx.logger()`/`ctx.log()`, `consent.request()`
+and `episodeLabels` are **additions that rode along**; only the `onChange` return types make the consent
+work breaking at all, and only for callers who implement `PluginContext` themselves. Bundling them is
+cheap here because breaking is a *minor* bump pre-1.0 and plugin authors act once instead of three times —
+but "we're breaking anyway" is not a standing licence, and this note exists so the next release has to
+make the case again rather than inherit it.
+
+**Every plugin declaring `0.3.x` is rejected** the moment core runs `0.4.0` — it compares `major.minor`
+exactly. That is expected, and rejections are now visible in core's admin log viewer with their reason.
+Plugin authors: see [`MIGRATION.md`](MIGRATION.md), which is ordered so each step compiles on its own.
+
+### Changed — **BREAKING** (the contract now uses Jackson 3)
+
+- `DocEntry.value()` is `tools.jackson.databind.JsonNode`, and `plugin-api` depends on
+  `tools.jackson.core:jackson-databind:3.1.4` instead of `com.fasterxml.jackson.core:jackson-databind`.
+  `InMemoryDocStore(ObjectMapper)` moves with it. **Migration:** change the import; replace
+  `new ObjectMapper()` with `JsonMapper.builder().build()` (mappers are immutable in 3.x); drop
+  `throws JsonProcessingException` clauses, since `JacksonException` is now unchecked; replace the
+  deprecated `JsonNode.asText()` with `stringValue()`. A plugin that only uses
+  `store().get(scope, key, T.class)` and `config().get(...)` changes nothing — neither exposes a Jackson
+  type.
+
+  **Why Jackson 3 rather than a compatibility shim.** Core must move to Spring Boot 4.1 (3.4 and 3.5 are
+  both past OSS support), and Boot 4 defaults to Jackson 3. Three options were on the table:
+
+  1. *Move the contract to Jackson 3* — chosen.
+  2. *Keep Jackson 2 in the contract, convert at the PF4J boundary.* Rejected. Plugins compile
+     `compileOnly` against `plugin-api` and load **parent-first in-process**, so at runtime a plugin gets
+     whatever `JsonNode` the host loaded. Compiling against Jackson 2 while the host runs Jackson 3 does
+     not shrink the blast radius — it turns a compile error into a runtime `NoClassDefFoundError` in
+     someone else's plugin. Making it real means core keeps `spring-boot-jackson2` and databind 2.21.4 on
+     the plugin classloader; Boot 4.1 does ship that compat module, so it is possible, but it is a
+     migration aid rather than a destination, and ARCHITECTURE §7.1 already names PF4J classloading
+     inside a Boot fat JAR as *the* known rough edge of this system. Two databind stacks and two
+     `ObjectMapper` configurations behind one contract is the wrong place to spend that budget.
+  3. *Drop Jackson from the contract entirely* (a string, or an SDK-owned tree type). Right in principle,
+     **deliberately deferred**: a string is re-parsed with the host's Jackson anyway, so the dependency
+     would be hidden rather than removed, and an SDK-owned JSON tree is a maintenance burden forever.
+     Meanwhile the escape hatch is documented — `DocStore.get`, `PluginConfig.get` and the new
+     `SchemaStore` all deserialize into your own types and never expose a node, so only `DocStore.query`
+     hands you one. **This is a compromise with an end date, not a settled design:** naming the host's
+     JSON library in the contract means a future change of that library forces another break on plugins
+     for a reason unrelated to plugin code. Removing it is tracked in
+     [#28](https://github.com/Mosaicast/mosaicast-plugin-sdk/issues/28), milestone **1.0.0** — it has to be
+     resolved before the contract stabilises, since afterwards the same fix costs a major bump.
+
+  `0.4.0` is a hard break regardless, so the cost of bundling this here is one import line per file that
+  touches `DocEntry.value()`. Deferring it means paying the same cost again at `0.5.0`. The decision was
+  communicated to core before release in Mosaicast/mosaicast-core#45.
+
+### Added — `SchemaStore` has a usable surface
+
+`SchemaStore` exposed `namespace()` and nothing else, so a plugin granted namespaced tables had no way to
+read or write them — which is why core still rejected `storage: "schema"` outright. ARCHITECTURE §7.6 has
+declared the feature since v1 with nothing behind it. It now has:
+
+- `entities()`, `find(entity, id, type)`, `select(entity, criteria, type)`,
+  `search(entity, field, text, criteria, type)`, `count(entity, criteria)`, `insert(entity, values)`,
+  `update(entity, id, values)`, `delete(entity, criteria)`.
+- `Criteria` — an immutable builder: `where`/`and` over `EQ NE LT LTE GT GTE IN LIKE IS_NULL IS_NOT_NULL`,
+  plus `orderBy`, `limit`, `offset`.
+- `FakeSchemaStore` in the test kit, enforcing the same declaration the host does.
+
+Everything is addressed by **declared entity and field name — never SQL, never a table name**. That is the
+scoping guarantee: reaching another plugin's tables or core's is not blocked, it is inexpressible. The
+host resolves the entity to its provisioned table, validates field names against the manifest, and binds
+every value as a JDBC parameter — implementable over plain JDBC, no `DataSource` handed out. `search`
+is on the interface deliberately: full-text is *the* reason a plugin declares a schema, and omitting it
+would have shipped another unusable feature.
+
+**Predicates combine with AND only.** A flat list mixing AND and OR is ambiguous, nothing the platform
+provisions needs disjunction today, and it can be added compatibly later. `FakeSchemaStore.search` is a
+substring match, not Postgres FTS — no stemming, no ranking; assert on which rows come back, not their
+order.
+
+### Added — plugin logging
+
+- Java: `PluginContext.logger()` returns an `org.slf4j.Logger` the host has already named
+  `plugin.<pluginId>`; `slf4j-api:2.0.18` becomes an `api` dependency of `plugin-api` (precedent:
+  jackson-databind). Plugins keep it *provided* and resolve to the host's copy.
+- TypeScript: `ctx.log(level, message)` with `LogLevel = 'debug' | 'info' | 'warn' | 'error'`, so frontend
+  components stop POSTing to `/api/plugins/{id}/log` through raw `ctx.api`.
+- Test kit: `RecordingLogger` (formatted messages, throwable captured separately) behind a covariant
+  `FakePluginContext.logger()`; `makeMockCtx` collects `ctx.logs`.
+
+An SLF4J `Logger` rather than a bespoke `log(level, message)` because authors already know the API and
+parameterised messages and throwables come free — but the deciding reason is that **attribution rides in
+the logger name**. The name travels with the event, so output is still attributed to the plugin when it
+logs from its own thread or an `onSchedule` task, where a thread-local MDC arrives empty. Core `0.5.7`
+already captures this name pattern and rate-limits the path.
+
+### Changed — **BREAKING** (frontend `ctx`)
+
+- `ctx.consent` is now a documented `ConsentApi`: **`request(category): Promise<boolean>`** (the host
+  opens its settings for that one purpose and resolves with the answer — call it from a user gesture, the
+  click-to-load placeholder of §12.5, never on mount), **`granted(): string[]`**, and an `onChange` that
+  is specified as real: it fires on **every** consent change, including a withdrawal made in the settings
+  page mid-session, and returns an unsubscribe.
+- `filter.onChange`, `route.onChange`, `locale.onChange` and `player.on` return an unsubscribe too. They
+  had the identical leak with no way to detach, and this is the release where fixing it costs nothing —
+  leaving `consent` as the only detachable handle would be an asymmetry authors trip on.
+  **Migration:** callers who ignored the old `void` return are unaffected. Anyone hand-rolling a
+  `PluginContext` (rather than using `makeMockCtx`) must now return a function from every `onChange`.
+- `createPluginI18n(...)` gains **`dispose()`**. It subscribed to `locale.onChange` for its whole life and
+  never let go; that leak is now fixable by the caller. **Migration:** call `dispose()` from your render's
+  cleanup callback.
+- `makeMockCtx` returns `MockPluginContext` (adds `logs`), and its consent double is a new
+  `makeMockConsent()` with `grant`/`revoke`/`requests`/`autoGrantOnRequest`. **The default stays
+  deny-everything** — core denies until granted, and a component written against a permissive mock is one
+  whose placeholder path was never exercised.
+
+### Added — `ctx.episodeLabels`
+
+Optional `Record<string, string>` mapping each id in `ctx.episodes` to a human-readable label
+(`"S01E06 · The Lighthouse…"`), built by the host from the feed's season/episode plus title. Use it in
+pickers so users see titles rather than slugs; it may be absent or partial, so fall back to the slug.
+Core has supplied it since `0.5.2` via its own `HostPluginContext` — this formalises it in the contract.
+TypeScript-only by design: the Java side already reaches titles through `FeedAccess`/`DisplaySnapshot`,
+and labels exist for the frontend picker.
+
+### Documentation
+
+- **The manifest `consent.services[]` schema** is documented in the README, with a field-by-field table.
+  The manifest as a whole stays core-owned — the SDK does not read `plugin.json` and will not grow a
+  manifest type — but this is where plugin authors look. **The legacy `{ categories, externalSources }`
+  form is rejected from `0.4.0`.** Rationale: a notice satisfying §25 TDDDG / Art. 5(3) ePD needs per-item
+  name, purpose, duration, provider and third-country flag; category slugs and bare hostnames cannot
+  produce one, and they force the UI to talk about "plugins" to visitors who only care about cookies and
+  named companies. `hosts` doubles as the **CSP allow-list** — core widens
+  `script-src`/`frame-src`/`connect-src` by exactly these origins, so an undeclared host stays blocked
+  even with consent given.
+- **`ConsentServiceDeclaration` / `ConsentStorageDeclaration`** (TypeScript, documentation-only). The
+  declaration went from two flat string arrays to eight fields with a nested `storage[]` in one release,
+  and prose was the only spec — a typo surfaced as a load-time rejection rather than a squiggle. These
+  types give an author completion while writing the manifest. They validate nothing and the SDK still
+  never reads `plugin.json`; **core remains authoritative**, and a disagreement is an SDK bug.
+- **Consent granularity is stated explicitly: services describe, categories decide.** The manifest is rich
+  per service, but every `ctx.consent` method takes a category, so two services sharing a category are
+  granted or refused together — across plugins. The schema strongly implies otherwise, so the README and
+  the `ConsentApi` TSDoc now say it outright, along with the only lever a plugin has (declare services
+  under different categories) and the fact that **`necessary` is always granted and never prompted for** —
+  behaviour that previously lived only in core's `ConsentService`/`ConsentContext` sources.
+- **`request()`'s behaviour under concurrency is specified**, since a page of plugin tiles produces it:
+  one consent surface host-wide (a second call joins the one in flight), the visitor decides all
+  categories in one interaction, every call resolves exactly once and is never dropped, and grants are
+  shared across plugins.
+- [`MIGRATION.md`](MIGRATION.md) — what breaks, what to change, in what order.
+- README gained sections on relational storage and logging, and now states the versioning rule the host
+  actually applies: core matches `major.minor` **exactly**, so pre-1.0 a breaking change is a *minor*
+  bump. The previous "a breaking change is a major bump" wording contradicted both the host and the
+  0.2 → 0.3 precedent.
+
+### Deviations from ARCHITECTURE.md
+
+The architecture doc is the source of truth and is not edited unilaterally, so the gaps this release
+opens are recorded here instead:
+
+- §7.2's manifest example still shows `"consent": { "categories": [], "externalSources": [] }` — rejected
+  from `0.4.0`.
+- §12.5 still describes consent as "categories + external sources", and says a plugin loads
+  consent-requiring resources only after `ctx.consent.has(cat)` without a way to *ask*.
+- §7.4's `PluginContext` listing has no `logger()`; its `DocStore` listing still shows
+  `List<JsonNode> query(...)` and no `delete` (stale since 0.3.0).
+- §7.5's `ctx` listing lacks `episodeLabels`, `log`, `consent.request`/`granted` and the unsubscribe
+  returns.
+- §7.6 declares schema storage but no query surface; this release supplies one.
+
+### Testing
+
+`plugin-api` gains its first tests (a `PlatformApi.VERSION` tripwire — the Java side had none, only
+TypeScript and the CI job — and the `Criteria` builder). New test-kit coverage for `RecordingLogger` and
+`FakeSchemaStore`; new TypeScript coverage for consent defaults, unsubscribe delivery, log recording,
+`episodeLabels` passthrough and `PluginI18n.dispose`.
+
 ## [0.3.0] — 2026-07-13
 
 The **data-access cut**: the plugin doc store and the host's HTTP surface over it are now symmetric, and
@@ -92,6 +273,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.4.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.1.1
