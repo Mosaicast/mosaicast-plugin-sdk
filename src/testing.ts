@@ -73,7 +73,11 @@ function makeMockApi(responses: Record<string, unknown>): MockApiClient {
 export interface MockConsent extends ConsentApi {
   /** Grants a category and notifies subscribers. Granting an already-granted category does nothing. */
   grant(category: string): void;
-  /** Withdraws a category and notifies subscribers, as the host's settings page can mid-session. */
+  /**
+   * Withdraws a category and notifies subscribers, as the host's settings page can mid-session.
+   *
+   * Revoking `necessary` does nothing — the host cannot withdraw it either.
+   */
   revoke(category: string): void;
   /** Every category passed to {@link ConsentApi.request}, in order. */
   readonly requests: string[];
@@ -93,7 +97,10 @@ export interface MockConsent extends ConsentApi {
  * permissive mock is a component whose placeholder path was never exercised — and that path is the entire
  * point of the consent contract (ARCHITECTURE §12.5).
  *
- * @param initial categories granted from the start
+ * The one exception is `necessary`, which is granted from the start and cannot be revoked in the host
+ * either — it is the category the core itself uses.
+ *
+ * @param initial categories granted from the start, on top of `necessary`
  * @returns a consent double with `grant`/`revoke` and a recorded `requests` list
  *
  * @example
@@ -110,7 +117,9 @@ export interface MockConsent extends ConsentApi {
  * ```
  */
 export function makeMockConsent(initial: string[] = []): MockConsent {
-  const granted = new Set(initial);
+  // `necessary` is what the core itself uses: always granted, never prompted for. Seeding it means a
+  // component gated on it behaves in tests the way it will in the host.
+  const granted = new Set(['necessary', ...initial]);
   const subscribers = new Set<() => void>();
   const requests: string[] = [];
   const notify = (): void => {
@@ -137,7 +146,8 @@ export function makeMockConsent(initial: string[] = []): MockConsent {
       }
     },
     revoke(category) {
-      if (granted.delete(category)) {
+      // The host cannot withdraw `necessary`, so neither can the double.
+      if (category !== 'necessary' && granted.delete(category)) {
         notify();
       }
     },

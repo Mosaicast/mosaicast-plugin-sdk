@@ -60,10 +60,17 @@ describe('makeMockCtx', () => {
     const ctx = makeMockCtx();
 
     expect(ctx.consent.has('analytics')).toBe(false);
-    expect(ctx.consent.granted()).toEqual([]);
+    expect(ctx.consent.granted()).toEqual(['necessary']);
     // The visitor says no unless the test says otherwise — the placeholder path stays exercised.
     await expect(ctx.consent.request('analytics')).resolves.toBe(false);
     expect(ctx.consent.has('analytics')).toBe(false);
+  });
+
+  it('grants necessary without being asked', () => {
+    const ctx = makeMockCtx();
+
+    // The category the core itself uses: always on, never prompted for, not withdrawable.
+    expect(ctx.consent.has('necessary')).toBe(true);
   });
 
   it('returns a working unsubscribe from every onChange', () => {
@@ -103,7 +110,30 @@ describe('makeMockConsent', () => {
 
     const seeded = makeMockConsent(['functional']);
     expect(seeded.has('functional')).toBe(true);
-    expect(seeded.granted()).toEqual(['functional']);
+    expect(seeded.granted()).toEqual(['necessary', 'functional']);
+  });
+
+  it('treats necessary as always granted and never withdrawable', () => {
+    const consent = makeMockConsent();
+    const cb = vi.fn();
+    consent.onChange(cb);
+
+    expect(consent.has('necessary')).toBe(true);
+    consent.revoke('necessary');
+
+    // The host cannot withdraw it, so revoking is a no-op and fires nothing.
+    expect(consent.has('necessary')).toBe(true);
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('shares a grant across everything gated on the same category', () => {
+    const consent = makeMockConsent();
+
+    // Services describe, categories decide: one grant covers every service under it, in any plugin.
+    consent.grant('analytics');
+
+    expect(consent.has('analytics')).toBe(true);
+    expect(consent.granted()).toContain('analytics');
   });
 
   it('records requests and resolves with what the visitor decides', async () => {

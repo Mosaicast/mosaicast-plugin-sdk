@@ -249,6 +249,30 @@ export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
  * declarations, and the `hosts` you list there are also the CSP allow-list: **an origin you did not
  * declare stays blocked even after consent is given.**
  *
+ * ## The decision is per category, not per service
+ *
+ * `consent.services[]` is richly per-service — `provider`, `privacyUrl`, `thirdCountryTransfer`, each
+ * `storage[]` item — but every method here takes a **category**. That asymmetry is deliberate and worth
+ * stating plainly, because the schema implies otherwise: **services describe, categories decide.** The
+ * per-service detail exists so the notice can name who stores what for how long; the thing a visitor
+ * actually toggles is the category.
+ *
+ * The consequence: if two plugins each declare a service under `analytics` with different providers, the
+ * visitor sees **one** decision listing both plugins, and granting it grants both. There is no way to
+ * consent to one provider and withhold the other. Do not build a UI that implies otherwise, and don't
+ * assume `has('analytics')` says anything about *which* provider was accepted — it says the category was.
+ *
+ * If you need a visitor to be able to accept one of your services and refuse another, declare them under
+ * **different categories** (a plugin-declared category is allowed, it just has no translated label in the
+ * shell). That is the only lever the contract gives you.
+ *
+ * ## `necessary` is never asked about
+ *
+ * `has('necessary')` is **always `true`** and the host never prompts for it — it is the category the core
+ * itself uses, and a banner-free site stays banner-free. Declaring a service as `necessary` therefore
+ * means "this loads unconditionally"; use it only for what genuinely cannot be refused, and expect
+ * `request('necessary')` to resolve `true` without showing the visitor anything.
+ *
  * @example The click-to-load placeholder this exists for
  * ```ts
  * function render({ ctx, root }: { ctx: PluginContext; root: HTMLElement }) {
@@ -285,6 +309,9 @@ export interface ConsentApi {
    *
    * For rendering a summary ("statistics: on, embeds: off"). Prefer {@link has} for a single gate.
    *
+   * Includes `necessary`, which is always granted. These are categories, not service ids — a granted
+   * category covers every service declared under it, across all plugins.
+   *
    * @returns the granted category names, in no guaranteed order
    */
   granted(): string[];
@@ -298,6 +325,27 @@ export interface ConsentApi {
    *
    * Resolving `true` means the category is granted from that moment on; it does not load anything for
    * you. Load the resource yourself afterwards.
+   *
+   * ## What a caller may rely on
+   *
+   * A page full of plugin tiles will produce concurrent calls, so the contract is explicit about them:
+   *
+   * - **There is one consent surface, host-wide.** Calling this does not open a dialog of your own, and a
+   *   second call while one is already open does not open a second — it joins the one in flight. You are
+   *   asking the host to surface *its* settings, not opening a modal.
+   * - **The visitor decides every category at once.** The host's settings cover all declared categories,
+   *   so one interaction can change several. Your promise still resolves with the state of *the category
+   *   you asked for* — but other categories may have moved too, which is why {@link onChange} fires for
+   *   every change rather than only yours.
+   * - **Every call resolves exactly once, and always.** Concurrent calls are never dropped or left
+   *   pending: each resolves when the visitor completes the decision, including calls made while the
+   *   surface was already open.
+   * - **Grants are shared across plugins.** If another plugin's `request('analytics')` is what the
+   *   visitor accepted, your pending `request('analytics')` resolves `true` too — the decision is per
+   *   category and site-wide, not per plugin (see the note on granularity above).
+   *
+   * So: don't serialize your calls, don't build a queue, and don't assume the visitor only answered you.
+   * Re-read {@link has} after any change rather than caching what a request resolved with.
    *
    * @param category the consent category to ask for
    * @returns whether the category is granted after the visitor decided
@@ -315,6 +363,82 @@ export interface ConsentApi {
    *          the component
    */
   onChange(cb: () => void): Unsubscribe;
+}
+
+/**
+ * One item a service stores on the visitor's device, as declared in `plugin.json`.
+ *
+ * Part of {@link ConsentServiceDeclaration} — see the caveats there before using either type.
+ */
+export interface ConsentStorageDeclaration {
+  /** The cookie or storage key exactly as it appears on the device, e.g. `plausible_ignore`. */
+  name: string;
+  /** Where it is stored. */
+  type: 'cookie' | 'localStorage' | 'sessionStorage';
+  /** What it is for, in language a visitor reads — not an internal description. */
+  purpose: string;
+  /** How long it lasts: `session`, `persistent`, or a human duration such as `12 months`. */
+  duration: string;
+}
+
+/**
+ * The shape of one entry in your manifest's `consent.services[]`.
+ *
+ * **This type is documentation, not enforcement.** The manifest is owned and validated by the host — the
+ * SDK does not read `plugin.json`, and nothing here runs at build or load time. It exists so an author
+ * writing the declaration gets IDE completion and catches a typo before core rejects the plugin at load,
+ * which is otherwise the first feedback you get. Two consequences worth knowing:
+ *
+ * - **The host is authoritative.** If this type and core disagree, core wins. It is kept in step by hand,
+ *   so treat a mismatch as a bug in the SDK rather than permission to ignore the host.
+ * - **It is not a manifest type.** The manifest as a whole stays core-owned and the SDK will not grow one;
+ *   this covers a single nested shape that got deep enough in 0.4.0 to be worth typing.
+ *
+ * Use it by typing a literal you keep next to your manifest, or as a reference while writing the JSON:
+ *
+ * ```ts
+ * const services: ConsentServiceDeclaration[] = [{
+ *   id: 'plausible',
+ *   name: 'Plausible Analytics',
+ *   provider: 'Plausible Insights OÜ',
+ *   category: 'analytics',
+ *   privacyUrl: 'https://plausible.io/privacy',
+ *   hosts: ['https://plausible.example'],
+ *   thirdCountryTransfer: false,
+ *   storage: [{
+ *     name: 'plausible_ignore', type: 'localStorage',
+ *     purpose: 'Remembers that you opted out of statistics', duration: 'persistent',
+ *   }],
+ * }];
+ * ```
+ */
+export interface ConsentServiceDeclaration {
+  /** Stable identifier for this service within your plugin. */
+  id: string;
+  /** The service as a visitor would recognise it, e.g. `Plausible Analytics`. */
+  name: string;
+  /** The **legal entity** operating the service — the company, not your plugin. */
+  provider: string;
+  /**
+   * The consent category this service falls under, and therefore what {@link ConsentApi.has} gates on.
+   *
+   * `necessary` is never prompted for and always granted. Remember that the category — not the service —
+   * is what the visitor decides: two services sharing a category are accepted or refused together.
+   */
+  category: 'necessary' | 'functional' | 'analytics' | (string & {});
+  /** The provider's own privacy policy. */
+  privacyUrl: string;
+  /**
+   * Every origin the service is contacted on, scheme included (`https://plausible.example`).
+   *
+   * **Also the CSP allow-list**: core widens `script-src`/`frame-src`/`connect-src` by exactly these, so
+   * an undeclared or bare-hostname origin stays blocked even after consent is given.
+   */
+  hosts: string[];
+  /** Whether personal data leaves the EU/EEA. */
+  thirdCountryTransfer: boolean;
+  /** Each item the service stores on the visitor's device. */
+  storage: ConsentStorageDeclaration[];
 }
 
 /**

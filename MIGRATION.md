@@ -97,7 +97,16 @@ Two things bite here:
   embed just doesn't load".
 - **`provider` is the operating company**, not your plugin. It ends up in the visitor-facing notice.
 
+- **The category, not the service, is what the visitor decides.** Two services sharing a category — yours
+  and another plugin's — are granted or refused together. If two of your own services need to be
+  refusable independently, put them in different categories. `necessary` is always granted and never
+  prompted for, so use it only for what genuinely cannot be refused.
+
 Declaring no third-party services at all? Then omit `consent` entirely, and the site stays banner-free.
+
+The SDK now exports `ConsentServiceDeclaration` as a **documentation-only** type — type a literal against
+it while writing the JSON and a typo shows up in your editor instead of as a load-time rejection. It
+validates nothing; core still owns the manifest.
 
 See the [README](README.md#consent--the-manifest-core-owned-schema) for the field-by-field table.
 

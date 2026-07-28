@@ -26,6 +26,13 @@ import tools.jackson.databind.JsonNode;
  * {@link SchemaStore} exposes it: they deserialize into your own types. Only
  * {@link DocStore#query(Scope, String)} hands you a node.
  *
+ * <p><strong>This coupling is a known compromise, not the intended end state.</strong> Naming the host's
+ * JSON library here means a future change of that library forces another breaking release on plugins for
+ * a reason that has nothing to do with plugin code. Removing Jackson from the contract entirely is
+ * tracked for 1.0 in
+ * <a href="https://github.com/Mosaicast/mosaicast-plugin-sdk/issues/28">issue #28</a>; until then, reading
+ * through the typed accessors above keeps your code clear of it.
+ *
  * @param key   the document's key within its scope; never {@code null}, and matching
  *              {@link DocStore#KEY_PATTERN}
  * @param value the document's JSON value; never {@code null}

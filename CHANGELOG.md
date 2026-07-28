@@ -13,6 +13,14 @@ Five needs had queued up behind one unavoidable break, so they ship as a single 
 contract bumps: the host's move to Jackson 3, a `SchemaStore` that can actually be used, plugin logging,
 consent a plugin can *ask for* instead of only read, and the manifest's consent schema.
 
+**Two of the five actually force the bump** — the Jackson 3 change to `DocEntry.value()`, and the manifest
+consent schema replacement. `SchemaStore`'s query surface, `ctx.logger()`/`ctx.log()`, `consent.request()`
+and `episodeLabels` are **additions that rode along**; only the `onChange` return types make the consent
+work breaking at all, and only for callers who implement `PluginContext` themselves. Bundling them is
+cheap here because breaking is a *minor* bump pre-1.0 and plugin authors act once instead of three times —
+but "we're breaking anyway" is not a standing licence, and this note exists so the next release has to
+make the case again rather than inherit it.
+
 **Every plugin declaring `0.3.x` is rejected** the moment core runs `0.4.0` — it compares `major.minor`
 exactly. That is expected, and rejections are now visible in core's admin log viewer with their reason.
 Plugin authors: see [`MIGRATION.md`](MIGRATION.md), which is ordered so each step compiles on its own.
@@ -44,9 +52,13 @@ Plugin authors: see [`MIGRATION.md`](MIGRATION.md), which is ordered so each ste
   3. *Drop Jackson from the contract entirely* (a string, or an SDK-owned tree type). Right in principle,
      **deliberately deferred**: a string is re-parsed with the host's Jackson anyway, so the dependency
      would be hidden rather than removed, and an SDK-owned JSON tree is a maintenance burden forever.
-     Worth revisiting at 1.0. Meanwhile the escape hatch is documented — `DocStore.get`, `PluginConfig.get`
-     and the new `SchemaStore` all deserialize into your own types and never expose a node, so only
-     `DocStore.query` hands you one.
+     Meanwhile the escape hatch is documented — `DocStore.get`, `PluginConfig.get` and the new
+     `SchemaStore` all deserialize into your own types and never expose a node, so only `DocStore.query`
+     hands you one. **This is a compromise with an end date, not a settled design:** naming the host's
+     JSON library in the contract means a future change of that library forces another break on plugins
+     for a reason unrelated to plugin code. Removing it is tracked in
+     [#28](https://github.com/Mosaicast/mosaicast-plugin-sdk/issues/28), milestone **1.0.0** — it has to be
+     resolved before the contract stabilises, since afterwards the same fix costs a major bump.
 
   `0.4.0` is a hard break regardless, so the cost of bundling this here is one import line per file that
   touches `DocEntry.value()`. Deferring it means paying the same cost again at `0.5.0`. The decision was
@@ -125,13 +137,29 @@ and labels exist for the frontend picker.
 ### Documentation
 
 - **The manifest `consent.services[]` schema** is documented in the README, with a field-by-field table.
-  The manifest type stays core-owned — the SDK has no manifest type and will not grow one — but this is
-  where plugin authors look. **The legacy `{ categories, externalSources }` form is rejected from
-  `0.4.0`.** Rationale: a notice satisfying §25 TDDDG / Art. 5(3) ePD needs per-item name, purpose,
-  duration, provider and third-country flag; category slugs and bare hostnames cannot produce one, and
-  they force the UI to talk about "plugins" to visitors who only care about cookies and named companies.
-  `hosts` doubles as the **CSP allow-list** — core widens `script-src`/`frame-src`/`connect-src` by
-  exactly these origins, so an undeclared host stays blocked even with consent given.
+  The manifest as a whole stays core-owned — the SDK does not read `plugin.json` and will not grow a
+  manifest type — but this is where plugin authors look. **The legacy `{ categories, externalSources }`
+  form is rejected from `0.4.0`.** Rationale: a notice satisfying §25 TDDDG / Art. 5(3) ePD needs per-item
+  name, purpose, duration, provider and third-country flag; category slugs and bare hostnames cannot
+  produce one, and they force the UI to talk about "plugins" to visitors who only care about cookies and
+  named companies. `hosts` doubles as the **CSP allow-list** — core widens
+  `script-src`/`frame-src`/`connect-src` by exactly these origins, so an undeclared host stays blocked
+  even with consent given.
+- **`ConsentServiceDeclaration` / `ConsentStorageDeclaration`** (TypeScript, documentation-only). The
+  declaration went from two flat string arrays to eight fields with a nested `storage[]` in one release,
+  and prose was the only spec — a typo surfaced as a load-time rejection rather than a squiggle. These
+  types give an author completion while writing the manifest. They validate nothing and the SDK still
+  never reads `plugin.json`; **core remains authoritative**, and a disagreement is an SDK bug.
+- **Consent granularity is stated explicitly: services describe, categories decide.** The manifest is rich
+  per service, but every `ctx.consent` method takes a category, so two services sharing a category are
+  granted or refused together — across plugins. The schema strongly implies otherwise, so the README and
+  the `ConsentApi` TSDoc now say it outright, along with the only lever a plugin has (declare services
+  under different categories) and the fact that **`necessary` is always granted and never prompted for** —
+  behaviour that previously lived only in core's `ConsentService`/`ConsentContext` sources.
+- **`request()`'s behaviour under concurrency is specified**, since a page of plugin tiles produces it:
+  one consent surface host-wide (a second call joins the one in flight), the visitor decides all
+  categories in one interaction, every call resolves exactly once and is never dropped, and grants are
+  shared across plugins.
 - [`MIGRATION.md`](MIGRATION.md) — what breaks, what to change, in what order.
 - README gained sections on relational storage and logging, and now states the versioning rule the host
   actually applies: core matches `major.minor` **exactly**, so pre-1.0 a breaking change is a *minor*

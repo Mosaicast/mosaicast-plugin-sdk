@@ -204,6 +204,26 @@ return off;                                                       // detach on c
 change — including a withdrawal made in the settings page while you are mounted — and returns an
 unsubscribe. Since 0.4.0 `filter`, `route`, `locale` and `player.on` return one too.
 
+**Services describe, categories decide.** The manifest is per-service (`provider`, `privacyUrl`,
+`thirdCountryTransfer`, each `storage[]` item) but every `ctx.consent` method takes a **category**. The
+per-service detail exists so the notice can name who stores what for how long; what the visitor toggles is
+the category. So if two plugins each declare an `analytics` service with different providers, the visitor
+sees **one** decision listing both plugins, and granting it grants both — there is no way to accept one
+provider and refuse the other. If you need your own services to be refusable independently, declare them
+under **different categories** (a plugin-declared category is fine; the shell just has no translated label
+for it). That is the only lever the contract gives you.
+
+**`necessary` is never asked about.** `has('necessary')` is always `true` and the host never prompts for
+it — it is the category the core itself uses, and a banner-free site stays banner-free. Declaring a
+service `necessary` means "this loads unconditionally"; use it only for what genuinely cannot be refused.
+
+**Concurrent `request()` calls.** A page of plugin tiles will produce them, so the contract is explicit:
+there is **one consent surface host-wide** (a second call joins the one in flight rather than opening
+another); the visitor decides **all** categories in one interaction, so other categories may move too;
+every call resolves exactly once and is never dropped; and grants are **shared across plugins** — another
+plugin's accepted `request('analytics')` resolves yours too. Don't serialize calls or build a queue, and
+re-read `has(...)` after a change instead of caching what a request resolved with.
+
 ### `consent.services[]` in `plugin.json`
 
 The manifest type is **core-owned** — the SDK has no manifest type and will not grow one — but this is
@@ -233,7 +253,7 @@ where plugin authors look, so the required shape is documented here. **From `0.4
 | `id` | Stable identifier for this service within your plugin. |
 | `name` | The service as a visitor would recognise it, e.g. "Plausible Analytics". |
 | `provider` | The **legal entity** operating it — the company name, not your plugin's. |
-| `category` | The consent category the service falls under; what `ctx.consent.has(...)` gates on. |
+| `category` | The consent category the service falls under; what `ctx.consent.has(...)` gates on. **`necessary` is always granted and never prompted for.** Two services sharing a category are decided together. |
 | `privacyUrl` | The provider's own privacy policy. |
 | `hosts` | Every origin the service is contacted on. **Also the CSP allow-list** — see below. |
 | `thirdCountryTransfer` | Whether personal data leaves the EU/EEA. |
@@ -248,6 +268,12 @@ to visitors who only care about cookies and named companies.
 exactly these origins. An origin you did not declare **stays blocked even after consent is given** — if a
 third-party embed silently fails to load with consent granted, an undeclared host is the first thing to
 check.
+
+**Authoring help:** the SDK exports `ConsentServiceDeclaration` (and `ConsentStorageDeclaration`) as a
+**documentation-only** type. Nothing in the SDK reads `plugin.json` or validates it — the host owns and
+enforces the manifest — but typing a literal against it gives you completion and catches a typo before
+core rejects the plugin at load, which is otherwise your first feedback. If the type and core ever
+disagree, **core wins**; treat the mismatch as an SDK bug. The manifest as a whole stays core-owned.
 
 ## Releasing (maintainers)
 Publishing is automated and fires on a **published GitHub Release**, not on PR merge
