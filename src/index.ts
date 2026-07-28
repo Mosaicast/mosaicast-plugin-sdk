@@ -15,10 +15,13 @@
  * The plugin contract version (SemVer).
  *
  * Mirror of the Java `dev.mosaicast.plugin.api.PlatformApi.VERSION` constant and the npm package
- * version. The host rejects a plugin whose manifest `platformApi` is incompatible with this value
- * (ARCHITECTURE §7.2). **These move together — a breaking change is a major bump.**
+ * version — **these move together**, and CI fails the build if they drift.
+ *
+ * The host compares a plugin manifest's `platformApi` against this value on **`major.minor` exactly** and
+ * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
+ * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.3.0' as const;
+export const PLATFORM_API_VERSION = '0.4.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';

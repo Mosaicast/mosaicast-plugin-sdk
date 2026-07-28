@@ -21,7 +21,7 @@ class PlatformApiTest {
 
     @Test
     void versionIsPinned() {
-        assertEquals("0.3.0", PlatformApi.VERSION);
+        assertEquals("0.4.0", PlatformApi.VERSION);
     }
 
     @Test
