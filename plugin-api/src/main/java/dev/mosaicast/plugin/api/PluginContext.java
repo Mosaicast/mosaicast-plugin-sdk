@@ -75,12 +75,16 @@ public interface PluginContext {
      * governs <strong>rendering only</strong> — it never governed data, and inferring the data floor from
      * unrelated UI slots is what once let a plugin with one anonymous slot expose its whole store.
      *
-     * <p>The {@code USER} scope ignores {@code readableBy} in <em>both</em> directions: no floor makes
-     * somebody else's partition readable, and none stands between a caller and their own — an
-     * authenticated user of any role reads {@code data/user/me/…}, including one below the declared read
-     * floor. Naming any {@code USER} id other than {@code me} is a 400
-     * (never a silent substitution), and an anonymous {@code USER} call is a 401 whatever the floor says —
-     * with no session there is no partition to resolve.
+     * <p><strong>Neither floor applies to the {@code USER} scope.</strong> {@code readableBy} does not, in
+     * either direction: no floor makes somebody else's partition readable, and none stands between a caller
+     * and their own. {@code writableBy} does not either — a write floor protects the <em>shared</em>
+     * surface, where one caller's write is visible to others and can overwrite theirs, and a user partition
+     * is unshared by construction. Gating it would force a plugin with any per-user feature to declare
+     * {@code writableBy: "fan"} and thereby open its shared scopes to fan writes, which is the old
+     * slot-derived coupling moved to the write side. So any authenticated caller reads and writes their own
+     * {@code data/user/me/…} whatever the manifest declares. Naming any {@code USER} id other than
+     * {@code me} is a 400 (never a silent substitution), and an anonymous {@code USER} call is a 401 — with
+     * no session there is no partition to resolve.
      *
      * <p><strong>No request-time server logic in v1:</strong> a write through that surface is plain
      * persistence — no plugin code runs on the request. Derive, validate or aggregate in

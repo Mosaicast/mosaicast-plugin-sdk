@@ -76,10 +76,12 @@ behaviour is the vulnerability. Pick the floor your data actually needs.
 And the distinction the old behaviour blurred: **`visibleTo` on a slot governs rendering only.** It never
 governed data access.
 
-**The `USER` scope ignores `readableBy` in both directions.** No floor makes another user's partition
-readable, and none stands between a caller and their own — an authenticated user of any role reads
-`data/user/me/…`, including one below your declared read floor. An anonymous caller has no partition at
-all, so that request is a 401 regardless.
+**Neither floor applies to the `USER` scope.** `readableBy` does not, in either direction: no floor makes
+another user's partition readable, and none stands between a caller and their own. `writableBy` does not
+either — it protects the *shared* surface, where one caller's write lands on top of another's, and a user
+partition is unshared. So you do **not** need `writableBy: "fan"` to let fans write their own
+`data/user/me/…`; declare the floor your *shared* scopes need and per-user writes keep working. An
+anonymous caller has no partition at all, so that request is a 401 regardless.
 
 ## 3. Fix what no longer compiles
 

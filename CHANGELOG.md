@@ -72,7 +72,10 @@ is not automatic** and is the part to read.
   loses its anonymous reads — they answer 403 until it declares `"readableBy": "anonymous"`. Intended, but
   it is a behaviour change and it is the one most likely to be met in production; `MIGRATION.md` step 2
   covers it. Slot `visibleTo` now governs **rendering only** — it never governed data, which
-  is precisely the confusion that produced the finding. The `USER` scope ignores `readableBy` entirely.
+  is precisely the confusion that produced the finding. **Neither floor applies to the `USER` scope** —
+  `readableBy` in neither direction, and `writableBy` not at all, since a write floor protects the shared
+  surface and a user partition is unshared; gating it would force any plugin with a per-user feature to
+  declare `writableBy: "fan"` and open its shared scopes with it.
 
 ### Documentation
 
