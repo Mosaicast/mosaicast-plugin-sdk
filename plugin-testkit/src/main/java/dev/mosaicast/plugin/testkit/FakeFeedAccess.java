@@ -6,6 +6,7 @@ package dev.mosaicast.plugin.testkit;
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.FeedAccess;
 import dev.mosaicast.plugin.api.Scope;
+import dev.mosaicast.plugin.api.ScopeType;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +49,9 @@ public final class FakeFeedAccess implements FeedAccess {
     @Override
     public List<String> episodesIn(Scope scope) {
         Objects.requireNonNull(scope, "scope");
+        if (scope.type() == ScopeType.USER) {
+            return List.of();   // no episode belongs to a person — the host answers the same way
+        }
         return episodes.getOrDefault(scope, List.of());
     }
 

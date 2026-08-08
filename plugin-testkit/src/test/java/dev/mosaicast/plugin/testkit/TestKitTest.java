@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.mosaicast.plugin.api.DisplaySnapshot;
 import dev.mosaicast.plugin.api.DocEntry;
+import dev.mosaicast.plugin.api.OwnedDocEntry;
 import dev.mosaicast.plugin.api.PluginBackend;
 import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.Scope;
@@ -19,6 +20,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 /** Self-tests proving the test doubles behave like the real contract. */
@@ -90,6 +94,66 @@ class TestKitTest {
         assertThrows(IllegalArgumentException.class, () -> store.put(ep, "vote/alice", new Vote("a", 1)));
         assertThrows(IllegalArgumentException.class, () -> store.put(ep, "", new Vote("a", 1)));
         store.put(ep, "vote:alice.v2-final_", new Vote("a", 1)); // ':' '.' '-' '_' are all allowed
+    }
+
+    @Test
+    void userScopeIsRefusedOnEveryBackendMethod() {
+        InMemoryDocStore store = new InMemoryDocStore();
+        Scope me = Scope.user();
+
+        // A backend thread has no calling user, so there is no "me" to resolve — reads included.
+        assertThrows(UnsupportedOperationException.class, () -> store.get(me, "k", Vote.class));
+        assertThrows(UnsupportedOperationException.class, () -> store.put(me, "k", new Vote("a", 1)));
+        assertThrows(UnsupportedOperationException.class, () -> store.delete(me, "k"));
+        assertThrows(UnsupportedOperationException.class, () -> store.query(me, ""));
+    }
+
+    @Test
+    void userScopeIsASingletonNoPluginCanRedirect() {
+        assertEquals(Scope.SELF_ID, Scope.user().id());
+        // Whatever id is handed in, the scope addresses the caller's own partition and nobody else's.
+        assertEquals(Scope.user(), new Scope(ScopeType.USER, "some-other-user"));
+    }
+
+    @Test
+    void asUserSeedsAPartitionAndQueryAcrossUsersAggregatesThem() {
+        InMemoryDocStore store = new InMemoryDocStore();
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+
+        // What each frontend would have written through …/data/user/me/{key}.
+        store.asUser(alice).put(Scope.user(), "mark:s2e04:b3", new Vote("alice", 3));
+        store.asUser(bob).put(Scope.user(), "mark:s2e04:b7", new Vote("bob", 7));
+        store.asUser(bob).put(Scope.user(), "pref:theme", "dark");
+
+        List<OwnedDocEntry> marks = store.queryAcrossUsers("mark:");
+
+        assertEquals(2, marks.size());
+        assertEquals(Set.of(alice, bob), marks.stream().map(OwnedDocEntry::userId).collect(Collectors.toSet()));
+        assertEquals(3, store.queryAcrossUsers("").size());
+
+        // A partition is private to its owner: one user's view never sees another's document.
+        assertTrue(store.asUser(alice).get(Scope.user(), "mark:s2e04:b7", Vote.class).isEmpty());
+        assertEquals(new Vote("alice", 3),
+                store.asUser(alice).get(Scope.user(), "mark:s2e04:b3", Vote.class).orElseThrow());
+        assertEquals(1, store.docsOf(alice).size());
+    }
+
+    @Test
+    void aUserViewStillRefusesNothingElseAndSharesEntityData() {
+        InMemoryDocStore store = new InMemoryDocStore();
+        Scope ep = Scope.episode("s2e04");
+        store.put(ep, "meta:title", "x");
+
+        // Entity scopes behave identically on a view, over the same data.
+        assertEquals(Optional.of("x"), store.asUser(UUID.randomUUID()).get(ep, "meta:title", String.class));
+        assertFalse(store.asUser(UUID.randomUUID()).delete(Scope.user(), "nothing:here"));
+    }
+
+    @Test
+    void feedAccessResolvesNoEpisodesForAUserScope() {
+        FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.feed("f1"), List.of("ep-1")));
+        assertEquals(List.of(), feeds.episodesIn(Scope.user()));
     }
 
     @Test

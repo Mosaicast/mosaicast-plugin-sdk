@@ -19,6 +19,11 @@ public interface FeedAccess {
      * Returns the identity-layer episode IDs that belong to the given scope, already filtered to what
      * the current user may see.
      *
+     * <p>A {@link ScopeType#USER} scope resolves to <strong>no episodes</strong>: it is a storage
+     * partition, not a level of the site, and no episode belongs to a person. Resolve the page's own
+     * scope instead — a component reading {@code data/user/me/…} still sits on an episode, feed or site
+     * scope.
+     *
      * @param scope the scope to resolve; never {@code null}
      * @return the {@code EpisodeRef} IDs in scope, in the host's canonical order; never {@code null},
      *         possibly empty

@@ -1,192 +1,228 @@
-# Migrating a plugin to `platformApi` 0.4.0
+# Migrating a plugin to `platformApi` 0.5.0
 
-For plugin authors coming from `0.3.x`. Everything here is mechanical; budget an afternoon for a
-typical plugin, most of it in step 2.
+For plugin authors coming from `0.4.x`. **The code change is small — an afternoon at most. Moving your
+existing per-user data is the part that needs thought, and it is step 4.**
 
 **You have no choice about timing.** Core matches `major.minor` **exactly**, so the moment the host runs
-`0.4.0` every `0.3.x` plugin is rejected at load. Rejections are visible in the admin log viewer with
-their reason, so a plugin that has not been migrated fails loudly rather than silently.
+`0.5.0` every `0.4.x` plugin is rejected at load, with the reason in the admin log viewer.
 
-Work in this order — each step compiles on its own, and doing 2 before 1 means fighting two error
-messages at once.
+Coming from `0.3.x`? Do the [0.4.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.4.0/MIGRATION.md)
+first — Jackson 3 and the manifest `consent` schema — then come back here.
 
 ---
+
+## Why this release exists
+
+A white-box audit of core found that the doc store had no notion of *whose* a document is. `scopeType`,
+`scopeId` and `key` all come from the client, the only gate was a per-plugin role floor, and scope ids are
+public slugs — so any caller above that floor could read, overwrite or delete any key in any scope,
+**including another user's**. Nothing had to be guessed.
+
+The advice in the contract was part of the bug: the SDK told you to model per-user data as per-user *keys*
+(`mark:<userId>:cell`). A key is client input, so that put an access-control decision exactly where the
+host could not check it. 0.5.0 replaces the advice with a scope the host owns.
 
 ## 1. Bump the version you build against
 
 `plugin.json`:
 
 ```diff
--  "platformApi": "0.3.0",
-+  "platformApi": "0.4.0",
+-  "platformApi": "0.4.0",
++  "platformApi": "0.5.0",
 ```
 
 `build.gradle.kts`:
 
 ```diff
--  compileOnly("dev.mosaicast:plugin-api:0.3.0")
--  testImplementation("dev.mosaicast:plugin-testkit:0.3.0")
-+  compileOnly("dev.mosaicast:plugin-api:0.4.0")
-+  testImplementation("dev.mosaicast:plugin-testkit:0.4.0")
+-  compileOnly("dev.mosaicast:plugin-api:0.4.0")
+-  testImplementation("dev.mosaicast:plugin-testkit:0.4.0")
++  compileOnly("dev.mosaicast:plugin-api:0.5.0")
++  testImplementation("dev.mosaicast:plugin-testkit:0.5.0")
 ```
 
-`package.json`: `"@mosaicast/plugin-sdk": "^0.4.0"`.
+`package.json`: `"@mosaicast/plugin-sdk": "^0.5.0"`.
 
-## 2. Jackson 2 → Jackson 3
+## 2. Declare your data floor in the manifest — **this one breaks public plugins**
 
-The contract now names Jackson 3, because the host does. Change the package:
+New block, validated at load:
+
+```json
+"data": { "readableBy": "fan", "writableBy": "podcaster" }
+```
+
+Values are `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`.
+
+**Read this even if you skim the rest.** Core used to derive the read floor from the *minimum* `visibleTo`
+across all your slots — so a plugin with one anonymous display slot and one admin-only slot served its
+**entire** doc store to anonymous callers. That inference is gone, and nothing replaces it silently:
+
+> **If you omit the block, `readableBy` falls back to your *write* floor — not to anonymous.**
+
+So a plugin that has any `visibleTo: "anonymous"` slot and no `data` block **loses its anonymous reads**:
+requests that returned 200 yesterday return **403** today. That is the fix working as intended, not a
+regression — but it is a behaviour change, and it will look like "my public component stopped loading" if
+you meet it in production instead of here.
+
+**If your data really is public, say so:**
 
 ```diff
--import com.fasterxml.jackson.databind.JsonNode;
--import com.fasterxml.jackson.databind.ObjectMapper;
-+import tools.jackson.databind.JsonNode;
-+import tools.jackson.databind.ObjectMapper;
+   "slots": [ { "scope": "episode", "element": "my-card", "placement": "main", "visibleTo": "anonymous" } ],
++  "data":  { "readableBy": "anonymous", "writableBy": "fan" },
 ```
 
-Then the two things that are not a pure rename:
+There is no `data` block that restores the old *derived* behaviour, and that is deliberate: the old
+behaviour is the vulnerability. Pick the floor your data actually needs.
 
-- **`new ObjectMapper()` → `JsonMapper.builder().build()`.** Mappers are immutable in Jackson 3;
-  configure them through the builder.
-- **`JacksonException` is unchecked.** `throws JsonProcessingException` clauses and the `catch` blocks
-  that existed only to satisfy them can go. If you catch it deliberately, keep the catch — just note that
-  nothing forces you to any more.
-- **`JsonNode.asText()` is deprecated.** Use `stringValue()` on a string node, or `asString()` if you
-  want the old coercing behaviour.
+And the distinction the old behaviour blurred: **`visibleTo` on a slot governs rendering only.** It never
+governed data access.
 
-If your plugin only reads through `store().get(scope, key, YourType.class)` and `config().get(...)`,
-**you have nothing to change here** — neither exposes a Jackson type. Only `store().query(...)` hands you
-a `JsonNode` via `DocEntry.value()`.
+**Neither floor applies to the `USER` scope.** `readableBy` does not, in either direction: no floor makes
+another user's partition readable, and none stands between a caller and their own. `writableBy` does not
+either — it protects the *shared* surface, where one caller's write lands on top of another's, and a user
+partition is unshared. So you do **not** need `writableBy: "fan"` to let fans write their own
+`data/user/me/…`; declare the floor your *shared* scopes need and per-user writes keep working. An
+anonymous caller has no partition at all, so that request is a 401 regardless.
 
-> Why this and not a shim: plugins load parent-first under PF4J, so at runtime you get whatever `JsonNode`
-> the host loaded. Compiling against Jackson 2 while the host runs Jackson 3 would replace a compile error
-> with a `NoClassDefFoundError` in production. The full reasoning is in the [CHANGELOG](CHANGELOG.md).
+## 3. Fix what no longer compiles
 
-## 3. Manifest `consent` — the legacy form is rejected
+Three small ones:
 
-If your `plugin.json` has this, **the plugin will not load**:
-
-```json
-"consent": { "categories": ["analytics"], "externalSources": ["plausible.example"] }
+```diff
+- switch (scope.type()) { case SITE -> …; case FEED -> …; case SEASON -> …; case EPISODE -> …; }
++ switch (scope.type()) { case SITE -> …; case FEED -> …; case SEASON -> …; case EPISODE -> …;
++                         case USER -> …; }
 ```
 
-Replace it with a per-service declaration:
+```diff
+- ctx.store().put(Scope.site("main"), key, value);   // removed; deprecated since 0.3.0
++ ctx.store().put(Scope.site(), key, value);
+```
 
-```json
-"consent": {
-  "services": [{
-    "id": "plausible",
-    "name": "Plausible Analytics",
-    "provider": "Plausible Insights OÜ",
-    "category": "analytics",
-    "privacyUrl": "https://plausible.io/privacy",
-    "hosts": ["https://plausible.example"],
-    "thirdCountryTransfer": false,
-    "storage": [
-      { "name": "plausible_ignore", "type": "localStorage",
-        "purpose": "Remembers that you opted out of statistics", "duration": "persistent" }
-    ]
-  }]
+A hand-rolled `DocStore` (a test double written by hand rather than `InMemoryDocStore`) must now implement
+`queryAcrossUsers(String)`. Switching to `InMemoryDocStore` is the cheaper fix.
+
+## 4. Move your per-user data
+
+**This is the real work, and nothing does it for you.** Existing per-user data lives *inside keys* under
+entity scopes, and the host cannot know the convention that put it there — so there is no automatic
+migration, and that data stays exactly as exposed as it is today until you move it.
+
+### The new shape
+
+```diff
+- ctx.api.put(`data/episode/${ctx.scope.id}/mark:${ctx.user.id}:b3`, true);
++ ctx.api.put(`data/user/me/mark:${ctx.scope.id}:b3`, true);
+```
+
+- The scope id is the literal `me` (`SELF_SCOPE_ID` in TS, `Scope.SELF_ID` in Java), resolved server-side
+  from the session. **Any other `user` id is a 400**, never a silent substitution; an anonymous `user`
+  request is a **401** whatever your `readableBy` says.
+- In Java the canonical `Scope` constructor normalizes any `USER` id to the sentinel, and there is no
+  `Scope.user(String)` overload — you cannot write an expression naming somebody else's partition.
+- The partition is **flat**: one per user, not one per user *and* entity. So the entity moves into the key
+  (`mark:<episodeSlug>:cell`). Entity ids are slugs, not UUIDs.
+
+### Both halves of the move
+
+A backend **can** read your legacy per-user keys — they sit under entity scopes, which it addresses
+normally — so you can inventory them eagerly on the server. It **cannot** write into anyone's partition:
+`ctx.store()` throws `UnsupportedOperationException` for a `USER` scope on *every* method, reads included,
+because a backend thread has no calling user to resolve.
+
+So the write half is necessarily client-side and lazy — each user's data moves the next time they open
+your plugin:
+
+```ts
+const legacy = `data/episode/${ctx.scope.id}/mark:${ctx.user!.id}:b3`;
+const mine   = `data/user/me/mark:${ctx.scope.id}:b3`;
+
+const existing = await ctx.api.get<Mark>(mine).catch(() => null);
+if (!existing) {
+  const old = await ctx.api.get<Mark>(legacy).catch(() => null);
+  if (old) {
+    await ctx.api.put(mine, old);
+    await ctx.api.delete(legacy);   // idempotent
+  }
 }
 ```
 
-Two things bite here:
+Keep that path until you are satisfied everyone has come back, then delete it — and delete whatever legacy
+keys remain from the backend, which *can* remove them (entity scope, ordinary `delete`).
 
-- **`hosts` needs the scheme** (`https://plausible.example`, not `plausible.example`) — it is also the
-  CSP allow-list, and core widens `script-src`/`frame-src`/`connect-src` by exactly these origins. An
-  undeclared or bare-hostname origin **stays blocked even with consent granted**, which looks like "the
-  embed just doesn't load".
-- **`provider` is the operating company**, not your plugin. It ends up in the visitor-facing notice.
+### Aggregates: `queryAcrossUsers`
 
-- **The category, not the service, is what the visitor decides.** Two services sharing a category — yours
-  and another plugin's — are granted or refused together. If two of your own services need to be
-  refusable independently, put them in different categories. `necessary` is always granted and never
-  prompted for, so use it only for what genuinely cannot be refused.
+Per-user data is no longer addressable by key, so a leaderboard cannot be assembled from the client any
+more. It should never have been: a summary each browser reports about itself is a summary of whatever
+users typed. Do it on the backend instead:
 
-Declaring no third-party services at all? Then omit `consent` entirely, and the site stays banner-free.
-
-The SDK now exports `ConsentServiceDeclaration` as a **documentation-only** type — type a literal against
-it while writing the JSON and a typo shows up in your editor instead of as a load-time rejection. It
-validates nothing; core still owns the manifest.
-
-See the [README](README.md#consent--the-manifest-core-owned-schema) for the field-by-field table.
-
-## 4. Frontend `ctx` changes
-
-**`onChange` now returns an unsubscribe** — on `consent`, `filter`, `route`, `locale`, and `player.on`.
-Ignoring the return value still compiles, so nothing breaks; take advantage of it instead:
-
-```diff
- render({ ctx, root }) {
--  ctx.filter.onChange(() => rerender());
-+  return ctx.filter.onChange(() => rerender());   // the SDK runs this on cleanup
- }
+```java
+// Backend-only, read-only, no HTTP surface — no visitor's request can reach another visitor's data.
+List<OwnedDocEntry> marks = ctx.store().queryAcrossUsers("mark:");   // record(UUID userId, String key, JsonNode value)
 ```
 
-**This breaks you only if you hand-roll a context** — a test fake written by hand rather than with
-`makeMockCtx`, or anything else implementing `PluginContext`. Two things then fail to compile:
+The `userId` is host-resolved from the partition the document lives in, never a value a browser supplied.
+It is an identifier, not a display name, and the contract offers no way to turn it into one.
 
-```diff
--  consent: { has: () => true, onChange: () => {} },
-+  consent: { has: () => true, granted: () => ['analytics'],
-+             request: () => Promise.resolve(true), onChange: () => () => {} },
--  route:   { path: 'highlight/ep-1', onChange: () => {} },
-+  route:   { path: 'highlight/ep-1', onChange: () => () => {} },
+Then write the aggregate somewhere the frontend can read it — an entity scope — as you would any other
+precomputed value:
+
+```java
+ctx.store().put(Scope.episode(episodeSlug), "leaderboard", board);
 ```
 
-- every `onChange` (and `player.on`) must return a function, and
-- a hand-rolled `consent` must also supply `granted` and `request`, since it is now a full `ConsentApi`.
+### In tests
 
-Switching those fakes to `makeMockCtx` — overriding only the fields the test cares about — is the cheaper
-fix and survives the next contract change. `makeMockConsent()` gives you a consent double with
-`grant`/`revoke` if a test needs to flip a decision mid-run.
+`InMemoryDocStore.asUser(uuid)` stands in for the host resolving `me` from a session, so you can seed what
+a frontend would have written and then assert on the aggregate:
 
-> Measured on `mosaicast-plugin-sample`: the entire migration was **six lines, all of them in one test
-> file**. Its production frontend and its whole Java backend compiled against `0.4.0` untouched.
+```java
+InMemoryDocStore store = ctx.store();          // FakePluginContext narrows the return type for you
+store.asUser(alice).put(Scope.user(), "mark:s2e04:b3", true);
+store.asUser(bob).put(Scope.user(), "mark:s2e04:b7", true);
 
-**`createPluginI18n` gained `dispose()`.** It subscribes to locale changes for its whole life; call
-`dispose()` when the component owning it goes away. Previously that subscription leaked, so this is a
-bug fix you may want to adopt even though nothing forces you to.
+plugin.register(ctx);
 
-**Stop POSTing to `/api/plugins/{id}/log`:**
-
-```diff
--await ctx.api.post('log', { level: 'warn', message: 'no board' });
-+ctx.log('warn', 'no board');
+assertEquals(2, store.queryAcrossUsers("mark:").size());
 ```
 
-**Optional, worth doing:** `ctx.consent.request(category)` finally lets you build the click-to-load
-placeholder — call it from the click, never on mount. `ctx.consent.granted()` renders a summary.
-`ctx.episodeLabels` gives you human-readable names for `ctx.episodes`, so pickers can show titles instead
-of slugs (it is optional and may be partial — fall back to the slug).
+There is no production counterpart to `asUser` — no real `DocStore` can write into another user's
+partition.
 
-## 5. Backend niceties (optional)
+## 5. Frontend types
 
-`ctx.logger()` is an `org.slf4j.Logger` the host has already named `plugin.<pluginId>`. Add
-`slf4j-api` as a *provided* dependency and use it; do not create your own logger, or the host cannot
-attribute the output to you.
+`ctx.scope` is unchanged: `site | feed | season | episode`. `user` is a **storage** scope, not a slot
+scope — there is no user page to mount a slot on — so it lives in a separate type:
 
-If you declared `"storage": "schema"` and gave up because it was rejected at load: it works now. See the
-[README](README.md#relational-storage--ctxschema-since-040).
+```ts
+import { SELF_SCOPE_ID, type DataScopeType } from '@mosaicast/plugin-sdk';
+```
+
+A component reading per-user data addresses `data/user/${SELF_SCOPE_ID}/…` explicitly while its
+`ctx.scope` stays whatever page it is on. `makeMockCtx` needs no change.
+
+`queryAcrossUsers` has no TypeScript counterpart, deliberately — not as a method that 403s, not as a
+method at all.
 
 ## 6. Rebuild and re-test
 
 ```bash
-./gradlew build            # against plugin-api/testkit 0.4.0
+./gradlew build            # against plugin-api/testkit 0.5.0
 npm ci && npm run build
 ./build.sh                 # → dist/
 ```
 
-Then copy `dist/` into `MOSAICAST_PLUGINS_DIR` and check the admin log viewer on startup: a plugin that
-still trips one of the above is listed there with the reason.
+Then copy `dist/` into `MOSAICAST_PLUGINS_DIR` and check the admin log viewer on startup.
 
 ---
 
 ## Quick checklist
 
-- [ ] `platformApi` is `0.4.0`, and both Java artifacts and the npm package are on `0.4.0`
-- [ ] No `com.fasterxml.jackson` imports left
-- [ ] `new ObjectMapper()` replaced with `JsonMapper.builder().build()`
-- [ ] `consent` uses `services[]`, with schemes in `hosts` and a real `provider`
-- [ ] Any hand-rolled `PluginContext` returns an unsubscribe from every `onChange`
-- [ ] No POSTs to `/api/plugins/{id}/log`
-- [ ] Tests pass against `plugin-testkit` / `makeMockCtx` `0.4.0`
+- [ ] `platformApi` is `0.5.0`, and both Java artifacts and the npm package are on `0.5.0`
+- [ ] Manifest declares `"data": { "readableBy": …, "writableBy": … }` — **and if any slot is `visibleTo: "anonymous"`, `readableBy` says `"anonymous"` too, or those reads now 403**
+- [ ] Any `switch` over `ScopeType` handles `USER` (or has a `default`)
+- [ ] No `Scope.site(String)` calls left
+- [ ] Per-user writes go to `data/user/me/…`, with the entity in the key — **not** `…:<userId>:…`
+- [ ] A lazy client-side migration path moves each user's legacy data on their next visit
+- [ ] Leaderboards/rollups come from `queryAcrossUsers(...)` on the backend, not from the client
+- [ ] No `USER` scope reaches `ctx.store()` on the backend (it throws `UnsupportedOperationException`)
+- [ ] Tests pass against `plugin-testkit` / `makeMockCtx` `0.5.0`

@@ -11,9 +11,9 @@ package dev.mosaicast.plugin.api;
  * <strong>rejects incompatible plugins</strong> (ARCHITECTURE §7.2). This is the stability anchor of the
  * whole system.
  *
- * <p><strong>The host matches {@code major.minor} exactly.</strong> A plugin declaring {@code 0.3.x} is
- * rejected the moment the host runs {@code 0.4.0} — there is no forward or backward tolerance. While the
- * SDK is pre-1.0 a breaking change is therefore a <em>minor</em> bump ({@code 0.3.0} → {@code 0.4.0});
+ * <p><strong>The host matches {@code major.minor} exactly.</strong> A plugin declaring {@code 0.4.x} is
+ * rejected the moment the host runs {@code 0.5.0} — there is no forward or backward tolerance. While the
+ * SDK is pre-1.0 a breaking change is therefore a <em>minor</em> bump ({@code 0.4.0} → {@code 0.5.0});
  * from {@code 1.0.0} on, ordinary SemVer applies and breaking means major.
  *
  * <p>The value here MUST match the TypeScript re-export {@code PLATFORM_API_VERSION} in
@@ -31,5 +31,5 @@ public final class PlatformApi {
      *
      * <p>Mirror of the npm package version and the TypeScript {@code PLATFORM_API_VERSION} constant.
      */
-    public static final String VERSION = "0.4.0";
+    public static final String VERSION = "0.5.0";
 }
