@@ -54,8 +54,17 @@ public final class FakePluginContext implements PluginContext {
         this.schema = schema;
     }
 
+    /**
+     * The in-memory doc store this context is wired to.
+     *
+     * <p>The return type is narrowed from {@link DocStore} on purpose, as with {@link #logger()}: seeding
+     * per-user data needs {@link InMemoryDocStore#asUser(java.util.UUID)}, which the contract type does not
+     * have — a real backend cannot write into a user's partition, only a test can.
+     *
+     * @return the doc store; never {@code null}
+     */
     @Override
-    public DocStore store() {
+    public InMemoryDocStore store() {
         return store;
     }
 

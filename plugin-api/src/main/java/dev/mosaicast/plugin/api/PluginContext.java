@@ -43,22 +43,42 @@ public interface PluginContext {
      *          → remove; idempotent
      * }</pre>
      *
-     * <p>{@code scopeType} and {@code scopeId} mirror {@link ScopeType} and {@link Scope#id()}. For
-     * {@link ScopeType#SITE} the id is always the singleton {@link Scope#SITE_ID} — so
-     * {@code store().put(Scope.site(), …)} and {@code …/data/site/main/{key}} address the same document,
-     * and the path always has four non-empty segments. Keys must match {@link DocStore#KEY_PATTERN} and
-     * travel as the final path segment verbatim: no {@code /}, so structure them with
-     * {@code :}/{@code .}/{@code -}, e.g. {@code mark:userId:cell}. The list endpoint is paginated, and
-     * returns the same keyed {@link DocEntry} shape {@link DocStore#query(Scope, String)} does.
+     * <p>{@code scopeType} and {@code scopeId} mirror {@link ScopeType} and {@link Scope#id()}. Two of
+     * them are singletons whose id is fixed: {@link ScopeType#SITE} is always {@link Scope#SITE_ID} — so
+     * {@code store().put(Scope.site(), …)} and {@code …/data/site/main/{key}} address the same document —
+     * and {@link ScopeType#USER} is always {@link Scope#SELF_ID}, i.e. {@code …/data/user/me/{key}}, which
+     * the host resolves to the calling user. The path therefore always has four non-empty segments. Keys
+     * must match {@link DocStore#KEY_PATTERN} and travel as the final path segment verbatim: no
+     * {@code /}, so structure them with {@code :}/{@code .}/{@code -}, e.g. {@code mark:s2e04:cell}. The
+     * list endpoint is paginated, and returns the same keyed {@link DocEntry} shape
+     * {@link DocStore#query(Scope, String)} does.
      *
      * <p>So the document a backend writes with {@code ctx.store().put(scope, key, value)} is exactly the
      * one the frontend reads at {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — backend
-     * and frontend see one store, not two.
+     * and frontend see one store, not two. The exception is the {@code USER} scope, which exists only on
+     * this HTTP surface: a backend has no calling user, so it reads user partitions through
+     * {@link DocStore#queryAcrossUsers(String)} and writes none.
      *
      * <p>The host enforces the boundaries on that surface: data is hard-scoped to the plugin id (a plugin
-     * only ever sees its own), reads are gated by the slot's {@code visibleTo} and writes by the mapped
-     * {@link Role}, the scope must exist (and its feed be enabled), and the call carries the user's
-     * authentication (session or personal access token).
+     * only ever sees its own), the scope must exist (and its feed be enabled), and the call carries the
+     * user's authentication (session or personal access token). Access is what the manifest declares —
+     * <strong>not</strong> what the slots imply:
+     *
+     * <pre>{@code
+     * "data": { "readableBy": "fan", "writableBy": "podcaster" }
+     * }</pre>
+     *
+     * <p>Values are manifest role names: {@code anonymous | fan | podcaster | admin} — the {@link Role}
+     * constants plus {@code anonymous}, which is the absence of one. {@code writableBy} may
+     * not be {@code anonymous}, and an absent block defaults {@code readableBy} to the <em>write</em>
+     * floor rather than to anonymous, so saying nothing gets the safe answer. A slot's {@code visibleTo}
+     * governs <strong>rendering only</strong> — it never governed data, and inferring the data floor from
+     * unrelated UI slots is what once let a plugin with one anonymous slot expose its whole store.
+     *
+     * <p>The {@code USER} scope ignores {@code readableBy} entirely: the partition is the caller's own, and
+     * no floor makes somebody else's readable. Naming any {@code USER} id other than {@code me} is a 400
+     * (never a silent substitution), and an anonymous {@code USER} call is a 401 whatever the floor says —
+     * with no session there is no partition to resolve.
      *
      * <p><strong>No request-time server logic in v1:</strong> a write through that surface is plain
      * persistence — no plugin code runs on the request. Derive, validate or aggregate in

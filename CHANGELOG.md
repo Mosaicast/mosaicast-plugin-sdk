@@ -7,6 +7,82 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-08-08
+
+A security cut. A white-box audit of core found that the plugin doc store had no notion of *whose* a
+document is: `scopeType`, `scopeId` and `key` are all client input, the only gate was a per-plugin role
+floor, and scope ids are public slugs — so any caller above that floor could read, overwrite or delete
+any key in any scope, including another user's. Nothing had to be guessed.
+
+**The advice in the contract was part of the bug.** ARCHITECTURE §7.6 and this SDK's `DocStore` javadoc
+told authors to model per-user data as per-user *keys* (`mark:<userId>:cell`). A key is client-supplied,
+so that is an access-control decision placed exactly where the host cannot check it. The fix is a scope
+the host owns, not better advice.
+
+Every plugin declaring `0.4.x` is rejected the moment core runs `0.5.0` — it compares `major.minor`
+exactly. See [`MIGRATION.md`](MIGRATION.md); the code change is small, but **moving existing per-user data
+is not automatic** and is the part to read.
+
+### Added
+
+- **`ScopeType.USER` and `Scope.user()` — the calling user's own private partition.** Its id is always the
+  sentinel `Scope.SELF_ID` (`"me"`), and the canonical `Scope` constructor normalizes any `USER` id to it,
+  exactly as it already did for `SITE_ID`. There is deliberately **no `Scope.user(String)` overload**: a
+  plugin has no business naming a user, and a compile error is a better answer than an argument that would
+  be ignored. Over HTTP the scope is `…/data/user/me/{key}`, resolved server-side from the session; any
+  other `user` id is a **400** (never a silent substitution) and an anonymous `user` request is a **401**.
+  The partition is flat, so the entity goes in the key: `mark:<episodeSlug>:cell`.
+- **`DocStore.queryAcrossUsers(String keyPrefix)` → `List<OwnedDocEntry>`**, and the `OwnedDocEntry(UUID
+  userId, String key, JsonNode value)` record. Backend-only and read-only, with no HTTP surface: it is how
+  a plugin builds a leaderboard, a moderation view or a nightly rollup now that per-user data is not
+  addressable by key. The owner id is host-resolved from the partition the document lives in, never a
+  value the browser supplied — which is what makes an aggregate built from it true. The alternative,
+  having each client report its own summary into a shared scope, would be a leaderboard of whatever users
+  typed.
+- **TypeScript `DataScopeType` and `SELF_SCOPE_ID`.** `DataScopeType` is `Scope['type'] | 'user'` — a
+  second type on purpose: `user` addresses storage and is **not** a slot scope, so it appears in a
+  `data/{scopeType}/{scopeId}/…` path and never in `ctx.scope`. There is no user page for a slot to mount
+  on, and `makeMockCtx`'s `scope` keeps its four values. `queryAcrossUsers` has no TS counterpart at all —
+  not as a method that 403s, not as a method.
+- **Test kit: `InMemoryDocStore.asUser(UUID)` and `docsOf(UUID)`.** `asUser` stands in for the host
+  resolving `me` from a session, so a test can seed what a frontend would have written and then assert on
+  `queryAcrossUsers`. It has no counterpart in the contract — no production `DocStore` can write into a
+  user's partition. `FakePluginContext.store()` narrows its return type to `InMemoryDocStore` (as
+  `logger()` already did) so this needs no cast.
+
+### Changed — **BREAKING**
+
+- **`ScopeType` gained a constant.** An exhaustive `switch` over `ScopeType` compiled against `0.4.0` no
+  longer covers every case. **Migration:** add a `USER` branch, or a `default`.
+- **`DocStore` gained `queryAcrossUsers`.** Breaks only implementors of the interface — a hand-rolled
+  `DocStore` in a test. **Migration:** use `InMemoryDocStore` instead, or implement the method.
+- **A `USER` scope throws `UnsupportedOperationException` on every `DocStore` method**, reads included: a
+  backend thread has no calling user, and resolving "me" without a caller would have to pick someone. Not
+  `IllegalArgumentException` — the argument is fine, the operation has no meaning there.
+- **`Scope.site(String)` is gone**, deprecated `forRemoval` since 0.3.0. **Migration:** `Scope.site()`.
+- **`FeedAccess.episodesIn(Scope.user())` returns no episodes** (and `FakeFeedAccess` mirrors it): no
+  episode belongs to a person. Resolve the page's own scope instead.
+- **Manifest: the data surface declares its own access floor.** A new `"data": { "readableBy": …,
+  "writableBy": … }` block, validated at load, replaces the old behaviour of deriving the read floor from
+  the *minimum* `visibleTo` across all slots — under which a plugin with one anonymous display slot and one
+  admin-only slot exposed its entire doc store anonymously. Values are `anonymous | fan | podcaster |
+  admin`; `writableBy` may not be `anonymous`; an **absent block defaults `readableBy` to the write floor**,
+  not to anonymous, so a plugin that says nothing gets the safe answer rather than inheriting the old
+  behaviour as a default. Slot `visibleTo` now governs **rendering only** — it never governed data, which
+  is precisely the confusion that produced the finding. The `USER` scope ignores `readableBy` entirely.
+
+### Documentation
+
+- The `DocStore`, `Scope`, `ScopeType`, `PluginContext.store()`, `FeedAccess` javadoc and the
+  `PluginApiClient` TSDoc now say where per-user data goes and why, instead of recommending per-user keys.
+  Every `mark:userId:cell` example is replaced with `mark:<episodeSlug>:cell` — entity scope ids are slugs,
+  not UUIDs, so a UUID example taught the wrong shape too.
+- `MIGRATION.md` is rewritten for 0.5.0, including **both halves of the data move**: a backend can read
+  legacy per-user keys under entity scopes, but it cannot write into anyone's partition, so the write half
+  is necessarily client-side and lazy. Existing per-user data stays exactly as exposed as it is today until
+  a plugin moves it — the host cannot know the key convention that put it there, so there is no automatic
+  migration.
+
 ## [0.4.0] — 2026-07-28
 
 Five needs had queued up behind one unavoidable break, so they ship as a single cut rather than three
@@ -273,6 +349,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.5.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.2.0

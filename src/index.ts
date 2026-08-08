@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.4.0' as const;
+export const PLATFORM_API_VERSION = '0.5.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -43,13 +43,43 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
  */
 export type Unsubscribe = () => void;
 
-/** The level plus concrete entity a view is scoped to (ARCHITECTURE §6.1). */
+/**
+ * The level plus concrete entity a view is scoped to (ARCHITECTURE §6.1).
+ *
+ * This is the **slot** scope — the page your component was mounted on. It never carries the `user` level
+ * of {@link DataScopeType}: a slot lives in a named region of a page, and there is no user page. A
+ * component reading per-user data addresses `data/user/me/…` explicitly while `ctx.scope` stays whatever
+ * page it is on.
+ */
 export interface Scope {
   /** The scope level. */
   type: 'site' | 'feed' | 'season' | 'episode';
-  /** The id of the entity at that level (e.g. the `EpisodeRef` id for `episode`). */
+  /** The id of the entity at that level (e.g. the `EpisodeRef` slug for `episode`). */
   id: string;
 }
+
+/**
+ * The scope levels the host's **data** surface addresses — the four page levels of {@link Scope} plus
+ * `user`, the caller's own private partition (`ScopeType` in the Java SDK).
+ *
+ * Deliberately a second type: `user` is a storage partition, never a slot scope, so it can appear in a
+ * `data/{scopeType}/{scopeId}/…` path but never in `ctx.scope`.
+ *
+ * @since 0.5.0
+ */
+export type DataScopeType = Scope['type'] | 'user';
+
+/**
+ * The id every `user` data path carries: the literal `me`, mirroring the Java `Scope.SELF_ID`.
+ *
+ * The host resolves it from the session, so `data/user/me/{key}` reaches the calling user's partition and
+ * no one else's. **Any other `user` id is a 400**, never a silent substitution, and an anonymous request
+ * to a `user` path is a 401 — with no session there is no partition. Per-user data belongs here rather
+ * than in a key like `mark:<userId>:cell`, which the host cannot enforce because the client supplies it.
+ *
+ * @since 0.5.0
+ */
+export const SELF_SCOPE_ID = 'me' as const;
 
 /**
  * The host-owned filter axes for the current view (ARCHITECTURE §6.1).
@@ -148,38 +178,69 @@ export interface PagedDocs<T = unknown> {
  *          → remove; idempotent
  * ```
  *
- * `scopeType` is `site | feed | season | episode` and `scopeId` the id of that entity — i.e. the
- * {@link Scope} the backend addresses with. For `site` the id is the literal `main` (one site, one
- * singleton scope), so the path always has four non-empty segments. `key` must match
+ * `scopeType` is a {@link DataScopeType} and `scopeId` the id of that entity — i.e. the `Scope` the
+ * backend addresses with. Two of them are singletons whose id is fixed: `site` is always the literal
+ * `main` (one site), and `user` always {@link SELF_SCOPE_ID} (`me`), which the host resolves to the
+ * calling user. So the path always has four non-empty segments. `key` must match
  * `^[A-Za-z0-9._:-]{1,200}$` — the host answers 400 otherwise — and is the final path segment verbatim:
- * no `/`, so structure keys with `:` / `.` / `-` (e.g. `mark:userId:cell`). The list is paginated
- * ({@link PagedDocs}) and carries each doc's key ({@link DocEntry}), since you cannot address a doc
- * without it.
+ * no `/`, so structure keys with `:` / `.` / `-` (e.g. `mark:s2e04:b3`; entity ids are slugs). The list
+ * is paginated ({@link PagedDocs}) and carries each doc's key ({@link DocEntry}), since you cannot
+ * address a doc without it.
  *
  * The doc a backend writes with `ctx.store().put(scope, key, value)` is the one read here at
- * `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`: one store, two ends.
+ * `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`: one store, two ends. The `user` scope is the
+ * exception — it exists only here. A backend has no calling user, so it cannot write a user partition at
+ * all and reads them only in aggregate, through the Java `DocStore.queryAcrossUsers(prefix)`.
  *
- * Data is hard-scoped to the plugin id — a plugin can only ever see its own. Reads are gated by the
- * slot's `visibleTo`, writes require the mapped {@link Role}, and the host validates that the scope
- * exists. A write is plain persistence: no plugin code runs at request time, so anything derived or
- * validated server-side must be precomputed in the backend's `register`/`onSchedule` and read back from
- * the store.
+ * ## Where per-user data goes
+ *
+ * **In the `user` scope, not in the key.** A key is client-supplied, so the older convention
+ * `mark:<userId>:cell` under an episode scope was an access-control decision the host could not check:
+ * any caller past the plugin's read floor could address someone else's key, and scope ids are public
+ * slugs, so nothing had to be guessed. `data/user/me/…` is resolved from the session instead — the only
+ * partition a caller can name is their own. Any other `user` id is a **400**; an anonymous `user` request
+ * is a **401**, whatever the read floor says. The partition is flat, so the entity goes in the key:
+ * `mark:<episodeSlug>:cell`.
+ *
+ * ## What the host enforces
+ *
+ * Data is hard-scoped to the plugin id — a plugin only ever sees its own — and the host validates that the
+ * scope exists. Access is what your **manifest** declares:
+ *
+ * ```json
+ * "data": { "readableBy": "fan", "writableBy": "podcaster" }
+ * ```
+ *
+ * Values are `anonymous | fan | podcaster | admin` ({@link Role} plus `anonymous`, the absence of one);
+ * `writableBy` may not be `anonymous`, and if the block is absent `readableBy` falls back to the *write*
+ * floor rather than to anonymous — saying nothing gets the safe answer. A slot's `visibleTo` governs
+ * **rendering only**; it never governed data access, and inferring the data floor from unrelated UI slots
+ * is exactly what once let a plugin with one anonymous slot expose its whole store. The `user` scope
+ * ignores `readableBy` altogether: no floor makes someone else's partition readable.
+ *
+ * A write is plain persistence: no plugin code runs at request time, so anything derived or validated
+ * server-side must be precomputed in the backend's `register`/`onSchedule` and read back from the store.
  *
  * Custom plugin-defined server routes may arrive in a later `platformApi` version; v1 plugins use the
  * doc store.
  *
  * @example Read, list, write and remove docs from a Web Component
  * ```ts
- * const base = `data/${ctx.scope.type}/${ctx.scope.id}`;   // scope.id is `main` on the site scope
- * const key = `board:${ctx.user!.id}`;                     // no `/` in keys
+ * const mine = `data/user/${SELF_SCOPE_ID}`;               // the caller's own partition
+ * const shared = `data/${ctx.scope.type}/${ctx.scope.id}`; // scope.id is `main` on the site scope
+ * const key = `mark:${ctx.scope.id}`;                      // no `/` in keys
  *
- * const board = await ctx.api.get<Board>(`${base}/${key}`);   // rejects with a 404 problem if absent
- * await ctx.api.put(`${base}/${key}`, { ...board, marked });  // upsert, last-write-wins
+ * const marks = await ctx.api.get<Marks>(`${mine}/${key}`);   // rejects with a 404 problem if absent
+ * await ctx.api.put(`${mine}/${key}`, { ...marks, b3: true }); // upsert, last-write-wins
  *
- * const page = await ctx.api.get<PagedDocs<Board>>(`${base}?prefix=board:&page=0&size=50`);
+ * const page = await ctx.api.get<PagedDocs<Marks>>(`${mine}?prefix=mark:&page=0&size=50`);
  * page.items.forEach(({ key, value }) => render(key, value));
  *
- * await ctx.api.delete(`${base}/${key}`);                     // idempotent
+ * await ctx.api.delete(`${mine}/${key}`);                     // idempotent
+ *
+ * // A leaderboard is not built here: the backend aggregates every user's marks with
+ * // queryAcrossUsers(...) and writes the result to `${shared}/leaderboard` for this component to read.
+ * const board = await ctx.api.get<Leaderboard>(`${shared}/leaderboard`);
  * ```
  */
 export interface PluginApiClient {

@@ -14,20 +14,34 @@ import java.util.Optional;
  * never read another plugin's data, and reads/writes are confined to the given scope.
  *
  * <p><strong>Concurrency:</strong> writes are <em>last-write-wins</em>. Plugins that need stronger
- * guarantees model it in their key design (e.g. per-user keys), as bingo does (§7.6).
+ * guarantees model it in their data design (§7.6).
+ *
+ * <p><strong>Per-user data belongs in the {@link ScopeType#USER} scope, never in the key.</strong> Keys
+ * are client-supplied, so the convention this javadoc used to recommend — {@code mark:<userId>:cell}
+ * under an episode scope — was an access-control decision the host had no way to enforce: any caller past
+ * the plugin's read floor could address another user's key directly, and scope ids are public slugs, so
+ * nothing had to be guessed. {@link Scope#user()} is addressed as {@code user/me} and resolved
+ * server-side from the session, so the partition a caller reaches is the only one they can name. The
+ * partition is flat, so the entity goes in the key instead: {@code mark:<episodeSlug>:cell}.
+ *
+ * <p><strong>A backend thread has no calling user</strong>, so every method below throws
+ * {@link UnsupportedOperationException} when handed a {@code USER} scope — reads included, since
+ * resolving "me" without a caller would have to pick someone, and any pick is wrong. To aggregate over
+ * users, use {@link #queryAcrossUsers(String)}, which is explicit about having no single owner.
  *
  * <p><strong>This is the plugin's sole persistence path</strong> (unless the manifest declares a
  * {@link SchemaStore schema}), and it is shared with the plugin's frontend: the host exposes a fixed,
  * generic, per-plugin-namespaced HTTP surface over it, which the Web Component reaches via
- * {@code ctx.api}. That surface mirrors this interface one-to-one — get, put, list, delete, and no more.
- * A document written here with {@link #put(Scope, String, Object)} is read by the frontend at
+ * {@code ctx.api}. That surface mirrors this interface one-to-one — get, put, list, delete, and no more
+ * ({@link #queryAcrossUsers(String)} excepted: it is backend-only and has no endpoint). A document
+ * written here with {@link #put(Scope, String, Object)} is read by the frontend at
  * {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — see {@link PluginContext#store()} for
  * the full endpoint list and its access rules. Plugins do not define HTTP routes.
  *
  * <p><strong>Keys</strong> must match {@link #KEY_PATTERN}: they travel verbatim as the final path
  * segment of that HTTP surface, so a {@code /} is not addressable (and a percent-encoded one is rejected
  * by the servlet container). Structure keys with {@code :}, {@code .} or {@code -} instead — e.g.
- * {@code mark:userId:cell}. The host rejects a key outside that charset (HTTP 400 on its surface,
+ * {@code mark:s2e04:cell}. The host rejects a key outside that charset (HTTP 400 on its surface,
  * {@link IllegalArgumentException} on this one).
  */
 public interface DocStore {
@@ -39,6 +53,8 @@ public interface DocStore {
      * ({@code …/data/{scopeType}/{scopeId}/{key}}) and are carried verbatim, so {@code /} is excluded —
      * percent-encoding it does not help, as servlet containers reject {@code %2F} in a path segment by
      * default. Use {@code :}, {@code .} or {@code -} as separators instead.
+     *
+     * <p>200 characters is ample for a composite key carrying a slug — entity ids are slugs, not UUIDs.
      *
      * <p>Implementations validate against this pattern; the host and the test kit both reject a
      * non-matching key rather than storing a document the frontend could never address.
@@ -53,6 +69,8 @@ public interface DocStore {
      * @param type  the target type to deserialize into; never {@code null}
      * @param <T>   the value type
      * @return the value, or {@link Optional#empty()} if no entry exists for {@code (scope, key)}
+     * @throws UnsupportedOperationException if {@code scope} is a {@link ScopeType#USER} scope — a
+     *         backend has no calling user; see {@link #queryAcrossUsers(String)}
      */
     <T> Optional<T> get(Scope scope, String key, Class<T> type);
 
@@ -62,7 +80,9 @@ public interface DocStore {
      * @param scope the scope to write into; never {@code null}
      * @param key   the entry key; never {@code null}
      * @param value the value to store, serialized to JSON by the host; never {@code null}
-     * @throws IllegalArgumentException if {@code key} does not match {@link #KEY_PATTERN}
+     * @throws IllegalArgumentException      if {@code key} does not match {@link #KEY_PATTERN}
+     * @throws UnsupportedOperationException if {@code scope} is a {@link ScopeType#USER} scope — a
+     *         backend has no calling user, and cannot write into anyone's partition
      */
     void put(Scope scope, String key, Object value);
 
@@ -77,6 +97,8 @@ public interface DocStore {
      * @param key   the entry key; never {@code null}
      * @return {@code true} if an entry existed and was removed, {@code false} if there was nothing to
      *         remove
+     * @throws UnsupportedOperationException if {@code scope} is a {@link ScopeType#USER} scope — a
+     *         backend has no calling user
      */
     boolean delete(Scope scope, String key);
 
@@ -91,6 +113,33 @@ public interface DocStore {
      * @param keyPrefix the key prefix to match; an empty string matches all keys in the scope
      * @return the matching documents, in no guaranteed order; never {@code null}, empty when nothing
      *         matches
+     * @throws UnsupportedOperationException if {@code scope} is a {@link ScopeType#USER} scope — use
+     *         {@link #queryAcrossUsers(String)}, which names the owner of each document it returns
      */
     List<DocEntry> query(Scope scope, String keyPrefix);
+
+    /**
+     * Every user's entries under {@code keyPrefix}, across all {@link ScopeType#USER} partitions of this
+     * plugin.
+     *
+     * <p><strong>This reads other people's data.</strong> It exists for aggregates — a leaderboard, a
+     * moderation view, a nightly rollup — and it is the wrong tool for showing one user their own state:
+     * that is {@code ctx.api} against {@code data/user/me/…} from the frontend, where the host resolves
+     * the caller.
+     *
+     * <p>Backend-only and read-only: there is no HTTP surface for it, so no visitor's request can reach
+     * another visitor's data through it. Keeping the aggregate on the server is also what makes it
+     * <em>true</em> — the alternative, having each browser report its own summary into a shared scope,
+     * puts a forgeable number in the client's hands.
+     *
+     * <p>Each result carries the host-resolved {@link OwnedDocEntry#userId() owner}. The scope is implicit
+     * (all user partitions), so unlike {@link #query(Scope, String)} there is nothing to pass but the
+     * prefix.
+     *
+     * @param keyPrefix the key prefix to match; an empty string matches every key in every user partition
+     * @return the matching documents with their owners, in no guaranteed order; never {@code null}, empty
+     *         when nothing matches
+     * @since 0.5.0
+     */
+    List<OwnedDocEntry> queryAcrossUsers(String keyPrefix);
 }

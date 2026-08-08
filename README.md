@@ -31,8 +31,8 @@ The contract version is a **single SemVer anchor** mirrored in four places that 
 (CI enforces it): `build.gradle.kts` · `package.json` · `PlatformApi.VERSION` · `PLATFORM_API_VERSION`.
 
 **How the host matches it:** core compares `major.minor` **exactly**. A plugin declaring `0.3.x` is
-rejected the moment the host runs `0.4.0` — with the reason shown in the admin log viewer. While the SDK
-is pre-1.0 a breaking change is therefore a **minor** bump (`0.3.0` → `0.4.0`), not a major one; from
+rejected the moment the host runs `0.5.0` — with the reason shown in the admin log viewer. While the SDK
+is pre-1.0 a breaking change is therefore a **minor** bump (`0.4.0` → `0.5.0`), not a major one; from
 `1.0.0` on, normal SemVer applies and breaking means major.
 
 ## Build & test
@@ -49,8 +49,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.4.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.4.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.5.0")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.5.0") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -99,16 +99,39 @@ DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
 | upsert | `store().put(scope, key, value)` | `ctx.api.put('data/…/{key}', value)` |
 | remove | `store().delete(scope, key)` → `boolean` | `ctx.api.delete('data/…/{key}')` |
 
-- `scopeType` is `site | feed | season | episode` and `scopeId` is that entity's id — mirroring `Scope`/`ScopeType`, the same addressing the backend uses. **`site`'s `scopeId` is always `main`** (`Scope.SITE_ID`): there is only one site, so both the SDK and the host normalize every site scope to that singleton — `Scope.site()` and `…/data/site/main/{key}` address the same document, and the path always has four non-empty segments.
-- `key` must match `DocStore.KEY_PATTERN` = `^[A-Za-z0-9._:-]{1,200}$` and is the final path segment, verbatim — no `/`, and no percent-encoded slash either (servlet containers reject `%2F` there). Structure keys with `:` / `.` / `-` instead, e.g. `mark:userId:cell`. The host answers 400 on a bad key, and `InMemoryDocStore` throws `IllegalArgumentException` — so it fails in your tests, not in production.
+- `scopeType` is `site | feed | season | episode | user` and `scopeId` is that entity's id — mirroring `Scope`/`ScopeType`, the same addressing the backend uses. Two are **singletons** whose id the SDK and the host both pin: `site`'s is always `main` (`Scope.SITE_ID`, one site) and `user`'s always `me` (`Scope.SELF_ID`, the calling user). So `Scope.site()` and `…/data/site/main/{key}` address the same document, and the path always has four non-empty segments.
+- `key` must match `DocStore.KEY_PATTERN` = `^[A-Za-z0-9._:-]{1,200}$` and is the final path segment, verbatim — no `/`, and no percent-encoded slash either (servlet containers reject `%2F` there). Structure keys with `:` / `.` / `-` instead, e.g. `mark:s2e04:b3` (entity ids are slugs, not UUIDs). The host answers 400 on a bad key, and `InMemoryDocStore` throws `IllegalArgumentException` — so it fails in your tests, not in production.
 - The list is **paginated** (core's standard `PagedResponse` envelope) and **carries keys** (`DocEntry`), because neither end can address a doc without one.
 - `delete` is **idempotent**: removing an absent doc is not an error. The Java call returns whether anything was actually removed.
+
+### Per-user data — the `user` scope (since 0.5.0)
+
+**Per-user data belongs in the `user` scope, never in the key.** A key is client-supplied, so the convention this README used to suggest — `mark:<userId>:cell` under an episode scope — was an access-control decision the host could not enforce: any caller past the plugin's read floor could address someone else's key directly, and scope ids are public slugs, so nothing had to be guessed.
+
+`Scope.user()` / `…/data/user/me/{key}` fixes that by construction:
+
+- The id is always the sentinel `me` (`Scope.SELF_ID`), resolved **server-side from the session**. The canonical `Scope` constructor normalizes any `USER` id to it, so there is no expression in the Java API that names another person's partition — and there is deliberately **no `Scope.user(String)` overload**.
+- Naming any other `user` id over HTTP is a **400**, never a silent substitution. An anonymous `user` request is a **401** whatever the read floor says: no session, no partition.
+- The partition is **flat** — one per user, not one per user and entity — so the entity goes in the key: `mark:<episodeSlug>:cell`.
+- `readableBy` does not apply to it. No floor makes someone else's partition readable.
+
+**A backend has no calling user**, so every `DocStore` method throws `UnsupportedOperationException` for a `USER` scope — reads included, since resolving "me" without a caller would have to pick someone. Aggregate instead:
+
+```java
+// Backend-only, read-only, and no HTTP surface: no visitor's request can reach another's data.
+List<OwnedDocEntry> marks = ctx.store().queryAcrossUsers("mark:");
+// record OwnedDocEntry(UUID userId, String key, JsonNode value) — the owner is host-resolved, never
+// a value the browser supplied, which is what makes a leaderboard built from it true.
+```
+
+Write the aggregate back to an entity scope (`…/data/episode/s2e04/leaderboard`) and let the component read it there. In tests, `InMemoryDocStore.asUser(uuid)` stands in for the host resolving `me`, so you can seed what a frontend would have written and then assert on `queryAcrossUsers`.
 
 **The two ends see one store.** The doc a backend writes with `ctx.store().put(scope, key, value)` is exactly what the frontend reads at `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`.
 
 **What the host enforces**, so a plugin doesn't have to:
 - Data is **hard-scoped to the plugin id** — a plugin can only ever see its own data.
-- **Reads** are gated by the slot's `visibleTo`; **writes** require the mapped role. The host validates that the scope exists (and that the feed is enabled). `ctx.api` carries the user's auth (session or personal access token).
+- **Access is what the manifest declares**, not what the slots imply: `"data": { "readableBy": "fan", "writableBy": "podcaster" }`. Values are `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`, and an absent block defaults `readableBy` to the **write** floor rather than to anonymous — saying nothing gets the safe answer. A slot's `visibleTo` governs **rendering only**; deriving the data floor from unrelated UI slots is what once let a plugin with one anonymous slot expose its whole store.
+- The host validates that the scope exists (and that the feed is enabled). `ctx.api` carries the user's auth (session or personal access token).
 
 **No request-time server logic.** A write is plain persistence — no plugin code runs on the request. Anything derived, validated or aggregated server-side is **precomputed** in `register`/`onSchedule` and read back from the store.
 

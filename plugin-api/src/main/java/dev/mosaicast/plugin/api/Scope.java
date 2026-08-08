@@ -11,10 +11,17 @@ import java.util.Objects;
  * <p>A scope is a {@link ScopeType} and the id of the entity at that level. It is the addressing unit
  * for both {@link DocStore} entries and {@link FeedAccess} lookups.
  *
+ * <p>Two of the five types are <strong>singletons</strong> whose id this record pins for you, exactly as
+ * the host does: {@link ScopeType#SITE} to {@link #SITE_ID} (there is one site) and {@link ScopeType#USER}
+ * to {@link #SELF_ID} (a caller has one partition — their own). For {@code USER} that is a security
+ * property, not a convenience: no plugin code, on either side of the wire, can construct a scope naming
+ * somebody else.
+ *
  * @param type the level; never {@code null}
  * @param id   the id of the entity at that level (e.g. the {@code EpisodeRef} ID for
  *             {@link ScopeType#EPISODE}); never {@code null}. For {@link ScopeType#SITE} it is always
- *             {@link #SITE_ID} — see {@link #site()}.
+ *             {@link #SITE_ID} and for {@link ScopeType#USER} always {@link #SELF_ID} — see {@link #site()}
+ *             and {@link #user()}.
  */
 public record Scope(ScopeType type, String id) {
 
@@ -28,16 +35,35 @@ public record Scope(ScopeType type, String id) {
     public static final String SITE_ID = "main";
 
     /**
+     * The id of every {@link ScopeType#USER} scope: {@value} — the sentinel standing for "the calling
+     * user".
+     *
+     * <p>The host resolves it server-side from the session; it is never a user id a plugin supplies. On
+     * the frontend the path is literally {@code …/data/user/me/{key}}, and the host answers <strong>400
+     * to any other {@code USER} id</strong> rather than substituting silently — code that reads as though
+     * it addresses a specific user must not quietly address the caller instead. An anonymous call to a
+     * {@code USER} path is a <strong>401</strong>: no session, no partition.
+     *
+     * @since 0.5.0
+     */
+    public static final String SELF_ID = "me";
+
+    /**
      * Canonical constructor: validates that neither component is {@code null} and normalizes the
-     * {@link ScopeType#SITE} scope to its singleton {@link #SITE_ID}, exactly as the host does — so
-     * {@code new Scope(SITE, anything).id()} is {@code "main"} and every site scope is {@code equals} to
-     * every other.
+     * singleton scopes to their fixed ids, exactly as the host does — {@code new Scope(SITE, anything)}
+     * is {@code "main"} and {@code new Scope(USER, anything)} is {@code "me"}, so every site scope is
+     * {@code equals} to every other site scope and every user scope to every other user scope.
+     *
+     * <p>Normalizing {@code USER} here is deliberate: it means there is no expression in this API that
+     * names another person's partition, so the IDOR cannot be written in the first place.
      */
     public Scope {
         Objects.requireNonNull(type, "type");
         Objects.requireNonNull(id, "id");
         if (type == ScopeType.SITE) {
             id = SITE_ID;
+        } else if (type == ScopeType.USER) {
+            id = SELF_ID;
         }
     }
 
@@ -51,15 +77,30 @@ public record Scope(ScopeType type, String id) {
     }
 
     /**
-     * Convenience factory for a {@link ScopeType#SITE} scope.
+     * The {@link ScopeType#USER} scope — the calling user's own private partition, with id
+     * {@link #SELF_ID}.
      *
-     * @param id ignored — the site scope is a singleton, so the result is always {@link #site()}
-     * @return the site scope
-     * @deprecated the site scope takes no id; use {@link #site()}.
+     * <p><strong>Per-user data belongs here, not in the key.</strong> A key is client-supplied, so the
+     * older convention {@code mark:<userId>:cell} under an episode scope was an access-control decision
+     * the host could not enforce: any caller past the plugin's read floor could address someone else's
+     * key directly. In this scope the partition a caller reaches is the only one they can name.
+     *
+     * <p>The partition is flat — one per user, not one per user and entity — so the entity goes in the
+     * key: {@code mark:<episodeSlug>:cell}. Scope ids are slugs, not UUIDs.
+     *
+     * <p>There is deliberately <strong>no {@code user(String)} overload</strong>: a plugin has no
+     * business naming a user, and a compile error is a better answer than an argument that would be
+     * silently ignored.
+     *
+     * <p>This scope is unusable from a backend thread — there is no calling user to resolve — so every
+     * {@link DocStore} method throws {@link UnsupportedOperationException} for it. Aggregate with
+     * {@link DocStore#queryAcrossUsers(String)}.
+     *
+     * @return the calling user's scope
+     * @since 0.5.0
      */
-    @Deprecated(since = "0.3.0", forRemoval = true)
-    public static Scope site(String id) {
-        return site();
+    public static Scope user() {
+        return new Scope(ScopeType.USER, SELF_ID);
     }
 
     /** Convenience factory for a {@link ScopeType#FEED} scope. */

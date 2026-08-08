@@ -9,14 +9,33 @@ import {
   defineMosaicastElement,
   PLATFORM_API_VERSION,
   resolveArtwork,
+  SELF_SCOPE_ID,
+  type DataScopeType,
   type DisplaySnapshot,
   type PluginContext,
+  type Scope,
 } from './index.js';
 import { makeMockCtx } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.4.0');
+    expect(PLATFORM_API_VERSION).toBe('0.5.0');
+  });
+});
+
+describe('the user data scope', () => {
+  it('is addressed by the sentinel the host resolves from the session', () => {
+    expect(SELF_SCOPE_ID).toBe('me');
+    expect(`data/user/${SELF_SCOPE_ID}/mark:s2e04`).toBe('data/user/me/mark:s2e04');
+  });
+
+  it('exists on the data surface but not as a slot scope', () => {
+    const data: DataScopeType = 'user';
+    expect(data).toBe('user');
+
+    // @ts-expect-error a slot is never mounted on a user — there is no user page.
+    const slot: Scope = { type: 'user', id: 'me' };
+    expect(slot.id).toBe('me');
   });
 });
 
