@@ -42,7 +42,7 @@ host could not check it. 0.5.0 replaces the advice with a scope the host owns.
 
 `package.json`: `"@mosaicast/plugin-sdk": "^0.5.0"`.
 
-## 2. Declare your data floor in the manifest
+## 2. Declare your data floor in the manifest — **this one breaks public plugins**
 
 New block, validated at load:
 
@@ -52,14 +52,34 @@ New block, validated at load:
 
 Values are `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`.
 
-**Why this is not optional in practice.** Core used to derive the read floor from the *minimum*
-`visibleTo` across all your slots — so a plugin with one anonymous display slot and one admin-only slot
-served its **entire** doc store to anonymous callers. That inference is gone. If you omit the block,
-`readableBy` falls back to your **write** floor, not to anonymous: saying nothing gets the safe answer,
-which may well be stricter than what your plugin had yesterday. Declare it.
+**Read this even if you skim the rest.** Core used to derive the read floor from the *minimum* `visibleTo`
+across all your slots — so a plugin with one anonymous display slot and one admin-only slot served its
+**entire** doc store to anonymous callers. That inference is gone, and nothing replaces it silently:
+
+> **If you omit the block, `readableBy` falls back to your *write* floor — not to anonymous.**
+
+So a plugin that has any `visibleTo: "anonymous"` slot and no `data` block **loses its anonymous reads**:
+requests that returned 200 yesterday return **403** today. That is the fix working as intended, not a
+regression — but it is a behaviour change, and it will look like "my public component stopped loading" if
+you meet it in production instead of here.
+
+**If your data really is public, say so:**
+
+```diff
+   "slots": [ { "scope": "episode", "element": "my-card", "placement": "main", "visibleTo": "anonymous" } ],
++  "data":  { "readableBy": "anonymous", "writableBy": "fan" },
+```
+
+There is no `data` block that restores the old *derived* behaviour, and that is deliberate: the old
+behaviour is the vulnerability. Pick the floor your data actually needs.
 
 And the distinction the old behaviour blurred: **`visibleTo` on a slot governs rendering only.** It never
 governed data access.
+
+**The `USER` scope ignores `readableBy` in both directions.** No floor makes another user's partition
+readable, and none stands between a caller and their own — an authenticated user of any role reads
+`data/user/me/…`, including one below your declared read floor. An anonymous caller has no partition at
+all, so that request is a 401 regardless.
 
 ## 3. Fix what no longer compiles
 
@@ -196,7 +216,7 @@ Then copy `dist/` into `MOSAICAST_PLUGINS_DIR` and check the admin log viewer on
 ## Quick checklist
 
 - [ ] `platformApi` is `0.5.0`, and both Java artifacts and the npm package are on `0.5.0`
-- [ ] Manifest declares `"data": { "readableBy": …, "writableBy": … }`
+- [ ] Manifest declares `"data": { "readableBy": …, "writableBy": … }` — **and if any slot is `visibleTo: "anonymous"`, `readableBy` says `"anonymous"` too, or those reads now 403**
 - [ ] Any `switch` over `ScopeType` handles `USER` (or has a `default`)
 - [ ] No `Scope.site(String)` calls left
 - [ ] Per-user writes go to `data/user/me/…`, with the entity in the key — **not** `…:<userId>:…`

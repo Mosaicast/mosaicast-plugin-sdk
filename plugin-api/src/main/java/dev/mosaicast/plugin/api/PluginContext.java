@@ -75,8 +75,10 @@ public interface PluginContext {
      * governs <strong>rendering only</strong> — it never governed data, and inferring the data floor from
      * unrelated UI slots is what once let a plugin with one anonymous slot expose its whole store.
      *
-     * <p>The {@code USER} scope ignores {@code readableBy} entirely: the partition is the caller's own, and
-     * no floor makes somebody else's readable. Naming any {@code USER} id other than {@code me} is a 400
+     * <p>The {@code USER} scope ignores {@code readableBy} in <em>both</em> directions: no floor makes
+     * somebody else's partition readable, and none stands between a caller and their own — an
+     * authenticated user of any role reads {@code data/user/me/…}, including one below the declared read
+     * floor. Naming any {@code USER} id other than {@code me} is a 400
      * (never a silent substitution), and an anonymous {@code USER} call is a 401 whatever the floor says —
      * with no session there is no partition to resolve.
      *

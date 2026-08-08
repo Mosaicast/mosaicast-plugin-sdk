@@ -68,7 +68,10 @@ is not automatic** and is the part to read.
   admin-only slot exposed its entire doc store anonymously. Values are `anonymous | fan | podcaster |
   admin`; `writableBy` may not be `anonymous`; an **absent block defaults `readableBy` to the write floor**,
   not to anonymous, so a plugin that says nothing gets the safe answer rather than inheriting the old
-  behaviour as a default. Slot `visibleTo` now governs **rendering only** — it never governed data, which
+  behaviour as a default. **Migration:** a plugin with a `visibleTo: "anonymous"` slot and no `data` block
+  loses its anonymous reads — they answer 403 until it declares `"readableBy": "anonymous"`. Intended, but
+  it is a behaviour change and it is the one most likely to be met in production; `MIGRATION.md` step 2
+  covers it. Slot `visibleTo` now governs **rendering only** — it never governed data, which
   is precisely the confusion that produced the finding. The `USER` scope ignores `readableBy` entirely.
 
 ### Documentation

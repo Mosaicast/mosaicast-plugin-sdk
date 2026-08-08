@@ -215,8 +215,11 @@ export interface PagedDocs<T = unknown> {
  * `writableBy` may not be `anonymous`, and if the block is absent `readableBy` falls back to the *write*
  * floor rather than to anonymous — saying nothing gets the safe answer. A slot's `visibleTo` governs
  * **rendering only**; it never governed data access, and inferring the data floor from unrelated UI slots
- * is exactly what once let a plugin with one anonymous slot expose its whole store. The `user` scope
- * ignores `readableBy` altogether: no floor makes someone else's partition readable.
+ * is exactly what once let a plugin with one anonymous slot expose its whole store. Watch the default: a
+ * plugin with an anonymous slot and no `data` block loses its anonymous reads (403) until it declares
+ * `"readableBy": "anonymous"`. The `user` scope ignores `readableBy` in **both** directions: no floor makes
+ * someone else's partition readable, and none stands between a caller and their own — any authenticated
+ * user reads `data/user/me/…`, including one below the declared read floor.
  *
  * A write is plain persistence: no plugin code runs at request time, so anything derived or validated
  * server-side must be precomputed in the backend's `register`/`onSchedule` and read back from the store.
