@@ -21,10 +21,20 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.5.0' as const;
+export const PLATFORM_API_VERSION = '0.6.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
+
+/**
+ * A role as the manifest names it: the {@link Role} values plus `anonymous`, the absence of one.
+ *
+ * Used by the access floors in {@link PluginDataDeclaration}. `ctx.user` is `null` rather than
+ * `'anonymous'` — this spelling exists only where a manifest has to name "no role at all".
+ *
+ * @since 0.6.0
+ */
+export type DataAccessRole = Role | 'anonymous';
 
 /**
  * The severity of a {@link PluginContext.log} call.
@@ -208,7 +218,11 @@ export interface PagedDocs<T = unknown> {
  * scope exists. Access is what your **manifest** declares:
  *
  * ```json
- * "data": { "readableBy": "fan", "writableBy": "podcaster" }
+ * "data": {
+ *   "readableBy": "fan",
+ *   "writableBy": "podcaster",
+ *   "backendOwned": ["stats", "agg:*"]
+ * }
  * ```
  *
  * Values are `anonymous | fan | podcaster | admin` ({@link Role} plus `anonymous`, the absence of one);
@@ -221,6 +235,14 @@ export interface PagedDocs<T = unknown> {
  * else's partition readable, none stands between a caller and their own, and `writableBy` does not gate it
  * either — a write floor protects the *shared* surface, and a user partition is unshared. Any
  * authenticated caller reads and writes their own `data/user/me/…` whatever the manifest declares.
+ *
+ * **The floors say who, not which key.** Authorization here is per plugin, not per document, so every
+ * caller above `writableBy` can overwrite or delete *any* shared-scope key — including one your backend
+ * computed, since the host cannot tell a scheduled write from a `curl`. `backendOwned` is the exception:
+ * an exact key or a `*`-terminated prefix that the backend still writes freely while a client `PUT` or
+ * `DELETE` answers **403**, worded differently from the role-floor 403 so you can tell which rule refused
+ * you. Reads are unaffected. It does not apply to `user` partitions, and it does not remove a value forged
+ * before it was declared — see {@link PluginDataDeclaration}.
  *
  * A write is plain persistence: no plugin code runs at request time, so anything derived or validated
  * server-side must be precomputed in the backend's `register`/`onSchedule` and read back from the store.
@@ -244,6 +266,7 @@ export interface PagedDocs<T = unknown> {
  *
  * // A leaderboard is not built here: the backend aggregates every user's marks with
  * // queryAcrossUsers(...) and writes the result to `${shared}/leaderboard` for this component to read.
+ * // If the manifest declares that key backendOwned, a PUT to it from here is a 403 — by design.
  * const board = await ctx.api.get<Leaderboard>(`${shared}/leaderboard`);
  * ```
  */
@@ -428,6 +451,54 @@ export interface ConsentApi {
    *          the component
    */
   onChange(cb: () => void): Unsubscribe;
+}
+
+/**
+ * The shape of your manifest's `data` block — who may reach the doc store over HTTP, and which keys only
+ * your backend may write.
+ *
+ * **This type is documentation, not enforcement**, on the same terms as {@link ConsentServiceDeclaration}:
+ * the manifest is owned and validated by the host, nothing here runs at load time, and if this type and
+ * core disagree, core wins. It is typed because the block carries a security control — a typo in
+ * `backendOwned` protects nothing and says nothing, which is the worst way for a declaration to fail.
+ *
+ * ```ts
+ * const data: PluginDataDeclaration = {
+ *   readableBy: 'anonymous',
+ *   writableBy: 'podcaster',
+ *   backendOwned: ['stats', 'agg:*'],
+ * };
+ * ```
+ *
+ * @since 0.6.0
+ */
+export interface PluginDataDeclaration {
+  /**
+   * The minimum role that may **read** the doc store.
+   *
+   * Omit the whole block and this falls back to {@link writableBy}, not to `anonymous` — saying nothing
+   * gets the safe answer. Never applies to the `user` scope, which is the caller's own either way.
+   */
+  readableBy?: DataAccessRole;
+  /**
+   * The minimum role that may **write** the doc store. May not be `anonymous`.
+   *
+   * Governs shared scopes only: a `user` partition is unshared, so its owner writes it whatever this says.
+   */
+  writableBy: Exclude<DataAccessRole, 'anonymous'>;
+  /**
+   * Keys your backend authors, which clients may read but never `PUT` or `DELETE` (403).
+   *
+   * Each entry is an exact key, a prefix ending in `*`, or the bare `*` for "the whole store is computed"
+   * — matching `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$`, mirrored from the Java `DocStore.BACKEND_OWNED_PATTERN`.
+   * A `*` in the middle, or an empty entry, is rejected when the plugin loads.
+   *
+   * Declare a key here **and write it in your backend's `register`**, not only on a schedule: the
+   * declaration refuses new client writes but does not remove a value a client wrote before it existed, so
+   * a forged document otherwise survives until the next tick. It is ignored for `user` partitions, which
+   * the backend cannot write at all — even a bare `*` leaves those to their owner.
+   */
+  backendOwned?: string[];
 }
 
 /**

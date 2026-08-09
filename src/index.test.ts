@@ -13,13 +13,30 @@ import {
   type DataScopeType,
   type DisplaySnapshot,
   type PluginContext,
+  type PluginDataDeclaration,
   type Scope,
 } from './index.js';
 import { makeMockCtx } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.5.0');
+    expect(PLATFORM_API_VERSION).toBe('0.6.0');
+  });
+});
+
+describe('the data declaration', () => {
+  it('types the manifest block that carries the access floors', () => {
+    const data: PluginDataDeclaration = {
+      readableBy: 'anonymous',
+      writableBy: 'podcaster',
+      backendOwned: ['stats', 'agg:*'],
+    };
+    expect(data.backendOwned).toContain('stats');
+
+    // The floors are documentation-only, but the one rule the type does carry is this one.
+    // @ts-expect-error a write floor of `anonymous` is rejected by the host at load.
+    const bad: PluginDataDeclaration = { writableBy: 'anonymous' };
+    expect(bad.writableBy).toBe('anonymous');
   });
 });
 

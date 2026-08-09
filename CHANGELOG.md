@@ -7,6 +7,73 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-08-09
+
+The second half of the ownership story. `USER` scope (0.5.0) closed one visitor reaching another's data;
+a re-audit of core showed the shared scopes still have **no ownership binding at all**. Authorization
+there is per *plugin*, not per *document*, so any caller clearing a plugin's `writableBy` floor can
+overwrite or delete any key — including a value the plugin's backend computed. The auditor demonstrated it:
+a podcaster `PUT` a forged `site/main/stats` over HTTP and it was served to every visitor, then deleted it.
+
+The plugin was not misconfigured — it declared `readableBy: anonymous`, `writableBy: podcaster`, and the
+floors did exactly what they say. **There was simply no way to express "this key is the backend's".** Now
+there is.
+
+**Every plugin declaring `0.5.x` is rejected** the moment core runs `0.6.0`. That is the point of the minor
+bump rather than a patch, small as the code delta is: `platformApi` matches `major.minor` exactly, so a
+plugin declaring `backendOwned` against an older host would load happily and get **no enforcement** — a
+security declaration silently ignored. A plugin that needs this protection has to be able to require a host
+that provides it. (This reasoning is specific to a declaration the host must honour; it is not a standing
+licence for the next small release to bump minor.)
+
+Note the version numbers: this is SDK `0.6.0`, unrelated to core's own `0.6.0` — core's app version tracks
+its milestones and the two schemes are independent by design.
+
+### Added
+
+- **`data.backendOwned` in the manifest** — the keys a plugin's backend authors. Clients may read them
+  (subject to `readableBy`) and may not `PUT` or `DELETE` them; the host answers 403, worded differently
+  from the role-floor 403 so an author can tell which rule refused them. `ctx.store()` is unaffected: the
+  backend keeps writing, which is the entire point. Enforcement is host-side on the HTTP surface — **the
+  `DocStore` interface does not change**.
+- **`DocStore.BACKEND_OWNED_PATTERN`** = `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$`. An exact key, a
+  `KEY_PATTERN`-legal prefix with a single trailing `*`, or the bare `*` meaning "the whole store is
+  computed". No `*` in the middle, no empty entry, case-sensitive. A pattern can never be mistaken for a
+  key, because `*` is not in `KEY_PATTERN`, and capping the prefix at the same 200 characters keeps a
+  pattern from out-ranging any key it could match. The constant exists so the SDK and core agree on the
+  grammar by construction rather than by hand.
+- **TypeScript `PluginDataDeclaration`** (and `DataAccessRole`) — the whole `data` block, typed.
+  Documentation only, on the same terms as `ConsentServiceDeclaration`: the host owns and validates the
+  manifest. It is typed because the block now carries a security control, and a typo in `backendOwned`
+  protects nothing while saying nothing.
+- **Test kit: `InMemoryDocStore.withBackendOwned(String...)`.** A write through an `asUser(...)` view — the
+  stand-in for a client request — is refused with `IllegalStateException` where the host answers 403, while
+  this store's own writes go through. So a plugin can prove in its own tests that the key its backend
+  computes is not forgeable over HTTP. Malformed patterns throw on declaration rather than being discovered
+  when core rejects the manifest at load.
+
+### Documentation
+
+- **`DocStore`'s javadoc now says the thing it never said:** a shared-scope document has no owner, anything
+  above `writableBy` can overwrite or delete it, and if your backend authors a key you must declare it. The
+  auditor's remark — that this belongs in the SDK where authors read it, not only in the host controller's
+  javadoc — was fair.
+- Two consequences documented everywhere the feature is: declaring a key `backendOwned` does **not** remove
+  a value a client wrote before the declaration existed (so write computed keys in `register()` as well as
+  on a schedule, or a forged document survives until the next tick), and the declaration is **ignored for
+  `USER` scopes**, where even a bare `*` leaves a partition to its owner because the backend cannot write
+  one at all.
+- README gains a "Backend-owned keys" section carrying the audit's own `curl` as the motivating example.
+
+### Not in this release
+
+- **Per-feed ownership.** The audit also frames this as cross-tenant tampering — a podcaster editing
+  another podcaster's feed. True, but `PODCASTER` is a global role and feeds have no owner, so that is a
+  product decision about multi-tenancy, not a doc-store contract change.
+- **Per-scope-type declarations** (site-scope `stats` owned, episode-scope `stats` not). More contract
+  surface than the problem justifies: name the keys differently instead (`agg:stats` vs `stats`). If one
+  key name means two things in two scopes, that is a modelling problem the contract should not absorb.
+
 ## [0.5.0] — 2026-08-08
 
 A security cut. A white-box audit of core found that the plugin doc store had no notion of *whose* a
@@ -355,6 +422,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.6.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.3.0

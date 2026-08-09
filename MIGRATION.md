@@ -1,212 +1,143 @@
-# Migrating a plugin to `platformApi` 0.5.0
+# Migrating a plugin to `platformApi` 0.6.0
 
-For plugin authors coming from `0.4.x`. **The code change is small — an afternoon at most. Moving your
-existing per-user data is the part that needs thought, and it is step 4.**
+For plugin authors coming from `0.5.x`. **Small: a version bump, and one manifest line if your backend
+computes anything.** Nothing you wrote against 0.5.0 stops compiling.
 
 **You have no choice about timing.** Core matches `major.minor` **exactly**, so the moment the host runs
-`0.5.0` every `0.4.x` plugin is rejected at load, with the reason in the admin log viewer.
+`0.6.0` every `0.5.x` plugin is rejected at load, with the reason in the admin log viewer.
 
-Coming from `0.3.x`? Do the [0.4.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.4.0/MIGRATION.md)
-first — Jackson 3 and the manifest `consent` schema — then come back here.
+Coming from `0.4.x`? Do the [0.5.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.5.0/MIGRATION.md)
+first — the `USER` scope and the `data` block that release introduced — then come back here.
 
 ---
 
 ## Why this release exists
 
-A white-box audit of core found that the doc store had no notion of *whose* a document is. `scopeType`,
-`scopeId` and `key` all come from the client, the only gate was a per-plugin role floor, and scope ids are
-public slugs — so any caller above that floor could read, overwrite or delete any key in any scope,
-**including another user's**. Nothing had to be guessed.
+A re-audit of core found the half that `USER` scope did not close. `USER` fixed one visitor reaching
+another's data. **Shared scopes never had an ownership binding at all:** authorization is per *plugin*, not
+per *document*, so any caller above your `writableBy` floor may overwrite or delete any key in any
+`site`/`feed`/`season`/`episode` scope. The host cannot tell your backend's scheduled write from a `curl` —
+same table, same key, no author recorded.
 
-The advice in the contract was part of the bug: the SDK told you to model per-user data as per-user *keys*
-(`mark:<userId>:cell`). A key is client input, so that put an access-control decision exactly where the
-host could not check it. 0.5.0 replaces the advice with a scope the host owns.
+The demonstrated attack, against the reference plugin:
+
+```bash
+$ curl -b cookie.podcaster -X PUT .../api/plugins/sample/data/site/main/stats \
+       -H "X-XSRF-TOKEN: $XT" -d '{"totalEpisodes":9999,"totalFavourites":1337}'
+204
+$ curl .../api/plugins/sample/data/site/main/stats     # anonymous
+{"totalEpisodes":9999,"totalFavourites":1337}
+```
+
+`stats` is written by the sample's *scheduled backend task*. The plugin was not misconfigured — its floors
+did exactly what they say. There was simply no way to express "this key is the backend's".
 
 ## 1. Bump the version you build against
 
 `plugin.json`:
 
 ```diff
--  "platformApi": "0.4.0",
-+  "platformApi": "0.5.0",
+-  "platformApi": "0.5.0",
++  "platformApi": "0.6.0",
 ```
 
 `build.gradle.kts`:
 
 ```diff
--  compileOnly("dev.mosaicast:plugin-api:0.4.0")
--  testImplementation("dev.mosaicast:plugin-testkit:0.4.0")
-+  compileOnly("dev.mosaicast:plugin-api:0.5.0")
-+  testImplementation("dev.mosaicast:plugin-testkit:0.5.0")
+-  compileOnly("dev.mosaicast:plugin-api:0.5.0")
+-  testImplementation("dev.mosaicast:plugin-testkit:0.5.0")
++  compileOnly("dev.mosaicast:plugin-api:0.6.0")
++  testImplementation("dev.mosaicast:plugin-testkit:0.6.0")
 ```
 
-`package.json`: `"@mosaicast/plugin-sdk": "^0.5.0"`.
+`package.json`: `"@mosaicast/plugin-sdk": "^0.6.0"`.
 
-## 2. Declare your data floor in the manifest — **this one breaks public plugins**
+## 2. Declare the keys your backend authors
 
-New block, validated at load:
-
-```json
-"data": { "readableBy": "fan", "writableBy": "podcaster" }
-```
-
-Values are `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`.
-
-**Read this even if you skim the rest.** Core used to derive the read floor from the *minimum* `visibleTo`
-across all your slots — so a plugin with one anonymous display slot and one admin-only slot served its
-**entire** doc store to anonymous callers. That inference is gone, and nothing replaces it silently:
-
-> **If you omit the block, `readableBy` falls back to your *write* floor — not to anonymous.**
-
-So a plugin that has any `visibleTo: "anonymous"` slot and no `data` block **loses its anonymous reads**:
-requests that returned 200 yesterday return **403** today. That is the fix working as intended, not a
-regression — but it is a behaviour change, and it will look like "my public component stopped loading" if
-you meet it in production instead of here.
-
-**If your data really is public, say so:**
+**Does your backend write to a shared scope?** Anything in `register()` or `onSchedule(...)` that calls
+`ctx.store().put(Scope.site()/feed()/season()/episode(), …)`. If so, those keys are forgeable today.
+Declare them:
 
 ```diff
-   "slots": [ { "scope": "episode", "element": "my-card", "placement": "main", "visibleTo": "anonymous" } ],
-+  "data":  { "readableBy": "anonymous", "writableBy": "fan" },
+ "data": {
+   "readableBy": "anonymous",
+-  "writableBy": "podcaster"
++  "writableBy": "podcaster",
++  "backendOwned": ["stats", "agg:*"]
+ }
 ```
 
-There is no `data` block that restores the old *derived* behaviour, and that is deliberate: the old
-behaviour is the vulnerability. Pick the floor your data actually needs.
+- An entry is an **exact key**, a **prefix ending in `*`**, or the **bare `*`** ("everything I store is
+  computed; clients read only"). The grammar is `DocStore.BACKEND_OWNED_PATTERN` =
+  `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$` — a `*` in the middle, or an empty entry, is rejected at load.
+- A client `PUT`/`DELETE` to a matching key becomes **403**, with its own message so you can tell it from a
+  role-floor refusal. **Reads are unaffected**, still governed by `readableBy`.
+- **`ctx.store()` is unaffected.** Your backend keeps writing those keys — that is the entire point.
 
-And the distinction the old behaviour blurred: **`visibleTo` on a slot governs rendering only.** It never
-governed data access.
+### Three things that will otherwise surprise you
 
-**Neither floor applies to the `USER` scope.** `readableBy` does not, in either direction: no floor makes
-another user's partition readable, and none stands between a caller and their own. `writableBy` does not
-either — it protects the *shared* surface, where one caller's write lands on top of another's, and a user
-partition is unshared. So you do **not** need `writableBy: "fan"` to let fans write their own
-`data/user/me/…`; declare the floor your *shared* scopes need and per-user writes keep working. An
-anonymous caller has no partition at all, so that request is a 401 regardless.
-
-## 3. Fix what no longer compiles
-
-Three small ones:
+**It does not clean up.** Declaring a key `backendOwned` refuses *new* client writes; it does not remove a
+value someone forged before the declaration existed. If your backend only writes on a schedule, the bogus
+document is served until the next tick. Write your computed keys on startup too:
 
 ```diff
-- switch (scope.type()) { case SITE -> …; case FEED -> …; case SEASON -> …; case EPISODE -> …; }
-+ switch (scope.type()) { case SITE -> …; case FEED -> …; case SEASON -> …; case EPISODE -> …;
-+                         case USER -> …; }
+ public void register(PluginContext ctx) {
++    recomputeStats(ctx);                                   // repairs on every restart
+     ctx.onSchedule(Duration.ofMinutes(15), () -> recomputeStats(ctx));
+ }
 ```
 
-```diff
-- ctx.store().put(Scope.site("main"), key, value);   // removed; deprecated since 0.3.0
-+ ctx.store().put(Scope.site(), key, value);
+**It does not apply to `user` partitions.** The backend cannot write one at all, so a declaration there
+would make a key nobody can write. Even a bare `*` leaves `data/user/me/…` to its owner.
+
+**A bare `*` makes `writableBy` vestigial** for shared scopes — and it never governed `user` scopes — so
+with `backendOwned: ["*"]` nothing hits your write floor at all. Declare a sane one anyway; it is still
+required and still may not be `anonymous`.
+
+### Which keys are *not* candidates
+
+Anything a client legitimately writes: a vote, a mark, a submitted answer. Those belong to whoever wrote
+them — and if that is a person, they belong in the `USER` scope (0.5.0), not in a shared scope with a
+declaration bolted on.
+
+## 3. Prove it in your tests
+
+`InMemoryDocStore.withBackendOwned(...)` enforces the declaration, using the `asUser(...)` view as the
+stand-in for a client request — which covers every client write, since `writableBy` may not be `anonymous`:
+
+```java
+InMemoryDocStore store = new InMemoryDocStore().withBackendOwned("stats");
+InMemoryDocStore client = store.asUser(UUID.randomUUID());
+
+plugin.register(ctx);                                              // backend writes stats
+
+assertThrows(IllegalStateException.class,
+        () -> client.put(Scope.site(), "stats", forged));          // the host answers 403
+assertEquals(computed, client.get(Scope.site(), "stats", Stats.class).orElseThrow());
 ```
 
-A hand-rolled `DocStore` (a test double written by hand rather than `InMemoryDocStore`) must now implement
-`queryAcrossUsers(String)`. Switching to `InMemoryDocStore` is the cheaper fix.
+A malformed pattern throws from `withBackendOwned` itself, so a typo in the declaration fails in your tests
+instead of at load time in production.
 
-## 4. Move your per-user data
+## 4. Frontend
 
-**This is the real work, and nothing does it for you.** Existing per-user data lives *inside keys* under
-entity scopes, and the host cannot know the convention that put it there — so there is no automatic
-migration, and that data stays exactly as exposed as it is today until you move it.
-
-### The new shape
-
-```diff
-- ctx.api.put(`data/episode/${ctx.scope.id}/mark:${ctx.user.id}:b3`, true);
-+ ctx.api.put(`data/user/me/mark:${ctx.scope.id}:b3`, true);
-```
-
-- The scope id is the literal `me` (`SELF_SCOPE_ID` in TS, `Scope.SELF_ID` in Java), resolved server-side
-  from the session. **Any other `user` id is a 400**, never a silent substitution; an anonymous `user`
-  request is a **401** whatever your `readableBy` says.
-- In Java the canonical `Scope` constructor normalizes any `USER` id to the sentinel, and there is no
-  `Scope.user(String)` overload — you cannot write an expression naming somebody else's partition.
-- The partition is **flat**: one per user, not one per user *and* entity. So the entity moves into the key
-  (`mark:<episodeSlug>:cell`). Entity ids are slugs, not UUIDs.
-
-### Both halves of the move
-
-A backend **can** read your legacy per-user keys — they sit under entity scopes, which it addresses
-normally — so you can inventory them eagerly on the server. It **cannot** write into anyone's partition:
-`ctx.store()` throws `UnsupportedOperationException` for a `USER` scope on *every* method, reads included,
-because a backend thread has no calling user to resolve.
-
-So the write half is necessarily client-side and lazy — each user's data moves the next time they open
-your plugin:
+`PluginDataDeclaration` types the whole `data` block if you want the JSON checked while you write it:
 
 ```ts
-const legacy = `data/episode/${ctx.scope.id}/mark:${ctx.user!.id}:b3`;
-const mine   = `data/user/me/mark:${ctx.scope.id}:b3`;
-
-const existing = await ctx.api.get<Mark>(mine).catch(() => null);
-if (!existing) {
-  const old = await ctx.api.get<Mark>(legacy).catch(() => null);
-  if (old) {
-    await ctx.api.put(mine, old);
-    await ctx.api.delete(legacy);   // idempotent
-  }
-}
+import type { PluginDataDeclaration } from '@mosaicast/plugin-sdk';
 ```
 
-Keep that path until you are satisfied everyone has come back, then delete it — and delete whatever legacy
-keys remain from the backend, which *can* remove them (entity scope, ordinary `delete`).
+Documentation only — the host owns and validates the manifest — but the block now carries a security
+control, and a typo in `backendOwned` protects nothing while saying nothing.
 
-### Aggregates: `queryAcrossUsers`
+Otherwise nothing changes on the frontend, except that a `PUT` to one of your own backend-owned keys now
+rejects with a 403 problem. If a component was writing a key your backend also computes, that was a race
+you were losing anyway: move the write to the backend, or the key out of the declaration.
 
-Per-user data is no longer addressable by key, so a leaderboard cannot be assembled from the client any
-more. It should never have been: a summary each browser reports about itself is a summary of whatever
-users typed. Do it on the backend instead:
-
-```java
-// Backend-only, read-only, no HTTP surface — no visitor's request can reach another visitor's data.
-List<OwnedDocEntry> marks = ctx.store().queryAcrossUsers("mark:");   // record(UUID userId, String key, JsonNode value)
-```
-
-The `userId` is host-resolved from the partition the document lives in, never a value a browser supplied.
-It is an identifier, not a display name, and the contract offers no way to turn it into one.
-
-Then write the aggregate somewhere the frontend can read it — an entity scope — as you would any other
-precomputed value:
-
-```java
-ctx.store().put(Scope.episode(episodeSlug), "leaderboard", board);
-```
-
-### In tests
-
-`InMemoryDocStore.asUser(uuid)` stands in for the host resolving `me` from a session, so you can seed what
-a frontend would have written and then assert on the aggregate:
-
-```java
-InMemoryDocStore store = ctx.store();          // FakePluginContext narrows the return type for you
-store.asUser(alice).put(Scope.user(), "mark:s2e04:b3", true);
-store.asUser(bob).put(Scope.user(), "mark:s2e04:b7", true);
-
-plugin.register(ctx);
-
-assertEquals(2, store.queryAcrossUsers("mark:").size());
-```
-
-There is no production counterpart to `asUser` — no real `DocStore` can write into another user's
-partition.
-
-## 5. Frontend types
-
-`ctx.scope` is unchanged: `site | feed | season | episode`. `user` is a **storage** scope, not a slot
-scope — there is no user page to mount a slot on — so it lives in a separate type:
-
-```ts
-import { SELF_SCOPE_ID, type DataScopeType } from '@mosaicast/plugin-sdk';
-```
-
-A component reading per-user data addresses `data/user/${SELF_SCOPE_ID}/…` explicitly while its
-`ctx.scope` stays whatever page it is on. `makeMockCtx` needs no change.
-
-`queryAcrossUsers` has no TypeScript counterpart, deliberately — not as a method that 403s, not as a
-method at all.
-
-## 6. Rebuild and re-test
+## 5. Rebuild and re-test
 
 ```bash
-./gradlew build            # against plugin-api/testkit 0.5.0
+./gradlew build            # against plugin-api/testkit 0.6.0
 npm ci && npm run build
 ./build.sh                 # → dist/
 ```
@@ -217,12 +148,9 @@ Then copy `dist/` into `MOSAICAST_PLUGINS_DIR` and check the admin log viewer on
 
 ## Quick checklist
 
-- [ ] `platformApi` is `0.5.0`, and both Java artifacts and the npm package are on `0.5.0`
-- [ ] Manifest declares `"data": { "readableBy": …, "writableBy": … }` — **and if any slot is `visibleTo: "anonymous"`, `readableBy` says `"anonymous"` too, or those reads now 403**
-- [ ] Any `switch` over `ScopeType` handles `USER` (or has a `default`)
-- [ ] No `Scope.site(String)` calls left
-- [ ] Per-user writes go to `data/user/me/…`, with the entity in the key — **not** `…:<userId>:…`
-- [ ] A lazy client-side migration path moves each user's legacy data on their next visit
-- [ ] Leaderboards/rollups come from `queryAcrossUsers(...)` on the backend, not from the client
-- [ ] No `USER` scope reaches `ctx.store()` on the backend (it throws `UnsupportedOperationException`)
-- [ ] Tests pass against `plugin-testkit` / `makeMockCtx` `0.5.0`
+- [ ] `platformApi` is `0.6.0`, and both Java artifacts and the npm package are on `0.6.0`
+- [ ] Every shared-scope key your backend writes appears in `data.backendOwned`
+- [ ] Those keys are (re)written in `register()`, not only on a schedule
+- [ ] No client-written key is in the list — per-person data belongs in the `USER` scope instead
+- [ ] A test asserts the forged client write is refused
+- [ ] Tests pass against `plugin-testkit` / `makeMockCtx` `0.6.0`

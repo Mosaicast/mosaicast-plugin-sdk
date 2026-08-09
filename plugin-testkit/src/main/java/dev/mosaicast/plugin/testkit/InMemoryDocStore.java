@@ -37,6 +37,10 @@ import tools.jackson.databind.json.JsonMapper;
  * and {@link #queryAcrossUsers(String)} aggregates — take a caller's view with {@link #asUser(UUID)},
  * which is the test's stand-in for the host resolving {@code me} from a session.
  *
+ * <p>It enforces {@code data.backendOwned} the same way: declare patterns with
+ * {@link #withBackendOwned(String...)} and a write through a client view is refused while this store's own
+ * writes go through, so a test can prove the key your backend computes is not forgeable over HTTP.
+ *
  * <pre>{@code
  * InMemoryDocStore store = new InMemoryDocStore();
  * UUID alice = UUID.randomUUID();
@@ -49,6 +53,7 @@ import tools.jackson.databind.json.JsonMapper;
 public final class InMemoryDocStore implements DocStore {
 
     private static final Pattern KEY = Pattern.compile(KEY_PATTERN);
+    private static final Pattern BACKEND_OWNED = Pattern.compile(BACKEND_OWNED_PATTERN);
 
     private final ObjectMapper mapper;
     // Insertion-ordered so query() results are deterministic in tests.
@@ -56,6 +61,8 @@ public final class InMemoryDocStore implements DocStore {
     // USER data lives apart, keyed by owner: Scope.user() normalizes every user to the same sentinel, so
     // the scope alone cannot tell two people's partitions apart.
     private final Map<UUID, Map<String, JsonNode>> userData;
+    // Shared with every view: the manifest's data.backendOwned patterns, which bind clients, not the backend.
+    private final List<String> backendOwned;
     // Non-null only on the view returned by asUser(...): the caller a USER scope resolves to.
     private final UUID caller;
 
@@ -73,6 +80,7 @@ public final class InMemoryDocStore implements DocStore {
         this.mapper = Objects.requireNonNull(mapper, "mapper");
         this.data = new LinkedHashMap<>();
         this.userData = new LinkedHashMap<>();
+        this.backendOwned = new ArrayList<>();
         this.caller = null;
     }
 
@@ -81,6 +89,7 @@ public final class InMemoryDocStore implements DocStore {
         this.mapper = backing.mapper;
         this.data = backing.data;
         this.userData = backing.userData;
+        this.backendOwned = backing.backendOwned;
         this.caller = caller;
     }
 
@@ -104,6 +113,39 @@ public final class InMemoryDocStore implements DocStore {
     public InMemoryDocStore asUser(UUID userId) {
         Objects.requireNonNull(userId, "userId");
         return new InMemoryDocStore(this, userId);
+    }
+
+    /**
+     * Declares keys this plugin's backend owns, as the manifest's {@code data.backendOwned} does.
+     *
+     * <p>Writes through {@link #asUser(UUID)} — the test's stand-in for a client request — are refused for
+     * a matching key with an {@link IllegalStateException}, where the host answers 403. Writes through this
+     * store are not: it stands in for the backend, and the whole point of the declaration is that the
+     * backend keeps writing. Reads are untouched on both.
+     *
+     * <p>Each pattern is an exact key, a prefix ending in {@code *}, or the bare {@code *}
+     * ({@link DocStore#BACKEND_OWNED_PATTERN}); a malformed one throws here rather than being discovered
+     * when the host rejects your manifest at load. Patterns accumulate across calls, and the declaration is
+     * ignored for {@link ScopeType#USER} scopes exactly as it is in production.
+     *
+     * @param patterns the key patterns the backend owns; never {@code null}, each matching
+     *                 {@link DocStore#BACKEND_OWNED_PATTERN}
+     * @return this instance, for chaining
+     * @throws IllegalArgumentException if a pattern is malformed
+     * @since 0.6.0
+     */
+    public InMemoryDocStore withBackendOwned(String... patterns) {
+        Objects.requireNonNull(patterns, "patterns");
+        for (String pattern : patterns) {
+            Objects.requireNonNull(pattern, "pattern");
+            if (!BACKEND_OWNED.matcher(pattern).matches()) {
+                throw new IllegalArgumentException(
+                        "backendOwned pattern '" + pattern + "' does not match " + BACKEND_OWNED_PATTERN
+                                + " — the host rejects the manifest at load");
+            }
+            backendOwned.add(pattern);
+        }
+        return this;
     }
 
     /**
@@ -143,6 +185,7 @@ public final class InMemoryDocStore implements DocStore {
                     "key '" + key + "' does not match " + KEY_PATTERN
                             + " — it would not be addressable from the frontend");
         }
+        refuseIfBackendOwned(scope, key, "write");
         documents(scope, true).put(key, mapper.valueToTree(value));
     }
 
@@ -150,6 +193,7 @@ public final class InMemoryDocStore implements DocStore {
     public boolean delete(Scope scope, String key) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(key, "key");
+        refuseIfBackendOwned(scope, key, "delete");
         return documents(scope, false).remove(key) != null;
     }
 
@@ -176,6 +220,37 @@ public final class InMemoryDocStore implements DocStore {
             }
         }));
         return out;
+    }
+
+    /**
+     * Refuses a client write to a backend-owned key, as the host's 403 does.
+     *
+     * <p>Only a client is bound: on the backend store {@code caller} is {@code null} and the write goes
+     * through. {@code USER} scopes are exempt, since the backend cannot write one at all.
+     *
+     * @param scope  the scope addressed
+     * @param key    the key addressed
+     * @param action the verb to name in the message
+     */
+    private void refuseIfBackendOwned(Scope scope, String key, String action) {
+        if (caller == null || scope.type() == ScopeType.USER) {
+            return;
+        }
+        for (String pattern : backendOwned) {
+            if (covers(pattern, key)) {
+                throw new IllegalStateException(
+                        "a client cannot " + action + " '" + key + "': it is backend-owned by '"
+                                + pattern + "' (the host answers 403)");
+            }
+        }
+    }
+
+    /** Whether one {@code backendOwned} pattern — exact key, {@code prefix*}, or bare {@code *} — covers a key. */
+    private static boolean covers(String pattern, String key) {
+        if (pattern.endsWith("*")) {
+            return key.startsWith(pattern.substring(0, pattern.length() - 1));
+        }
+        return pattern.equals(key);
     }
 
     /**
