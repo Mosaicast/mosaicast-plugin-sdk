@@ -65,7 +65,11 @@ public interface PluginContext {
      * <strong>not</strong> what the slots imply:
      *
      * <pre>{@code
-     * "data": { "readableBy": "fan", "writableBy": "podcaster" }
+     * "data": {
+     *   "readableBy": "fan",
+     *   "writableBy": "podcaster",
+     *   "backendOwned": ["stats", "agg:*"]
+     * }
      * }</pre>
      *
      * <p>Values are manifest role names: {@code anonymous | fan | podcaster | admin} — the {@link Role}
@@ -74,6 +78,15 @@ public interface PluginContext {
      * floor rather than to anonymous, so saying nothing gets the safe answer. A slot's {@code visibleTo}
      * governs <strong>rendering only</strong> — it never governed data, and inferring the data floor from
      * unrelated UI slots is what once let a plugin with one anonymous slot expose its whole store.
+     *
+     * <p><strong>The floors say who, not which key.</strong> Authorization on this surface is per plugin,
+     * not per document, so <em>every</em> caller above {@code writableBy} can overwrite or delete
+     * <em>any</em> shared-scope key — a value your backend computed included. {@code backendOwned} is the
+     * exception: an exact key or a {@code *}-terminated prefix ({@link DocStore#BACKEND_OWNED_PATTERN})
+     * whose documents this store still writes freely while a client {@code PUT}/{@code DELETE} is refused
+     * with a 403 the host words differently from the role-floor one, so an author can tell which rule
+     * turned them down. Reads are untouched. See {@link DocStore} for what it does not do — it neither
+     * removes a value forged before the declaration nor applies to {@code USER} partitions.
      *
      * <p><strong>Neither floor applies to the {@code USER} scope.</strong> {@code readableBy} does not, in
      * either direction: no floor makes somebody else's partition readable, and none stands between a caller

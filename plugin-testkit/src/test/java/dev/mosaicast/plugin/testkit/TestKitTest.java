@@ -151,6 +151,50 @@ class TestKitTest {
     }
 
     @Test
+    void backendOwnedKeysAreWritableByTheBackendAndNotByClients() {
+        InMemoryDocStore store = new InMemoryDocStore().withBackendOwned("stats", "agg:*");
+        InMemoryDocStore client = store.asUser(UUID.randomUUID());
+        Scope site = Scope.site();
+
+        store.put(site, "stats", new Vote("computed", 1));       // the backend keeps writing
+        store.put(site, "agg:favourites", new Vote("computed", 2));
+
+        // The forged PUT/DELETE from the audit — 403 on the host, refused here.
+        assertThrows(IllegalStateException.class, () -> client.put(site, "stats", new Vote("forged", 9999)));
+        assertThrows(IllegalStateException.class, () -> client.delete(site, "stats"));
+        assertThrows(IllegalStateException.class, () -> client.put(site, "agg:favourites", new Vote("f", 1)));
+
+        // Reads are untouched, and the computed value is the one that survives.
+        assertEquals(new Vote("computed", 1), client.get(site, "stats", Vote.class).orElseThrow());
+
+        // A sibling key nobody declared stays writable.
+        client.put(site, "note", new Vote("client", 3));
+        assertEquals(new Vote("client", 3), store.get(site, "note", Vote.class).orElseThrow());
+    }
+
+    @Test
+    void backendOwnedNeverBindsAUserPartition() {
+        InMemoryDocStore store = new InMemoryDocStore().withBackendOwned("*");
+        InMemoryDocStore client = store.asUser(UUID.randomUUID());
+
+        // A bare '*' locks every shared key…
+        assertThrows(IllegalStateException.class, () -> client.put(Scope.site(), "anything", "x"));
+        // …and none of a user's own, which the backend could not write anyway.
+        client.put(Scope.user(), "mark:s2e04:b3", Boolean.TRUE);
+        assertEquals(Optional.of(Boolean.TRUE), client.get(Scope.user(), "mark:s2e04:b3", Boolean.class));
+    }
+
+    @Test
+    void backendOwnedRejectsPatternsTheHostWouldRejectAtLoad() {
+        InMemoryDocStore store = new InMemoryDocStore();
+
+        assertThrows(IllegalArgumentException.class, () -> store.withBackendOwned("agg:*:total")); // '*' inside
+        assertThrows(IllegalArgumentException.class, () -> store.withBackendOwned("")); // empty
+        assertThrows(IllegalArgumentException.class, () -> store.withBackendOwned("stats/*")); // '/' not a key char
+        store.withBackendOwned("*", "stats", "agg:"); // bare '*', exact, and a prefix that happens to end in ':'
+    }
+
+    @Test
     void feedAccessResolvesNoEpisodesForAUserScope() {
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(Scope.feed("f1"), List.of("ep-1")));
         assertEquals(List.of(), feeds.episodesIn(Scope.user()));

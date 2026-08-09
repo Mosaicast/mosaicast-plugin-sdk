@@ -29,6 +29,33 @@ import java.util.Optional;
  * resolving "me" without a caller would have to pick someone, and any pick is wrong. To aggregate over
  * users, use {@link #queryAcrossUsers(String)}, which is explicit about having no single owner.
  *
+ * <p><strong>A shared-scope document has no owner.</strong> Anything above the plugin's
+ * {@code writableBy} floor can overwrite or delete any key in a {@link ScopeType#SITE},
+ * {@link ScopeType#FEED}, {@link ScopeType#SEASON} or {@link ScopeType#EPISODE} scope — including a value
+ * your backend computed, because authorization is per plugin, not per document: the host cannot tell your
+ * scheduled write from a {@code curl}. If your backend authors a key, <strong>declare it</strong> in the
+ * manifest and clients may read it and nothing else:
+ *
+ * <pre>{@code
+ * "data": {
+ *   "readableBy": "anonymous",
+ *   "writableBy": "podcaster",
+ *   "backendOwned": ["stats", "agg:*"]
+ * }
+ * }</pre>
+ *
+ * <p>Each entry is an exact key or a prefix ending in {@code *}, matching {@link #BACKEND_OWNED_PATTERN}.
+ * A client {@code PUT} or {@code DELETE} to a matching key is refused (HTTP 403, distinct from the
+ * role-floor refusal); this store — the backend's — is unaffected, which is the point. Reads are
+ * untouched and still governed by {@code readableBy}.
+ *
+ * <p>Two consequences worth knowing. Declaring a key {@code backendOwned} does <strong>not</strong> clean
+ * up a value a client wrote before the declaration existed: the row stays until your backend overwrites
+ * it, so <strong>write your computed keys in {@link PluginBackend#register(PluginContext)} as well as on
+ * a schedule</strong> — otherwise a forged value survives until the next tick. And the declaration is
+ * ignored for {@link ScopeType#USER} scopes, where the backend cannot write at all; a partition stays
+ * writable by its owner even under a bare {@code "*"}.
+ *
  * <p><strong>This is the plugin's sole persistence path</strong> (unless the manifest declares a
  * {@link SchemaStore schema}), and it is shared with the plugin's frontend: the host exposes a fixed,
  * generic, per-plugin-namespaced HTTP surface over it, which the Web Component reaches via
@@ -60,6 +87,27 @@ public interface DocStore {
      * non-matching key rather than storing a document the frontend could never address.
      */
     String KEY_PATTERN = "^[A-Za-z0-9._:-]{1,200}$";
+
+    /**
+     * The grammar of one {@code data.backendOwned} entry in the manifest: {@value}.
+     *
+     * <p>An exact key, a {@link #KEY_PATTERN}-legal prefix followed by a single trailing {@code *}, or the
+     * bare {@code *} meaning every key. Nothing else: no {@code *} in the middle, no empty entry, and the
+     * comparison is case-sensitive.
+     *
+     * <p>A pattern can never be mistaken for a key, because {@code *} is not in {@link #KEY_PATTERN} — and
+     * capping the prefix at the same 200 characters keeps a pattern from out-ranging any key it could
+     * match. The host rejects a malformed entry when the plugin loads; the test kit rejects it when you
+     * declare it, so a typo in a security declaration fails in your tests.
+     *
+     * <p>A bare {@code *} is deliberately legal here, unlike in {@code consent.storage[]}: it means "the
+     * whole doc store is authored by my backend, clients read only", which is a coherent thing for a
+     * plugin whose data is entirely computed. Note what it does <em>not</em> cover — a
+     * {@link ScopeType#USER} partition stays writable by its owner, since the backend cannot write one.
+     *
+     * @since 0.6.0
+     */
+    String BACKEND_OWNED_PATTERN = "^(\\*|[A-Za-z0-9._:-]{1,200}\\*?)$";
 
     /**
      * Reads a value and deserializes it to the requested type.

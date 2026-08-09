@@ -31,8 +31,8 @@ The contract version is a **single SemVer anchor** mirrored in four places that 
 (CI enforces it): `build.gradle.kts` · `package.json` · `PlatformApi.VERSION` · `PLATFORM_API_VERSION`.
 
 **How the host matches it:** core compares `major.minor` **exactly**. A plugin declaring `0.3.x` is
-rejected the moment the host runs `0.5.0` — with the reason shown in the admin log viewer. While the SDK
-is pre-1.0 a breaking change is therefore a **minor** bump (`0.4.0` → `0.5.0`), not a major one; from
+rejected the moment the host runs `0.6.0` — with the reason shown in the admin log viewer. While the SDK
+is pre-1.0 a breaking change is therefore a **minor** bump (`0.5.0` → `0.6.0`), not a major one; from
 `1.0.0` on, normal SemVer applies and breaking means major.
 
 ## Build & test
@@ -49,8 +49,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.5.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.5.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.6.0")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.6.0") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -131,7 +131,34 @@ Write the aggregate back to an entity scope (`…/data/episode/s2e04/leaderboard
 **What the host enforces**, so a plugin doesn't have to:
 - Data is **hard-scoped to the plugin id** — a plugin can only ever see its own data.
 - **Access is what the manifest declares**, not what the slots imply: `"data": { "readableBy": "fan", "writableBy": "podcaster" }`. Values are `anonymous | fan | podcaster | admin`; `writableBy` may not be `anonymous`, and an absent block defaults `readableBy` to the **write** floor rather than to anonymous — saying nothing gets the safe answer. A slot's `visibleTo` governs **rendering only**; deriving the data floor from unrelated UI slots is what once let a plugin with one anonymous slot expose its whole store.
+- **The floors say who, not which key** — see below.
 - The host validates that the scope exists (and that the feed is enabled). `ctx.api` carries the user's auth (session or personal access token).
+
+### Backend-owned keys (since 0.6.0) — a shared-scope document has no owner
+
+Authorization on the data surface is **per plugin, not per document**. Every caller above your `writableBy` floor can overwrite or delete *any* key in a `site`/`feed`/`season`/`episode` scope — including a value your backend computed on a schedule, because the host cannot tell your write from a `curl`:
+
+```bash
+# podcaster, with a plugin declaring writableBy: "podcaster" — the floor did exactly what it says
+curl -b cookie.podcaster -X PUT .../api/plugins/sample/data/site/main/stats \
+     -H "X-XSRF-TOKEN: $XT" -d '{"totalEpisodes":9999}'      # 204, and every visitor now reads it
+```
+
+If your backend authors a key, **declare it**:
+
+```json
+"data": {
+  "readableBy": "anonymous",
+  "writableBy": "podcaster",
+  "backendOwned": ["stats", "agg:*"]
+}
+```
+
+- Each entry is an exact key, a prefix ending in `*`, or the bare `*` (the whole store is computed) — `DocStore.BACKEND_OWNED_PATTERN` = `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$`. A `*` in the middle, or an empty entry, is rejected at load. A pattern can never be a key, since `*` is not in `KEY_PATTERN`.
+- A client `PUT`/`DELETE` to a matching key is **403**, worded differently from the role-floor 403 so you can tell which rule refused you. **Reads are untouched** and still governed by `readableBy`. `ctx.store()` — the backend — is unaffected, which is the whole point.
+- **Write those keys in `register()` too, not only on a schedule.** The declaration refuses *new* client writes; it does not remove a value forged before it existed, so otherwise a bogus document survives until the next tick.
+- It is **ignored for `user` scopes**: the backend cannot write a partition at all, so even a bare `*` leaves those to their owner.
+- `PluginDataDeclaration` in the TS SDK types this block (documentation only — the host validates it), and `InMemoryDocStore.withBackendOwned(...)` enforces it in tests, so you can prove the forged `PUT` fails without a running host.
 
 **No request-time server logic.** A write is plain persistence — no plugin code runs on the request. Anything derived, validated or aggregated server-side is **precomputed** in `register`/`onSchedule` and read back from the store.
 
