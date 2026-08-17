@@ -31,8 +31,8 @@ The contract version is a **single SemVer anchor** mirrored in four places that 
 (CI enforces it): `build.gradle.kts` · `package.json` · `PlatformApi.VERSION` · `PLATFORM_API_VERSION`.
 
 **How the host matches it:** core compares `major.minor` **exactly**. A plugin declaring `0.3.x` is
-rejected the moment the host runs `0.6.0` — with the reason shown in the admin log viewer. While the SDK
-is pre-1.0 a breaking change is therefore a **minor** bump (`0.5.0` → `0.6.0`), not a major one; from
+rejected the moment the host runs `0.7.0` — with the reason shown in the admin log viewer. While the SDK
+is pre-1.0 a breaking change is therefore a **minor** bump (`0.6.0` → `0.7.0`), not a major one; from
 `1.0.0` on, normal SemVer applies and breaking means major.
 
 ## Build & test
@@ -49,8 +49,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.6.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.6.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.7.0")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.7.0") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -79,7 +79,7 @@ This is the part plugin authors most often guess wrong, so it is stated plainly.
 
 **Backend.** A plugin persists *everything* through `ctx.store()` — the hard-scoped `DocStore`, addressed by `(Scope, key)` — and does any aggregation in `ctx.onSchedule(...)`. (The only alternative is a relational schema *declared in the manifest* and reached via `ctx.schema()`; still not a route.)
 
-**Frontend.** A Web Component reaches plugin data through `ctx.api` (`PluginApiClient`). Those calls do **not** hit plugin-authored routes — they hit a fixed, generic surface the **host** exposes over that same doc store, namespaced per plugin. It mirrors `DocStore` one-to-one — `get` / `put` / `list` / `delete`, and no more:
+**Frontend.** A Web Component reaches plugin data through `ctx.api` (`PluginApiClient`), or — for a plugin that declares a relational schema — through `ctx.schema` (see [below](#relational-storage--ctxschema-since-040-frontend-since-070)). Neither hits plugin-authored routes: both hit fixed, generic surfaces the **host** exposes, namespaced per plugin. `ctx.api` mirrors `DocStore` one-to-one — `get` / `put` / `list` / `delete`, and no more:
 
 ```text
 GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
@@ -164,7 +164,7 @@ If your backend authors a key, **declare it**:
 
 > Roadmap: custom plugin-defined server routes may arrive in a later `platformApi` version; plugins use the doc store.
 
-## Relational storage — `ctx.schema()` (since 0.4.0)
+## Relational storage — `ctx.schema` (since 0.4.0; frontend since 0.7.0)
 
 The doc store is the default and covers nearly everything. Declare a **schema** when you need what a JSON
 document cannot give you: full-text search, revisions, backlinks. Any plugin may; most declare nothing.
@@ -210,6 +210,76 @@ schema.delete("page", Criteria.where("slug", Op.EQ, "getting-started"));
 Test it with `FakeSchemaStore`, declaring the same entities your manifest does. Its `search` is a
 substring match, **not** Postgres full-text: no stemming, no ranking. Assert on which rows come back, not
 on their order.
+
+### From the frontend — `ctx.schema` (since 0.7.0)
+
+Provisioning without access was half a feature: the search box lives in the browser. `ctx.schema` is the
+frontend counterpart, and it is **`null`** unless the manifest declares a schema — the same shape as the
+Java call, so a doc-store plugin gets `null` rather than a client that 404s on everything.
+
+```ts
+if (!ctx.schema) return;                              // doc-store plugin: nothing to query
+
+interface Page { id: number; slug: string; title: string; markdown: string; updatedAt: string }
+
+const hits = await ctx.schema.search<Page>('page', 'markdown', term, {
+  where: [{ field: 'published', op: 'eq', value: true }],
+  orderBy: [{ field: 'updatedAt', direction: 'desc' }],
+  size: 20,
+});                                                   // → { items, page, size, totalElements, totalPages }
+
+const one = await ctx.schema.find<Page>('page', 42);  // null when there is no such row
+const n   = await ctx.schema.count('page');
+```
+
+| Operation | Backend (Java) | Frontend (TS) |
+|---|---|---|
+| rows by criteria | `schema.select(entity, criteria, T.class)` | `ctx.schema.select<T>(entity, query)` |
+| full-text | `schema.search(entity, field, text, criteria, T.class)` | `ctx.schema.search<T>(entity, field, text, query)` |
+| one by id | `schema.find(entity, id, T.class)` → `Optional<T>` | `ctx.schema.find<T>(entity, id)` → `T \| null` |
+| how many | `schema.count(entity, criteria)` | `ctx.schema.count(entity, query)` |
+
+- A `SchemaQuery` describes the same thing `Criteria` does — declared field names, an op from a closed
+  vocabulary, values bound by the host — with `page`/`size` instead of `limit`/`offset` because it crosses
+  HTTP (`page` from 0, `size` 50 by default, capped at 200).
+- **Reads only.** There is no write half, deliberately: a v1 plugin authors no HTTP routes, so no plugin
+  code runs at request time to enforce slug uniqueness or append a revision atomically. Your backend stays
+  the only writer — a frontend that must write puts a document in the doc store and the backend ingests it
+  on its schedule, which makes such a write eventually consistent.
+- An undeclared entity is a 404, an undeclared field or a `search` on a field that is not `:fulltext` a
+  400. Access is the same `data.readableBy` floor as the doc surface — one rule, both surfaces.
+
+Test it with `makeMockSchema({ page: [...] })` from `/testing`, which records every query. Its `search` is
+a substring match with the same caveat as `FakeSchemaStore`'s.
+
+## Deep links & navigation — `ctx.route` (navigate since 0.7.0)
+
+A plugin declaring a `page` slot owns the URL subtree `/p/<pluginId>/*`. The host hands it the subpath
+below that prefix as `ctx.route.path`, which is what makes plugin content linkable and shareable at all.
+
+```ts
+const slug = ctx.route.path || 'index';               // '' when not rendered as a page
+
+link.addEventListener('click', (e) => {
+  e.preventDefault();
+  ctx.route.navigate(`glossary/${target}`);           // → /p/wiki/glossary/<target>
+});
+
+ctx.route.navigate('index', { replace: true });       // no back-button step (tab/filter state)
+```
+
+- `navigate` is **SPA navigation**: a history entry, a working back button, and no re-fetch of the shell or
+  of any plugin bundle. An `<a href>` to your own page is a full document load, which on a densely
+  cross-linked page set is the common path, not an edge case.
+- `subpath` is relative to `/p/<pluginId>/`, the same coordinate `path` gives you. The host prefixes your
+  namespace and drops any attempt to climb out of it, so another plugin's route or a core one is not
+  blocked so much as **unnameable** — the same property `ctx.schema` has.
+- Keep the real `href` on your anchors. Middle-click, "open in new tab" and crawlers need it; `navigate`
+  only takes over the plain-click path.
+- **Do not reach past this handle.** `history.pushState` plus a synthetic `popstate` happens to work
+  against the host's current router and is not part of the contract.
+- Pair it with `ShareMetadataProvider` (OpenGraph per subpath) and `SitemapProvider` on the backend so the
+  URLs you navigate to also preview and index properly.
 
 ## Logging — `ctx.logger()` / `ctx.log()` (since 0.4.0)
 

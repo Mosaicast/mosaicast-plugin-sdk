@@ -7,6 +7,61 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-08-17
+
+The schema provider gets a frontend, and a page plugin gets a way to move.
+
+Core 0.6.6 shipped the declarative schema provider: a manifest declares entities, the platform provisions
+namespaced tables, and the plugin's Java backend reads them through `SchemaStore`. The **access half was
+missing**. There was no HTTP surface, so a plugin's Web Component could not read a single row out of the
+tables the platform had provisioned for it — and the search box, the one place a user types a query, lives
+in the browser. The capability had no consumer that could ship.
+
+The second gap is smaller and sits next to it. `ctx.route` was `{ path, onChange }`: a plugin was told
+where it is and when that changes, and had no supported way to go anywhere. A `page`-placement plugin owns
+`/p/<pluginId>/*` and is expected to navigate inside it, so its only option was an `<a href>` — a full
+document load that re-fetches the shell, the registry and every plugin bundle per internal link. The
+unsupported alternative (`history.pushState` plus a synthetic `popstate`) *works* against the host's current
+router, which is precisely why it needed replacing before it became a convention.
+
+**Every plugin declaring `0.6.x` is rejected** the moment core runs `0.7.0` — `platformApi` matches
+`major.minor` exactly. Both additions are additive, so migrating is the version string and nothing else;
+see `MIGRATION.md`.
+
+### Added
+
+- **`ctx.schema`** — `SchemaClient | null`, the frontend counterpart of the Java `ctx.schema()`, and `null`
+  for the same reason: a plugin without `storage.schema` has no tables, and the manifest is the one place
+  that is decided. `select` / `search` / `find` / `count`, mirroring `SchemaStore` and describing queries
+  with the same vocabulary as `Criteria` (`SchemaQuery`, `SchemaPredicate`, `SchemaOp`). Paging is
+  `page`/`size` in the doc surface's envelope (`SchemaPage`), because this crosses HTTP.
+- **`ctx.route.navigate(subpath, { replace })`** — SPA navigation inside the plugin's own subtree
+  (`PluginRoute`). `subpath` is the same coordinate `path` hands in; the host prefixes the namespace and
+  drops any attempt to climb out of it, so a plugin still cannot name another plugin's route or a core one.
+  Real history entry, working back button, no bundle reload.
+- **Test kit: `makeMockSchema(rows)`** — a `SchemaClient` double answering from plain arrays, recording
+  every query, and rejecting an entity the plugin never declared the way the host 404s one. Its `search` is
+  a case-insensitive substring match, **not** Postgres full-text search: it cannot reproduce stemming or
+  `ts_rank` ordering, and a test asserting a ranking it invented would prove nothing.
+- **Test kit: `ctx.navigations`** — every `navigate` call, recorded like `logs`. `makeMockCtx` defaults
+  `schema` to `null`, on the same argument as `episodeLabels` being absent: a component written against a
+  schema that is always there never handles the doc-store case.
+
+### Changed
+
+- **Reads only, deliberately.** The schema surface exposes no writes. A v1 plugin authors no HTTP routes,
+  so there is no request-time hook where plugin code could enforce slug uniqueness, append a revision
+  atomically or reject malformed input — exposing writes would hand clients direct row access with no
+  plugin code in the path, which is worse than the doc store's position, not better. The backend stays the
+  only writer of relational truth; a frontend that must write puts a document in the doc store and the
+  backend ingests it on its schedule. The cost is that such a write is eventually consistent, which is a
+  consequence of the v1 contract rather than of this release.
+
+### Documentation
+
+- `PluginApiClient` no longer implies it is the only host surface — it is the doc store's, and `ctx.schema`
+  is the other one, with its own paths and its own rules.
+
 ## [0.6.0] — 2026-08-09
 
 The second half of the ownership story. `USER` scope (0.5.0) closed one visitor reaching another's data;
@@ -422,6 +477,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.7.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.4.0
