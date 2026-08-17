@@ -348,13 +348,23 @@ export type MockPluginContext = PluginContext & {
   /**
    * Every `ctx.route.navigate(...)` call, in order.
    *
-   * Stays empty if you pass your own `route` — like {@link logs}, the recording lives in the default.
+   * A `route` override is merged over the default, so overriding `path` alone keeps this recording; it
+   * stays empty only if you replace `navigate` itself.
    */
   navigations: NavigationRecord[];
 };
 
 /** Overrides accepted by {@link makeMockCtx}. */
-export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api'>> {
+export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api' | 'route'>> {
+  /**
+   * Route override, **merged** over the default rather than replacing it.
+   *
+   * `path` is the only part most tests care about, and it is the part that has to be a fixed value — so
+   * `route: { path: 'kraken' }` is enough, and what you leave out keeps working: `navigate` still records
+   * into {@link MockPluginContext.navigations} and `onChange` still returns a working unsubscribe. Pass
+   * the other members only when the test is about them.
+   */
+  route?: Partial<PluginRoute>;
   /** Canned responses for the mock `api`, keyed as described on {@link MockApiClient.responses}. */
   apiResponses?: Record<string, unknown>;
   /** A ready-made mock api; if omitted one is created from {@link apiResponses}. */
@@ -374,6 +384,10 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api'>> {
  * the real context — the host supplies labels partially, and gives a doc-store plugin no schema at all — so
  * a component that needs either has to survive its absence. The mock makes you face that unless you pass
  * one in ({@link makeMockSchema} for the schema).
+ *
+ * **`route` is the one override that merges** rather than replacing: `route: { path: 'kraken' }` pins the
+ * subpath and keeps the recording `navigate`. Everything else is all-or-nothing, because everything else
+ * is a single behaviour rather than a value plus the handles around it.
  *
  * @param overrides partial context plus optional `apiResponses`
  * @returns a full context whose `api` is a {@link MockApiClient}, whose `log` calls are recorded in
@@ -418,5 +432,8 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     theme: DEFAULT_THEME,
   };
 
-  return { ...base, ...rest, api: mockApi, logs, navigations };
+  // `route` merges instead of replacing, unlike every other member. Pinning a subpath is the common
+  // override and `navigate` is the uncommon one, so a wholesale replacement made the usual case spell out
+  // two stubs and silently lose the `navigations` recorder in the bargain.
+  return { ...base, ...rest, route: { ...base.route, ...rest.route }, api: mockApi, logs, navigations };
 }

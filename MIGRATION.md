@@ -50,7 +50,7 @@ load — the shell, the plugin registry and every plugin bundle re-fetched per c
 +  testImplementation("dev.mosaicast:plugin-testkit:0.7.0")
 ```
 
-`package.json`: `"@mosaicast/plugin-sdk": "^0.7.0"`.
+`package.json`: `"@mosaicast/plugin-sdk": "^0.7.0"` (take `0.7.1` if you can — it makes step 4 a no-op).
 
 That is the whole required migration. The rest of this document is what you can now do.
 
@@ -122,13 +122,15 @@ test that pins a subpath — which for a `page` plugin is most of them:
 +route: { path: 'kraken', onChange: () => () => {}, navigate: () => {} },
 ```
 
-Note what you give up by overriding `route` at all: the default one records into `ctx.navigations`, and a
-replacement does not. If you want both a fixed `path` and the recorder, spread the default:
+**On `0.7.1` and later, drop the stubs instead.** The override merges over the default there, so the whole
+fix is nothing:
 
 ```ts
-const ctx = makeMockCtx();
-const pinned = makeMockCtx({ route: { ...ctx.route, path: 'kraken' } });
+const ctx = makeMockCtx({ route: { path: 'kraken' } });   // navigate still records into ctx.navigations
 ```
+
+Either way, replacing `navigate` yourself opts out of the recorder — the one case where `ctx.navigations`
+stays empty.
 
 `makeMockCtx` also now defaults `schema` to `null`, and records `navigate` calls:
 
@@ -136,7 +138,7 @@ const pinned = makeMockCtx({ route: { ...ctx.route, path: 'kraken' } });
 const schema = makeMockSchema({
   page: [{ id: 1, slug: 'kraken', title: 'The Kraken', markdown: 'a big squid' }],
 });
-const ctx = makeMockCtx({ schema, route: { path: 'kraken', onChange: () => () => {}, navigate: () => {} } });
+const ctx = makeMockCtx({ schema, route: { path: 'kraken' } });   // 0.7.1: the rest is inherited
 
 await mount(ctx);
 expect(schema.queries[0]).toMatchObject({ method: 'search', entity: 'page' });
