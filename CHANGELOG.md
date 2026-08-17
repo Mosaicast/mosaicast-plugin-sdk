@@ -7,6 +7,31 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-08-17
+
+Test kit only. **No contract change** — `platformApi` still matches on `major.minor`, so a plugin declaring
+`0.7.0` keeps loading and nothing needs re-declaring.
+
+`0.7.0` added a required `navigate` to `PluginRoute`, which made `makeMockCtx`'s wholesale `route` override
+worse than it looks: a test that only wanted to pin a subpath — the common case, and most of a `page`
+plugin's tests — suddenly had to spell out `onChange` and `navigate` too, and silently lost the
+`navigations` recorder by supplying its own. The reference plugin hit it on all four of its overrides, and
+only `tsc --noEmit` caught it.
+
+### Changed
+
+- **`makeMockCtx` merges a `route` override over the default** instead of replacing it, so
+  `route: { path: 'kraken' }` is enough and `navigate` keeps recording. Replacing `navigate` explicitly
+  still works and still opts out of the recorder — the one case where `navigations` stays empty. Every
+  other member is unchanged and remains all-or-nothing: each is a single behaviour, where `route` is a
+  value plus the handles around it.
+
+### Documentation
+
+- `MIGRATION.md` no longer claims the 0.7.0 upgrade is the version string and nothing else. A hand-built
+  `route` override is a compile break, and the guide now shows the diff — plus the note that a test runner
+  will not catch it.
+
 ## [0.7.0] — 2026-08-17
 
 The schema provider gets a frontend, and a page plugin gets a way to move.
@@ -25,8 +50,9 @@ unsupported alternative (`history.pushState` plus a synthetic `popstate`) *works
 router, which is precisely why it needed replacing before it became a convention.
 
 **Every plugin declaring `0.6.x` is rejected** the moment core runs `0.7.0` — `platformApi` matches
-`major.minor` exactly. Both additions are additive, so migrating is the version string and nothing else;
-see `MIGRATION.md`.
+`major.minor` exactly. Both additions are additive, so no plugin *code* changes; the one compile break is a
+test that hand-builds a `route` override, since `PluginRoute` gained a required `navigate` (0.7.1 softened
+that — see above). See `MIGRATION.md`.
 
 ### Added
 
@@ -477,6 +503,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.7.1]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.6.0
 [0.5.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.5.0

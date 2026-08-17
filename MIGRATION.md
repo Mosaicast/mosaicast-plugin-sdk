@@ -1,8 +1,13 @@
 # Migrating a plugin to `platformApi` 0.7.0
 
-For plugin authors coming from `0.6.x`. **Small: a version bump, and nothing else is required.** Both
-additions in this release are new surface — nothing you wrote against 0.6.0 stops compiling or changes
-behaviour.
+For plugin authors coming from `0.6.x`. **Small: a version bump, plus one line in any test that builds its
+own `route`.** Both additions in this release are new surface — no plugin *code* written against 0.6.0
+changes behaviour.
+
+The one thing that stops compiling is a test: `ctx.route` gained a required `navigate`, so an override like
+`route: { path: 'x', onChange: () => () => {} }` no longer satisfies `PluginRoute`. See step 4. Your test
+runner will not catch it — only `tsc --noEmit` will, which is the argument for having a `typecheck` script
+at all.
 
 **You have no choice about timing.** Core matches `major.minor` **exactly**, so the moment the host runs
 `0.7.0` every `0.6.x` plugin is rejected at load, with the reason in the admin log viewer.
@@ -45,7 +50,7 @@ load — the shell, the plugin registry and every plugin bundle re-fetched per c
 +  testImplementation("dev.mosaicast:plugin-testkit:0.7.0")
 ```
 
-`package.json`: `"@mosaicast/plugin-sdk": "^0.7.0"`.
+`package.json`: `"@mosaicast/plugin-sdk": "^0.7.0"` (take `0.7.1` if you can — it makes step 4 a no-op).
 
 That is the whole required migration. The rest of this document is what you can now do.
 
@@ -109,13 +114,31 @@ cannot be aimed outside your own namespace.
 
 ## 4. Tests
 
-`makeMockCtx` now defaults `schema` to `null` and records `navigate` calls:
+**A `route` override needs `navigate`.** This is the only compile break in the release, and it hits any
+test that pins a subpath — which for a `page` plugin is most of them:
+
+```diff
+-route: { path: 'kraken', onChange: () => () => {} },
++route: { path: 'kraken', onChange: () => () => {}, navigate: () => {} },
+```
+
+**On `0.7.1` and later, drop the stubs instead.** The override merges over the default there, so the whole
+fix is nothing:
+
+```ts
+const ctx = makeMockCtx({ route: { path: 'kraken' } });   // navigate still records into ctx.navigations
+```
+
+Either way, replacing `navigate` yourself opts out of the recorder — the one case where `ctx.navigations`
+stays empty.
+
+`makeMockCtx` also now defaults `schema` to `null`, and records `navigate` calls:
 
 ```ts
 const schema = makeMockSchema({
   page: [{ id: 1, slug: 'kraken', title: 'The Kraken', markdown: 'a big squid' }],
 });
-const ctx = makeMockCtx({ schema, route: { path: 'kraken', onChange: () => () => {}, navigate: () => {} } });
+const ctx = makeMockCtx({ schema, route: { path: 'kraken' } });   // 0.7.1: the rest is inherited
 
 await mount(ctx);
 expect(schema.queries[0]).toMatchObject({ method: 'search', entity: 'page' });
@@ -145,6 +168,7 @@ Then copy `dist/` into `MOSAICAST_PLUGINS_DIR` and check the admin log viewer on
 ## Quick checklist
 
 - [ ] `platformApi` is `0.7.0`, and both Java artifacts and the npm package are on `0.7.0`
+- [ ] `tsc --noEmit` runs clean — every hand-built `route` override now needs `navigate`
 - [ ] Every `ctx.schema` use is behind a `null` check
 - [ ] No frontend code expects a schema **write** — the backend still writes, the frontend still reads
 - [ ] Internal page links call `navigate` and keep their `href`

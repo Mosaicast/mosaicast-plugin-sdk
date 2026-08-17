@@ -110,6 +110,28 @@ describe('makeMockCtx', () => {
     expect(makeMockCtx({ schema }).schema).toBe(schema);
   });
 
+  it('merges a route override over the default instead of replacing it', () => {
+    // Pinning a subpath is the common case and `navigate` the uncommon one, so overriding `path` alone
+    // must not cost two stubs — nor silently lose the recorder, which is what a wholesale replace did.
+    const ctx = makeMockCtx({ route: { path: 'kraken' } });
+
+    expect(ctx.route.path).toBe('kraken');
+    ctx.route.navigate('glossary/squid');
+    expect(ctx.navigations).toEqual([{ subpath: 'glossary/squid', replace: false }]);
+    expect(typeof ctx.route.onChange(() => {})).toBe('function');
+  });
+
+  it('still lets a test replace navigate itself', () => {
+    const seen: string[] = [];
+    const ctx = makeMockCtx({ route: { path: 'kraken', navigate: (subpath) => seen.push(subpath) } });
+
+    ctx.route.navigate('elsewhere');
+
+    expect(seen).toEqual(['elsewhere']);
+    // Replaced, so the default recorder never ran — the one case where `navigations` stays empty.
+    expect(ctx.navigations).toEqual([]);
+  });
+
   it('records navigate calls instead of moving the route', () => {
     const ctx = makeMockCtx({ route: { path: 'start', onChange: () => () => {}, navigate: () => {} } });
     expect(ctx.navigations).toEqual([]);
