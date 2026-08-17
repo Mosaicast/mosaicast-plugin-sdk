@@ -1,8 +1,13 @@
 # Migrating a plugin to `platformApi` 0.7.0
 
-For plugin authors coming from `0.6.x`. **Small: a version bump, and nothing else is required.** Both
-additions in this release are new surface — nothing you wrote against 0.6.0 stops compiling or changes
-behaviour.
+For plugin authors coming from `0.6.x`. **Small: a version bump, plus one line in any test that builds its
+own `route`.** Both additions in this release are new surface — no plugin *code* written against 0.6.0
+changes behaviour.
+
+The one thing that stops compiling is a test: `ctx.route` gained a required `navigate`, so an override like
+`route: { path: 'x', onChange: () => () => {} }` no longer satisfies `PluginRoute`. See step 4. Your test
+runner will not catch it — only `tsc --noEmit` will, which is the argument for having a `typecheck` script
+at all.
 
 **You have no choice about timing.** Core matches `major.minor` **exactly**, so the moment the host runs
 `0.7.0` every `0.6.x` plugin is rejected at load, with the reason in the admin log viewer.
@@ -109,7 +114,23 @@ cannot be aimed outside your own namespace.
 
 ## 4. Tests
 
-`makeMockCtx` now defaults `schema` to `null` and records `navigate` calls:
+**A `route` override needs `navigate`.** This is the only compile break in the release, and it hits any
+test that pins a subpath — which for a `page` plugin is most of them:
+
+```diff
+-route: { path: 'kraken', onChange: () => () => {} },
++route: { path: 'kraken', onChange: () => () => {}, navigate: () => {} },
+```
+
+Note what you give up by overriding `route` at all: the default one records into `ctx.navigations`, and a
+replacement does not. If you want both a fixed `path` and the recorder, spread the default:
+
+```ts
+const ctx = makeMockCtx();
+const pinned = makeMockCtx({ route: { ...ctx.route, path: 'kraken' } });
+```
+
+`makeMockCtx` also now defaults `schema` to `null`, and records `navigate` calls:
 
 ```ts
 const schema = makeMockSchema({
@@ -145,6 +166,7 @@ Then copy `dist/` into `MOSAICAST_PLUGINS_DIR` and check the admin log viewer on
 ## Quick checklist
 
 - [ ] `platformApi` is `0.7.0`, and both Java artifacts and the npm package are on `0.7.0`
+- [ ] `tsc --noEmit` runs clean — every hand-built `route` override now needs `navigate`
 - [ ] Every `ctx.schema` use is behind a `null` check
 - [ ] No frontend code expects a schema **write** — the backend still writes, the frontend still reads
 - [ ] Internal page links call `navigate` and keep their `href`
