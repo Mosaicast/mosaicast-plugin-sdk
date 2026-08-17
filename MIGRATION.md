@@ -1,143 +1,139 @@
-# Migrating a plugin to `platformApi` 0.6.0
+# Migrating a plugin to `platformApi` 0.7.0
 
-For plugin authors coming from `0.5.x`. **Small: a version bump, and one manifest line if your backend
-computes anything.** Nothing you wrote against 0.5.0 stops compiling.
+For plugin authors coming from `0.6.x`. **Small: a version bump, and nothing else is required.** Both
+additions in this release are new surface — nothing you wrote against 0.6.0 stops compiling or changes
+behaviour.
 
 **You have no choice about timing.** Core matches `major.minor` **exactly**, so the moment the host runs
-`0.6.0` every `0.5.x` plugin is rejected at load, with the reason in the admin log viewer.
+`0.7.0` every `0.6.x` plugin is rejected at load, with the reason in the admin log viewer.
 
-Coming from `0.4.x`? Do the [0.5.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.5.0/MIGRATION.md)
-first — the `USER` scope and the `data` block that release introduced — then come back here.
+Coming from `0.5.x`? Do the [0.6.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.6.0/MIGRATION.md)
+first — `data.backendOwned`, the keys only your backend may write — then come back here.
 
 ---
 
 ## Why this release exists
 
-A re-audit of core found the half that `USER` scope did not close. `USER` fixed one visitor reaching
-another's data. **Shared scopes never had an ownership binding at all:** authorization is per *plugin*, not
-per *document*, so any caller above your `writableBy` floor may overwrite or delete any key in any
-`site`/`feed`/`season`/`episode` scope. The host cannot tell your backend's scheduled write from a `curl` —
-same table, same key, no author recorded.
+Two things a plugin could not do, both found while building the wiki.
 
-The demonstrated attack, against the reference plugin:
+**A frontend could not read the tables the platform provisioned for it.** The schema provider shipped its
+provisioning half: your manifest declares entities, the host creates `plugin_<id>_<entity>` tables with the
+indexes you asked for, and your Java backend reads them through `SchemaStore`. There was no HTTP surface,
+so your Web Component could not read one row — including the full-text search the platform had built a GIN
+index for. The workarounds were projecting the whole corpus into doc keys and re-implementing ranked search
+in the browser, or using the doc store as a request channel. Neither is something an author should build.
 
-```bash
-$ curl -b cookie.podcaster -X PUT .../api/plugins/sample/data/site/main/stats \
-       -H "X-XSRF-TOKEN: $XT" -d '{"totalEpisodes":9999,"totalFavourites":1337}'
-204
-$ curl .../api/plugins/sample/data/site/main/stats     # anonymous
-{"totalEpisodes":9999,"totalFavourites":1337}
-```
-
-`stats` is written by the sample's *scheduled backend task*. The plugin was not misconfigured — its floors
-did exactly what they say. There was simply no way to express "this key is the backend's".
+**A page plugin could not navigate.** `ctx.route` told you where you are; it gave you no way to go
+anywhere. Following a link inside your own `/p/<pluginId>/` subtree meant an `<a href>` and a full document
+load — the shell, the plugin registry and every plugin bundle re-fetched per click.
 
 ## 1. Bump the version you build against
 
 `plugin.json`:
 
 ```diff
--  "platformApi": "0.5.0",
-+  "platformApi": "0.6.0",
+-  "platformApi": "0.6.0",
++  "platformApi": "0.7.0",
 ```
 
 `build.gradle.kts`:
 
 ```diff
--  compileOnly("dev.mosaicast:plugin-api:0.5.0")
--  testImplementation("dev.mosaicast:plugin-testkit:0.5.0")
-+  compileOnly("dev.mosaicast:plugin-api:0.6.0")
-+  testImplementation("dev.mosaicast:plugin-testkit:0.6.0")
+-  compileOnly("dev.mosaicast:plugin-api:0.6.0")
+-  testImplementation("dev.mosaicast:plugin-testkit:0.6.0")
++  compileOnly("dev.mosaicast:plugin-api:0.7.0")
++  testImplementation("dev.mosaicast:plugin-testkit:0.7.0")
 ```
 
-`package.json`: `"@mosaicast/plugin-sdk": "^0.6.0"`.
+`package.json`: `"@mosaicast/plugin-sdk": "^0.7.0"`.
 
-## 2. Declare the keys your backend authors
+That is the whole required migration. The rest of this document is what you can now do.
 
-**Does your backend write to a shared scope?** Anything in `register()` or `onSchedule(...)` that calls
-`ctx.store().put(Scope.site()/feed()/season()/episode(), …)`. If so, those keys are forgeable today.
-Declare them:
+## 2. Read your schema tables from the frontend (`ctx.schema`)
 
-```diff
- "data": {
-   "readableBy": "anonymous",
--  "writableBy": "podcaster"
-+  "writableBy": "podcaster",
-+  "backendOwned": ["stats", "agg:*"]
- }
-```
-
-- An entry is an **exact key**, a **prefix ending in `*`**, or the **bare `*`** ("everything I store is
-  computed; clients read only"). The grammar is `DocStore.BACKEND_OWNED_PATTERN` =
-  `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$` — a `*` in the middle, or an empty entry, is rejected at load.
-- A client `PUT`/`DELETE` to a matching key becomes **403**, with its own message so you can tell it from a
-  role-floor refusal. **Reads are unaffected**, still governed by `readableBy`.
-- **`ctx.store()` is unaffected.** Your backend keeps writing those keys — that is the entire point.
-
-### Three things that will otherwise surprise you
-
-**It does not clean up.** Declaring a key `backendOwned` refuses *new* client writes; it does not remove a
-value someone forged before the declaration existed. If your backend only writes on a schedule, the bogus
-document is served until the next tick. Write your computed keys on startup too:
-
-```diff
- public void register(PluginContext ctx) {
-+    recomputeStats(ctx);                                   // repairs on every restart
-     ctx.onSchedule(Duration.ofMinutes(15), () -> recomputeStats(ctx));
- }
-```
-
-**It does not apply to `user` partitions.** The backend cannot write one at all, so a declaration there
-would make a key nobody can write. Even a bare `*` leaves `data/user/me/…` to its owner.
-
-**A bare `*` makes `writableBy` vestigial** for shared scopes — and it never governed `user` scopes — so
-with `backendOwned: ["*"]` nothing hits your write floor at all. Declare a sane one anyway; it is still
-required and still may not be `anonymous`.
-
-### Which keys are *not* candidates
-
-Anything a client legitimately writes: a vote, a mark, a submitted answer. Those belong to whoever wrote
-them — and if that is a person, they belong in the `USER` scope (0.5.0), not in a shared scope with a
-declaration bolted on.
-
-## 3. Prove it in your tests
-
-`InMemoryDocStore.withBackendOwned(...)` enforces the declaration, using the `asUser(...)` view as the
-stand-in for a client request — which covers every client write, since `writableBy` may not be `anonymous`:
-
-```java
-InMemoryDocStore store = new InMemoryDocStore().withBackendOwned("stats");
-InMemoryDocStore client = store.asUser(UUID.randomUUID());
-
-plugin.register(ctx);                                              // backend writes stats
-
-assertThrows(IllegalStateException.class,
-        () -> client.put(Scope.site(), "stats", forged));          // the host answers 403
-assertEquals(computed, client.get(Scope.site(), "stats", Stats.class).orElseThrow());
-```
-
-A malformed pattern throws from `withBackendOwned` itself, so a typo in the declaration fails in your tests
-instead of at load time in production.
-
-## 4. Frontend
-
-`PluginDataDeclaration` types the whole `data` block if you want the JSON checked while you write it:
+Only if your manifest declares `storage.schema`. `ctx.schema` is **`null`** for a doc-store plugin —
+the same shape as the Java `ctx.schema()`, so TypeScript makes you handle it:
 
 ```ts
-import type { PluginDataDeclaration } from '@mosaicast/plugin-sdk';
+if (!ctx.schema) return;   // doc-store plugin: nothing to query
+
+interface Page { id: number; slug: string; title: string; markdown: string; updatedAt: string }
+
+const hits = await ctx.schema.search<Page>('page', 'markdown', term, {
+  where: [{ field: 'published', op: 'eq', value: true }],
+  orderBy: [{ field: 'updatedAt', direction: 'desc' }],
+  size: 20,
+});
 ```
 
-Documentation only — the host owns and validates the manifest — but the block now carries a security
-control, and a typo in `backendOwned` protects nothing while saying nothing.
+`select` / `search` / `find` / `count` mirror `SchemaStore`, and a query is described the same way
+`Criteria` describes one — entity and field names come from **your manifest**, values are never
+interpolated. Paging is `page`/`size` (from 0, default 50, capped at 200 by the host) in the same envelope
+the doc surface uses.
 
-Otherwise nothing changes on the frontend, except that a `PUT` to one of your own backend-owned keys now
-rejects with a 403 problem. If a component was writing a key your backend also computes, that was a race
-you were losing anyway: move the write to the backend, or the key out of the declaration.
+Two differences from the doc client worth knowing: `find` resolves **`null`** for a missing row rather than
+rejecting, and an entity or field you never declared is refused by the host (404 and 400 respectively)
+rather than returning nothing.
+
+**Reads only.** There are no schema writes over HTTP, and this is deliberate: a v1 plugin authors no HTTP
+routes, so no plugin code runs at request time to enforce slug uniqueness, append a revision atomically or
+reject malformed input. Your backend stays the only writer of relational truth — a frontend that must write
+puts a document in the doc store and your backend ingests it in `onSchedule(...)`. Such a write is
+therefore eventually consistent; design the UI for it (optimistic render, or a "saving…" state that
+resolves on the next read).
+
+## 3. Navigate inside your own page subtree (`ctx.route.navigate`)
+
+Only if you declare a `page` slot.
+
+```diff
+-<a href="/p/wiki/glossary/kraken">The Kraken</a>
++<a href="/p/wiki/glossary/kraken" onclick="…">The Kraken</a>
+```
+
+```ts
+link.addEventListener('click', (e) => {
+  e.preventDefault();
+  ctx.route.navigate('glossary/kraken');           // relative to /p/<pluginId>/
+});
+
+ctx.route.navigate('index', { replace: true });    // no back-button step
+```
+
+Keep the real `href` on the anchor: middle-click, "open in new tab" and crawlers all need it, and it is
+what makes your pages shareable. `navigate` only takes over the plain-click path.
+
+**If you were using `history.pushState` plus a synthetic `popstate`, replace it.** It happens to work
+against the host's current router and is not part of the contract; `navigate` is the supported path and
+cannot be aimed outside your own namespace.
+
+## 4. Tests
+
+`makeMockCtx` now defaults `schema` to `null` and records `navigate` calls:
+
+```ts
+const schema = makeMockSchema({
+  page: [{ id: 1, slug: 'kraken', title: 'The Kraken', markdown: 'a big squid' }],
+});
+const ctx = makeMockCtx({ schema, route: { path: 'kraken', onChange: () => () => {}, navigate: () => {} } });
+
+await mount(ctx);
+expect(schema.queries[0]).toMatchObject({ method: 'search', entity: 'page' });
+
+const clicking = makeMockCtx({ schema });
+await mount(clicking);
+clickLink('The Kraken');
+expect(clicking.navigations).toEqual([{ subpath: 'glossary/kraken', replace: false }]);
+```
+
+`makeMockSchema`'s `search` is a **case-insensitive substring match, not Postgres full-text search** — it
+cannot reproduce stemming or `ts_rank` ordering. Use it to prove your component renders hits and handles
+none; prove the searching itself against the host.
 
 ## 5. Rebuild and re-test
 
 ```bash
-./gradlew build            # against plugin-api/testkit 0.6.0
+./gradlew build            # against plugin-api/testkit 0.7.0
 npm ci && npm run build
 ./build.sh                 # → dist/
 ```
@@ -148,9 +144,9 @@ Then copy `dist/` into `MOSAICAST_PLUGINS_DIR` and check the admin log viewer on
 
 ## Quick checklist
 
-- [ ] `platformApi` is `0.6.0`, and both Java artifacts and the npm package are on `0.6.0`
-- [ ] Every shared-scope key your backend writes appears in `data.backendOwned`
-- [ ] Those keys are (re)written in `register()`, not only on a schedule
-- [ ] No client-written key is in the list — per-person data belongs in the `USER` scope instead
-- [ ] A test asserts the forged client write is refused
-- [ ] Tests pass against `plugin-testkit` / `makeMockCtx` `0.6.0`
+- [ ] `platformApi` is `0.7.0`, and both Java artifacts and the npm package are on `0.7.0`
+- [ ] Every `ctx.schema` use is behind a `null` check
+- [ ] No frontend code expects a schema **write** — the backend still writes, the frontend still reads
+- [ ] Internal page links call `navigate` and keep their `href`
+- [ ] No `history.pushState` / synthetic `popstate` left in the plugin
+- [ ] Tests pass against `plugin-testkit` / `makeMockCtx` `0.7.0`

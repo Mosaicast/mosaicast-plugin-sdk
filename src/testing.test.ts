@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 The Mosaicast Authors
 
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_THEME, makeMockConsent, makeMockCtx } from './testing.js';
+import { DEFAULT_THEME, makeMockConsent, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('makeMockCtx', () => {
   it('produces a full context with sensible defaults', () => {
@@ -102,6 +102,29 @@ describe('makeMockCtx', () => {
     });
     expect(ctx.episodeLabels?.['the-sample-cast-s01e06']).toBe('S01E06 · The Lighthouse');
   });
+
+  it('leaves schema null unless supplied, so the doc-store case is exercised', () => {
+    expect(makeMockCtx().schema).toBeNull();
+
+    const schema = makeMockSchema({ page: [] });
+    expect(makeMockCtx({ schema }).schema).toBe(schema);
+  });
+
+  it('records navigate calls instead of moving the route', () => {
+    const ctx = makeMockCtx({ route: { path: 'start', onChange: () => () => {}, navigate: () => {} } });
+    expect(ctx.navigations).toEqual([]);
+
+    const recording = makeMockCtx();
+    recording.route.navigate('glossary/kraken');
+    recording.route.navigate('index', { replace: true });
+
+    expect(recording.navigations).toEqual([
+      { subpath: 'glossary/kraken', replace: false },
+      { subpath: 'index', replace: true },
+    ]);
+    // The double has no router: the path a component reads does not move under it.
+    expect(recording.route.path).toBe('');
+  });
 });
 
 describe('makeMockConsent', () => {
@@ -172,5 +195,105 @@ describe('makeMockConsent', () => {
     consent.revoke('analytics');
 
     expect(cb).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('makeMockSchema', () => {
+  const rows = () => ({
+    page: [
+      { id: 1, slug: 'kraken', title: 'The Kraken', markdown: 'a very big squid', views: 30, published: true },
+      { id: 2, slug: 'lighthouse', title: 'The Lighthouse', markdown: 'a tall lamp', views: 10, published: true },
+      { id: 3, slug: 'draft', title: 'Draft', markdown: 'squid notes', views: 0, published: false },
+    ],
+    revision: [],
+  });
+
+  it('filters, orders and pages like the host does', async () => {
+    const schema = makeMockSchema(rows());
+
+    const published = await schema.select('page', {
+      where: [{ field: 'published', op: 'eq', value: true }],
+      orderBy: [{ field: 'views', direction: 'desc' }],
+      size: 1,
+    });
+
+    expect(published.items).toEqual([expect.objectContaining({ slug: 'kraken' })]);
+    expect(published).toMatchObject({ page: 0, size: 1, totalElements: 2, totalPages: 2 });
+  });
+
+  it('supports every operator', async () => {
+    const schema = makeMockSchema(rows());
+    const slugs = async (where: Parameters<typeof schema.select>[1]) =>
+      (await schema.select<{ slug: string }>('page', where)).items.map((p) => p.slug);
+
+    expect(await slugs({ where: [{ field: 'views', op: 'gte', value: 30 }] })).toEqual(['kraken']);
+    expect(await slugs({ where: [{ field: 'slug', op: 'ne', value: 'draft' }] })).toEqual(['kraken', 'lighthouse']);
+    expect(await slugs({ where: [{ field: 'slug', op: 'in', value: ['draft', 'kraken'] }] })).toEqual(['kraken', 'draft']);
+    expect(await slugs({ where: [{ field: 'slug', op: 'like', value: 'light%' }] })).toEqual(['lighthouse']);
+    expect(await slugs({ where: [{ field: 'title', op: 'isNull' }] })).toEqual([]);
+    expect(await slugs({ where: [{ field: 'title', op: 'isNotNull' }] })).toHaveLength(3);
+  });
+
+  it('anchors a like pattern rather than matching anywhere', async () => {
+    const schema = makeMockSchema(rows());
+    const hits = await schema.select<{ slug: string }>('page', {
+      where: [{ field: 'slug', op: 'like', value: 'house' }],
+    });
+    expect(hits.items).toEqual([]);
+  });
+
+  it('matches nothing on an empty search, and substrings otherwise', async () => {
+    const schema = makeMockSchema(rows());
+
+    expect((await schema.search('page', 'markdown', '')).items).toEqual([]);
+    expect((await schema.search<{ slug: string }>('page', 'markdown', 'SQUID')).items.map((p) => p.slug))
+      .toEqual(['kraken', 'draft']);
+  });
+
+  it('applies extra criteria on top of a search', async () => {
+    const schema = makeMockSchema(rows());
+    const hits = await schema.search<{ slug: string }>('page', 'markdown', 'squid', {
+      where: [{ field: 'published', op: 'eq', value: true }],
+    });
+    expect(hits.items.map((p) => p.slug)).toEqual(['kraken']);
+  });
+
+  it('finds one row by id and answers null for a missing one', async () => {
+    const schema = makeMockSchema(rows());
+    expect(await schema.find<{ slug: string }>('page', 2)).toMatchObject({ slug: 'lighthouse' });
+    expect(await schema.find('page', 99)).toBeNull();
+  });
+
+  it('counts without paging', async () => {
+    const schema = makeMockSchema(rows());
+    expect(await schema.count('page')).toBe(3);
+    expect(await schema.count('page', { where: [{ field: 'published', op: 'eq', value: false }] })).toBe(1);
+  });
+
+  it('rejects an entity the plugin never declared, as the host 404s it', async () => {
+    const schema = makeMockSchema(rows());
+    await expect(schema.select('pages')).rejects.toThrow(/not declared/);
+    await expect(schema.find('pages', 1)).rejects.toThrow(/page, revision/);
+  });
+
+  it('records every query in order', async () => {
+    const schema = makeMockSchema(rows());
+    await schema.select('page', { size: 5 });
+    await schema.search('page', 'markdown', 'squid');
+    await schema.find('page', 1);
+    await schema.count('revision');
+
+    expect(schema.queries).toEqual([
+      { method: 'select', entity: 'page', query: { size: 5 } },
+      { method: 'search', entity: 'page', query: undefined, field: 'markdown', text: 'squid' },
+      { method: 'find', entity: 'page', id: 1 },
+      { method: 'count', entity: 'revision', query: undefined },
+    ]);
+  });
+
+  it('answers from rows a test swaps in mid-run', async () => {
+    const schema = makeMockSchema(rows());
+    schema.rows.revision = [{ id: 7, pageSlug: 'kraken' }];
+    expect(await schema.count('revision')).toBe(1);
   });
 });

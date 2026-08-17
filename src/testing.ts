@@ -16,6 +16,11 @@ import type {
   LogLevel,
   PluginApiClient,
   PluginContext,
+  PluginRoute,
+  SchemaClient,
+  SchemaPage,
+  SchemaPredicate,
+  SchemaQuery,
   ThemeTokens,
 } from './index.js';
 
@@ -25,6 +30,30 @@ export interface LogRecord {
   level: LogLevel;
   /** The logged message. */
   message: string;
+}
+
+/** One recorded {@link PluginRoute.navigate} call. */
+export interface NavigationRecord {
+  /** The subpath the component asked for, verbatim — the mock does not normalise it. */
+  subpath: string;
+  /** Whether the call asked to replace the current history entry. */
+  replace: boolean;
+}
+
+/** One recorded {@link MockSchemaClient} query. */
+export interface SchemaQueryRecord {
+  /** Which method was called. */
+  method: 'select' | 'search' | 'find' | 'count';
+  /** The entity it was called on. */
+  entity: string;
+  /** The query, for `select` / `search` / `count`. */
+  query?: SchemaQuery;
+  /** The searched field, for `search`. */
+  field?: string;
+  /** The search text, for `search`. */
+  text?: string;
+  /** The row id, for `find`. */
+  id?: number;
 }
 
 /** One recorded {@link MockApiClient} call. */
@@ -158,6 +187,142 @@ export function makeMockConsent(initial: string[] = []): MockConsent {
   };
 }
 
+/** A {@link SchemaClient} that answers from in-memory rows and records every query. */
+export interface MockSchemaClient extends SchemaClient {
+  /** Every query made through this client, in order. */
+  readonly queries: SchemaQueryRecord[];
+  /** The rows it answers from, keyed by entity — mutable, so a test can change them mid-run. */
+  rows: Record<string, Record<string, unknown>[]>;
+}
+
+/**
+ * Builds a {@link SchemaClient} for tests, answering from plain arrays of rows.
+ *
+ * Pass the entities your **manifest** declares; an entity that is not there rejects, the way the host
+ * answers 404 for one you never declared — so a typo in a test fails as a typo rather than as an empty
+ * result.
+ *
+ * **`search` is a case-insensitive substring match, not Postgres full-text search.** The double cannot
+ * reproduce stemming, `websearch_to_tsquery` operators or `ts_rank` ordering, and pretending otherwise
+ * would let a test assert a ranking the host does not produce. Use it to prove your component *renders*
+ * hits and handles none; prove the searching itself against the host.
+ *
+ * Comparisons are JavaScript's: fine for numbers, booleans and strings, and correct for `timestamp`
+ * fields as long as the rows carry ISO-8601 strings, which sort lexicographically.
+ *
+ * @param rows entity name → its rows; each row should carry the platform-assigned `id`
+ * @returns a schema double with `queries` recorded and mutable `rows`
+ *
+ * @example
+ * ```ts
+ * const schema = makeMockSchema({
+ *   page: [{ id: 1, slug: 'kraken', title: 'The Kraken', markdown: 'a big squid' }],
+ * });
+ * const ctx = makeMockCtx({ schema });
+ *
+ * await mount(ctx);
+ * expect(schema.queries[0]).toMatchObject({ method: 'search', entity: 'page' });
+ * ```
+ */
+export function makeMockSchema(rows: Record<string, Record<string, unknown>[]> = {}): MockSchemaClient {
+  const queries: SchemaQueryRecord[] = [];
+
+  const entity = (name: string): Record<string, unknown>[] => {
+    const found = client.rows[name];
+    if (!found) {
+      throw new Error(
+        `Entity '${name}' is not declared by this plugin; declared: [${Object.keys(client.rows).join(', ')}]`,
+      );
+    }
+    return found;
+  };
+
+  const matches = (row: Record<string, unknown>, predicate: SchemaPredicate): boolean => {
+    const actual = row[predicate.field];
+    const expected = predicate.value;
+    switch (predicate.op) {
+      case 'eq':
+        return actual === expected;
+      case 'ne':
+        return actual !== expected;
+      case 'lt':
+        return (actual as never) < (expected as never);
+      case 'lte':
+        return (actual as never) <= (expected as never);
+      case 'gt':
+        return (actual as never) > (expected as never);
+      case 'gte':
+        return (actual as never) >= (expected as never);
+      case 'like':
+        // `%` is the host's wildcard; anchor the rest so `abc%` does not match `xabc`.
+        return new RegExp(`^${String(expected).split('%').map(escapeRegExp).join('.*')}$`).test(
+          String(actual),
+        );
+      case 'in':
+        return Array.isArray(expected) && expected.includes(actual);
+      case 'isNull':
+        return actual == null;
+      case 'isNotNull':
+        return actual != null;
+    }
+  };
+
+  const apply = <T>(name: string, query: SchemaQuery | undefined, extra?: (row: Record<string, unknown>) => boolean): SchemaPage<T> => {
+    let result = entity(name).filter(
+      (row) => (query?.where ?? []).every((p) => matches(row, p)) && (extra?.(row) ?? true),
+    );
+    for (const order of [...(query?.orderBy ?? [])].reverse()) {
+      // Applied last-to-first so the first term ends up dominant, as a multi-column sort is read.
+      result = [...result].sort((a, b) => {
+        const [x, y] = [a[order.field] as never, b[order.field] as never];
+        const sign = x < y ? -1 : x > y ? 1 : 0;
+        return order.direction === 'desc' ? -sign : sign;
+      });
+    }
+    const size = query?.size ?? 50;
+    const page = query?.page ?? 0;
+    return {
+      items: result.slice(page * size, page * size + size) as T[],
+      page,
+      size,
+      totalElements: result.length,
+      totalPages: Math.ceil(result.length / size),
+    };
+  };
+
+  const client: MockSchemaClient = {
+    queries,
+    rows,
+    // Every method is `async` so an undeclared entity comes back as a *rejection*, the way the host's 404
+    // reaches a component — a synchronous throw would be caught somewhere the real thing never is.
+    async select(name, query) {
+      queries.push({ method: 'select', entity: name, query });
+      return apply(name, query);
+    },
+    async search(name, field, text, query) {
+      queries.push({ method: 'search', entity: name, query, field, text });
+      // An empty query matches nothing rather than everything — the one search rule the double does share
+      // with the host, because a component that renders "everything" on an empty box is a real bug.
+      const needle = text.toLowerCase();
+      return apply(name, query, (row) => needle !== '' && String(row[field] ?? '').toLowerCase().includes(needle));
+    },
+    async find(name, id) {
+      queries.push({ method: 'find', entity: name, id });
+      return (entity(name).find((row) => row.id === id) ?? null) as never;
+    },
+    async count(name, query) {
+      queries.push({ method: 'count', entity: name, query });
+      return apply(name, query).totalElements;
+    },
+  };
+  return client;
+}
+
+/** Escapes a string for literal use inside a `RegExp` — the non-wildcard parts of a `like` pattern. */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Default theme tokens (neutral light values) used when a test does not override them. */
 export const DEFAULT_THEME: ThemeTokens = {
   bg: '#ffffff',
@@ -180,6 +345,12 @@ export type MockPluginContext = PluginContext & {
    * Stays empty if you override `log` yourself — the recording lives in the default implementation.
    */
   logs: LogRecord[];
+  /**
+   * Every `ctx.route.navigate(...)` call, in order.
+   *
+   * Stays empty if you pass your own `route` — like {@link logs}, the recording lives in the default.
+   */
+  navigations: NavigationRecord[];
 };
 
 /** Overrides accepted by {@link makeMockCtx}. */
@@ -199,25 +370,32 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api'>> {
  * change any field; the returned `api` is a {@link MockApiClient} recording every call, and `logs`
  * collects every `ctx.log(...)`.
  *
- * `episodeLabels` is deliberately **absent** by default. It is optional on the real context and the host
- * may supply it partially, so a component that renders labels has to survive their absence — the mock
- * makes you face that unless you pass labels in.
+ * `episodeLabels` is deliberately **absent** by default, and `schema` is **`null`**. Both are optional on
+ * the real context — the host supplies labels partially, and gives a doc-store plugin no schema at all — so
+ * a component that needs either has to survive its absence. The mock makes you face that unless you pass
+ * one in ({@link makeMockSchema} for the schema).
  *
  * @param overrides partial context plus optional `apiResponses`
- * @returns a full context whose `api` is a {@link MockApiClient} and whose `log` calls are recorded
+ * @returns a full context whose `api` is a {@link MockApiClient}, whose `log` calls are recorded in
+ *          `logs`, and whose `route.navigate` calls are recorded in `navigations`
  */
 export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext {
   const { apiResponses, api, ...rest } = overrides;
   const mockApi = api ?? makeMockApi(apiResponses ?? {});
   const filter: FilterState = rest.filter?.current() ?? {};
   const logs: LogRecord[] = [];
+  const navigations: NavigationRecord[] = [];
 
   const base: MockPluginContext = {
     scope: { type: 'site', id: 'main' },
     episodes: [],
     user: null,
     api: mockApi,
+    // Null, not a client: a plugin only has one if its manifest declares `storage.schema`, and a
+    // component written against a schema that is always there never handles the doc-store case.
+    schema: null,
     logs,
+    navigations,
     log: (level, message) => {
       logs.push({ level, message });
     },
@@ -226,11 +404,19 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     // behaves the same against the mock as against the host.
     filter: { current: () => filter, onChange: () => noop },
     player: { currentTime: () => 0, seekTo: () => {}, on: () => noop },
-    route: { path: '', onChange: () => noop },
+    route: {
+      path: '',
+      onChange: () => noop,
+      // Recorded rather than applied: the double has no router and no URL, so `path` does not move.
+      // Assert on `navigations`; drive a route change by rendering again with a different `path`.
+      navigate: (subpath, opts) => {
+        navigations.push({ subpath, replace: opts?.replace ?? false });
+      },
+    },
     locale: { current: () => 'en', onChange: () => noop },
     progress: { get: () => Promise.resolve(null) },
     theme: DEFAULT_THEME,
   };
 
-  return { ...base, ...rest, api: mockApi, logs };
+  return { ...base, ...rest, api: mockApi, logs, navigations };
 }

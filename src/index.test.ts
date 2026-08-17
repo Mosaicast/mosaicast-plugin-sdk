@@ -14,13 +14,17 @@ import {
   type DisplaySnapshot,
   type PluginContext,
   type PluginDataDeclaration,
+  type PluginRoute,
+  type SchemaPage,
+  type SchemaPredicate,
+  type SchemaQuery,
   type Scope,
 } from './index.js';
-import { makeMockCtx } from './testing.js';
+import { makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.6.0');
+    expect(PLATFORM_API_VERSION).toBe('0.7.0');
   });
 });
 
@@ -53,6 +57,56 @@ describe('the user data scope', () => {
     // @ts-expect-error a slot is never mounted on a user — there is no user page.
     const slot: Scope = { type: 'user', id: 'me' };
     expect(slot.id).toBe('me');
+  });
+});
+
+describe('the schema client', () => {
+  it('is nullable on the context, so the doc-store case has to be handled', () => {
+    const ctx = makeMockCtx();
+
+    // @ts-expect-error a doc-store plugin has no schema; the type says so before the runtime does.
+    expect(() => ctx.schema.count('page')).toThrow();
+    expect(ctx.schema).toBeNull();
+  });
+
+  it('describes a query rather than writing one', () => {
+    const query: SchemaQuery = {
+      where: [
+        { field: 'published', op: 'eq', value: true },
+        { field: 'updatedAt', op: 'gte', value: '2026-01-01T00:00:00Z' },
+        { field: 'slug', op: 'in', value: ['kraken', 'lighthouse'] },
+        { field: 'deletedAt', op: 'isNull' },
+      ],
+      orderBy: [{ field: 'updatedAt', direction: 'desc' }],
+      size: 20,
+    };
+    expect(query.where).toHaveLength(4);
+
+    // @ts-expect-error the operators are a closed vocabulary mirroring the Java `Criteria.Op`.
+    const bad: SchemaPredicate = { field: 'title', op: 'contains', value: 'x' };
+    expect(bad.op).toBe('contains');
+  });
+
+  it('pages in the same envelope as the doc surface', async () => {
+    const schema = makeMockSchema({ page: [{ id: 1, slug: 'kraken' }] });
+    const page: SchemaPage<{ slug: string }> = await schema.select('page');
+
+    expect(page).toEqual({ items: [{ id: 1, slug: 'kraken' }], page: 0, size: 50, totalElements: 1, totalPages: 1 });
+  });
+});
+
+describe('the route handle', () => {
+  it('navigates by subpath, with an optional history replace', () => {
+    const ctx = makeMockCtx();
+    const route: PluginRoute = ctx.route;
+
+    route.navigate('glossary/kraken');
+    route.navigate('glossary/kraken', { replace: true });
+
+    // @ts-expect-error a plugin names a subpath below its own prefix, never a whole URL target.
+    route.navigate('/p/other-plugin/page', { push: true });
+
+    expect(ctx.navigations).toHaveLength(3);
   });
 });
 

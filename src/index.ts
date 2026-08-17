@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.6.0' as const;
+export const PLATFORM_API_VERSION = '0.7.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -175,7 +175,11 @@ export interface PagedDocs<T = unknown> {
  * **These are not plugin-authored routes.** A v1 plugin cannot declare HTTP endpoints — its server side
  * is `register(ctx)` and nothing else (see the Java `PluginBackend`). What this client talks to is a
  * fixed, generic surface the host exposes over the plugin's hard-scoped doc store, mirroring the Java
- * `DocStore` one-to-one — get / put / list / delete, nothing more:
+ * `DocStore` one-to-one — get / put / list / delete, nothing more.
+ *
+ * A plugin that declares `storage.schema` reads its provisioned tables through {@link SchemaClient}
+ * (`ctx.schema`), a second host surface with its own paths and its own rules — read-only, since writing
+ * those tables stays with the plugin's backend. This client is the doc store's:
  *
  * ```text
  * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
@@ -279,6 +283,234 @@ export interface PluginApiClient {
   put<T = unknown>(path: string, body?: unknown): Promise<T>;
   /** DELETE a path, resolving to the parsed JSON response. */
   delete<T = unknown>(path: string): Promise<T>;
+}
+
+/**
+ * How a declared field is compared to a value in a {@link SchemaQuery}.
+ *
+ * The same closed vocabulary as the Java `Criteria.Op`, lower-cased — the two halves of one plugin
+ * describe a query the same way. `isNull` / `isNotNull` take no value; `in` takes an array.
+ *
+ * `like` matches a pattern with `%` as the wildcard and is **case-sensitive**. For finding text inside a
+ * `text:fulltext` field use {@link SchemaClient.search}, which reads the index the platform provisioned —
+ * a leading-wildcard `like` cannot.
+ *
+ * @since 0.7.0
+ */
+export type SchemaOp = 'eq' | 'ne' | 'lt' | 'lte' | 'gt' | 'gte' | 'like' | 'in' | 'isNull' | 'isNotNull';
+
+/**
+ * One `field op value` condition over a declared field.
+ *
+ * The field name is the one your **manifest** declares; the host resolves it against that declaration and
+ * answers 400 if it is not there. Values are bound as parameters, never interpolated — a query is
+ * described, never written.
+ *
+ * @since 0.7.0
+ */
+export interface SchemaPredicate {
+  /** The declared field name. */
+  field: string;
+  /** The comparison. */
+  op: SchemaOp;
+  /**
+   * The value to compare against: an array for `in`, omitted for `isNull` / `isNotNull`.
+   *
+   * Give it in the field's declared type — a `boolean` for `boolean`, a number for `integer`/`number`,
+   * an ISO-8601 instant string (or a `Date`) for `timestamp`. The host coerces against the declaration
+   * and answers 400 on a value it cannot read as that type.
+   */
+  value?: unknown;
+}
+
+/**
+ * Which rows, in what order, on which page — the query half of {@link SchemaClient}.
+ *
+ * Mirrors the Java `Criteria`, with one difference: paging here is `page`/`size` rather than
+ * `limit`/`offset`, because it crosses HTTP and shares the doc surface's conventions (`page` from 0,
+ * `size` 50 by default, capped at 200 by the host).
+ *
+ * **Predicates combine with AND.** There is no `or` in this version, exactly as in `Criteria`: model it
+ * as two queries and merge.
+ *
+ * @since 0.7.0
+ */
+export interface SchemaQuery {
+  /** Conditions, combined with AND. Omit to match every row. */
+  where?: SchemaPredicate[];
+  /** Sort terms, applied in order. Omit for the store's unspecified order. */
+  orderBy?: { field: string; direction: 'asc' | 'desc' }[];
+  /** Zero-based page index; defaults to 0. */
+  page?: number;
+  /** Page size; defaults to 50, and the host caps it at 200. */
+  size?: number;
+}
+
+/**
+ * One page of rows, in the same envelope the doc surface uses ({@link PagedDocs}).
+ *
+ * @typeParam T the row shape — name its properties for the fields your manifest declares
+ * @since 0.7.0
+ */
+export interface SchemaPage<T = Record<string, unknown>> {
+  /** The rows on this page. */
+  items: T[];
+  /** The zero-based page index. */
+  page: number;
+  /** The effective page size (the host's cap may have lowered what you asked for). */
+  size: number;
+  /** Total number of matching rows across all pages. */
+  totalElements: number;
+  /** Total number of pages. */
+  totalPages: number;
+}
+
+/**
+ * Read access to the relational tables the platform provisioned for a plugin that declares
+ * `storage.schema` (ARCHITECTURE §7.6) — the frontend counterpart of the Java `SchemaStore`.
+ *
+ * `ctx.schema` is **`null`** unless the manifest declares a schema, mirroring the Java
+ * `PluginContext.schema()`. The manifest is the one place a plugin says which store it uses, so a
+ * doc-store plugin finds `null` here rather than a client that would 404 on every call.
+ *
+ * ## Why reads only
+ *
+ * A v1 plugin authors no HTTP routes, so there is no request-time hook where plugin code could validate a
+ * write — no place to enforce slug uniqueness, append a revision atomically, or reject malformed input.
+ * Exposing writes here would hand clients direct row access with no plugin code in the path. So the
+ * plugin's **backend stays the only writer** of relational truth: a frontend that needs to write puts a
+ * document in the doc store and the backend ingests it on its schedule. That makes such a write eventually
+ * consistent — a deliberate consequence of the v1 contract, not an oversight.
+ *
+ * ## What the host enforces
+ *
+ * The same `data.readableBy` floor as the doc surface — one rule to learn, and a plugin that already
+ * declares one is already covered. Beyond that, **a plugin cannot express the wrong question**: entity and
+ * field names are resolved against your own manifest and the host builds the statement, so another
+ * plugin's tables (or core's) are not so much blocked as unnameable. An entity you did not declare is a
+ * 404; a field you did not declare, an unreadable value, or `search` on a field that is not `:fulltext` is
+ * a 400.
+ *
+ * The endpoints, if you ever need them through {@link PluginApiClient} directly:
+ *
+ * ```text
+ * GET /api/plugins/{id}/schema/{entity}?where=&orderBy=&page=&size=
+ * GET /api/plugins/{id}/schema/{entity}/search?field=&q=&where=&orderBy=&page=&size=
+ * GET /api/plugins/{id}/schema/{entity}/count?where=
+ * GET /api/plugins/{id}/schema/{entity}/{rowId}
+ * ```
+ *
+ * @example Search, then read one page
+ * ```ts
+ * if (!ctx.schema) return;                       // doc-store plugin: nothing to query
+ *
+ * interface Page { id: number; slug: string; title: string; markdown: string; updatedAt: string }
+ *
+ * const hits = await ctx.schema.search<Page>('page', 'markdown', term, {
+ *   where: [{ field: 'published', op: 'eq', value: true }],
+ *   size: 20,
+ * });
+ * hits.items.forEach((p) => renderHit(p.title, p.slug));
+ *
+ * const [page] = (await ctx.schema.select<Page>('page', {
+ *   where: [{ field: 'slug', op: 'eq', value: ctx.route.path }],
+ *   size: 1,
+ * })).items;
+ * ```
+ *
+ * @since 0.7.0
+ */
+export interface SchemaClient {
+  /**
+   * Rows of one declared entity, filtered and ordered by `query`.
+   *
+   * @param entity the entity name your manifest declares
+   * @param query  the filter; omit to page through everything
+   * @returns one page of rows
+   */
+  select<T = Record<string, unknown>>(entity: string, query?: SchemaQuery): Promise<SchemaPage<T>>;
+  /**
+   * Full-text search over a field declared `:fulltext`, on the index the platform provisioned.
+   *
+   * `text` is taken as a person would type it — quotes, `OR`, a leading minus — and a stray operator
+   * never throws. An **empty** `text` matches nothing rather than everything, the same rule the Java
+   * `SchemaStore.search` follows. Results come back best-match first unless `query.orderBy` replaces that
+   * ordering.
+   *
+   * @param entity the entity name your manifest declares
+   * @param field  the field declared `:fulltext`; anything else is a 400
+   * @param text   what the user typed
+   * @param query  extra filtering/paging, applied on top of the match
+   * @returns one page of rows, ranked unless you ordered them yourself
+   */
+  search<T = Record<string, unknown>>(
+    entity: string,
+    field: string,
+    text: string,
+    query?: SchemaQuery,
+  ): Promise<SchemaPage<T>>;
+  /**
+   * One row by its platform-assigned `id`.
+   *
+   * Resolves **`null`** when there is no such row, rather than rejecting: a row that is not there is an
+   * answer to this question, and every caller would otherwise wrap it in a try/catch. This differs from
+   * {@link PluginApiClient.get}, which rejects on a 404.
+   *
+   * @param entity the entity name your manifest declares
+   * @param id     the platform-assigned row id
+   * @returns the row, or `null` if it does not exist
+   */
+  find<T = Record<string, unknown>>(entity: string, id: number): Promise<T | null>;
+  /**
+   * How many rows match — without fetching them.
+   *
+   * @param entity the entity name your manifest declares
+   * @param query  the filter; ordering and paging are ignored, as in the Java `SchemaStore.count`
+   * @returns the number of matching rows
+   */
+  count(entity: string, query?: Pick<SchemaQuery, 'where'>): Promise<number>;
+}
+
+/**
+ * The plugin's own URL subtree (ARCHITECTURE §6.4): where it is, when that changes, and how to move
+ * within it.
+ *
+ * The host reserves `/p/<pluginId>/*` for a plugin with a `page` slot and hands it the subpath below
+ * that prefix — which is what makes a wiki page, or anything else a plugin renders, linkable and
+ * shareable at all.
+ *
+ * @since 0.7.0 — `navigate`; `path` and `onChange` have been here since 0.1.0
+ */
+export interface PluginRoute {
+  /** The subpath below `/p/<pluginId>/`; empty when the plugin is not rendered as a page. */
+  path: string;
+  /**
+   * Subscribes to subpath changes — a back button, a shared link, your own {@link navigate}.
+   *
+   * Returns an {@link Unsubscribe}. Note that the host also re-renders your element on a route change,
+   * so a component that reads {@link path} at render time often needs no subscription at all.
+   */
+  onChange(cb: (p: string) => void): Unsubscribe;
+  /**
+   * Navigates within this plugin's subtree, without reloading the page.
+   *
+   * `subpath` is relative to `/p/<pluginId>/`, the same coordinate {@link path} hands you — so
+   * `navigate('glossary/kraken')` lands on `/p/wiki/glossary/kraken`. A plugin **cannot name another
+   * plugin's route or a core one**: the host prefixes its namespace and drops any attempt to climb out of
+   * it, the same "cannot express the question" property {@link SchemaClient} has.
+   *
+   * This is real SPA navigation: a history entry, a working back button, and no re-fetch of the shell or
+   * of any plugin bundle. Which is the point — an `<a href>` to your own page costs a full document load,
+   * and on a densely cross-linked page set that is the common path rather than an edge case.
+   *
+   * **Do not reach past this handle.** `history.pushState` plus a synthetic `popstate` happens to work
+   * against the host's current router and will break when it changes; it is not part of the contract.
+   *
+   * @param subpath the target below `/p/<pluginId>/`; may carry `?query` and `#hash`
+   * @param opts    `replace: true` swaps the current history entry instead of adding one — for state
+   *                that should not become a back-button step, like an in-page tab or filter
+   */
+  navigate(subpath: string, opts?: { replace?: boolean }): void;
 }
 
 /**
@@ -610,6 +842,17 @@ export interface PluginContext {
    */
   api: PluginApiClient;
   /**
+   * Read access to this plugin's provisioned relational tables, or **`null`** when the manifest declares
+   * no `storage.schema` (ARCHITECTURE §7.6).
+   *
+   * The frontend half of the Java `ctx.schema()`, and `null` for the same reason it is: a doc-store
+   * plugin has no tables, and the manifest is the single place that is decided. Check it before use —
+   * TypeScript will make you. See {@link SchemaClient} for why it is read-only.
+   *
+   * @since 0.7.0
+   */
+  schema: SchemaClient | null;
+  /**
    * Writes one line to the host's log, attributed to this plugin.
    *
    * The counterpart of the backend's `ctx.logger()`, and the **only** supported way for a frontend
@@ -653,9 +896,10 @@ export interface PluginContext {
   /**
    * The subpath under `/p/<pluginId>/`, for deep-linkable plugin content (ARCHITECTURE §6.4).
    *
-   * `onChange` returns an {@link Unsubscribe}.
+   * `onChange` returns an {@link Unsubscribe}. `navigate` moves within that subtree — see
+   * {@link PluginRoute}.
    */
-  route: { path: string; onChange(cb: (p: string) => void): Unsubscribe };
+  route: PluginRoute;
   /**
    * The active UI locale (ARCHITECTURE §12.7).
    *
