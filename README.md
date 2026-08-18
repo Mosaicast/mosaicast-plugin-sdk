@@ -281,6 +281,73 @@ ctx.route.navigate('index', { replace: true });       // no back-button step (ta
 - Pair it with `ShareMetadataProvider` (OpenGraph per subpath) and `SitemapProvider` on the backend so the
   URLs you navigate to also preview and index properly.
 
+### Linking to core pages — `ctx.links` (since 0.8.0)
+
+`navigate` deliberately cannot name a core route. Producing a *link* to one is a different thing — the
+visitor still clicks — and `ctx.links` gives you the host's URL shapes instead of a hardcoded string that
+breaks when a route changes:
+
+```ts
+a.href = ctx.links.episode('kraken', { t: 724 });   // /episodes/kraken?t=724
+a.href = ctx.links.feed('main', { season: '2' });   // /feeds/main?season=2
+```
+
+`?t=` is the host's timestamp deep link: it seeks the player to that second, and beats the listener's
+stored position for that navigation without overwriting it. Frontend only — this is where links get
+rendered. Strings, not navigation: put them in a real `href`.
+
+## File storage — `ctx.blobs` (since 0.8.0)
+
+A plugin that has to accept a file — a wiki's diagrams, a show-notes image — rather than link to somebody
+else's host. **Declare it or you do not get it**, and what you declare is what an operator sees you asking
+for:
+
+```json
+"blobs": { "maxFileBytes": 5242880, "quotaBytes": 268435456,
+           "mimeTypes": ["image/png", "image/jpeg", "image/webp"] }
+```
+
+`ctx.blobs` is `null` without it, exactly like `ctx.schema`. From a Web Component:
+
+```ts
+const blobs = ctx.blobs;
+if (!blobs) return;
+
+const stored = await blobs.upload(file);              // a File from <input type="file">
+img.src = blobs.urlFor(stored.ref);
+await ctx.api.put('data/site/main/logo', { ref: stored.ref });
+```
+
+and from a backend, for what only a backend can do — fetching on a schedule, deleting what a document no
+longer points at:
+
+```java
+try (InputStream in = Files.newInputStream(path)) {
+    BlobInfo stored = ctx.blobs().put("architecture.png", "image/png", in);
+}
+```
+
+- **Store the `ref`, never the URL.** The URL is derived and the host may change how; the ref is the
+  identity.
+- **Writes are the point here**, unlike `ctx.schema`. A file has no relational invariant for plugin code to
+  enforce, so `data.writableBy` plus a quota is the whole authorization story and a client may upload
+  directly. Reads follow `data.readableBy`.
+- **Uploads are refused for reasons you can predict**: size against your effective ceiling, declared type
+  against the effective allow-list, then the *actual* type read from the leading bytes. A file whose content
+  contradicts its extension is refused, and SVG is never accepted — it is a script container wearing an
+  image's file extension. Call `quota()` to warn someone *before* they pick a 200 MB file.
+- **The operator's numbers win.** They cap both ceilings and intersect the type list with the install's own,
+  so you may be granted less than you asked for; `quota()` is the only honest source.
+- **Nothing collects orphans.** A file outlives the document that named it, and only your plugin knows
+  which those are.
+- Blobs are served same-origin under `/api/plugins/<id>/blob/<ref>`, so rendering one needs no CSP host and
+  makes no consent decision — which an external image URL cannot say.
+
+Test it with `makeMockBlobs()` from `/testing` and `InMemoryPluginBlobs` in the Java kit. Both **enforce the
+ceilings and the allow-list**: a component that has only ever met an accepting double meets its first
+refusal in front of a podcaster. Neither reads file formats — name the file that should be refused
+(`rejectContent`) to exercise that path.
+
 ## Logging — `ctx.logger()` / `ctx.log()` (since 0.4.0)
 
 ```java

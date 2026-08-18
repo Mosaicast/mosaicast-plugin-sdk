@@ -5,6 +5,7 @@ package dev.mosaicast.plugin.testkit;
 
 import dev.mosaicast.plugin.api.DocStore;
 import dev.mosaicast.plugin.api.FeedAccess;
+import dev.mosaicast.plugin.api.PluginBlobs;
 import dev.mosaicast.plugin.api.PluginConfig;
 import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.SchemaStore;
@@ -29,18 +30,23 @@ public final class FakePluginContext implements PluginContext {
 
     private final InMemoryDocStore store;
     private final SchemaStore schema;
+    private final PluginBlobs blobs;
     private final PluginConfig config;
     private final FeedAccess feeds;
     private final RecordingLogger logger = new RecordingLogger(LOGGER_NAME);
     private int scheduledCount;
 
-    /** Creates a context with an empty doc store, empty config, empty feeds and no schema. */
+    /** Creates a context with an empty doc store, empty config, empty feeds, no schema and no blobs. */
     public FakePluginContext() {
         this(new InMemoryDocStore(), new MapPluginConfig(), new FakeFeedAccess(java.util.Map.of()), null);
     }
 
     /**
-     * Creates a context wired to the given doubles.
+     * Creates a context wired to the given doubles, for a plugin that stores no files.
+     *
+     * <p>Kept as its own constructor rather than folded into the one below: this signature is what every
+     * existing plugin test calls, and a fifth positional parameter would break all of them to add something
+     * almost none of them want. That is the mistake 0.7.1 was spent undoing on the TypeScript side.
      *
      * @param store  the doc store; never {@code null}
      * @param config the config; never {@code null}
@@ -48,10 +54,26 @@ public final class FakePluginContext implements PluginContext {
      * @param schema the schema store, or {@code null} for a plugin that declares no schema
      */
     public FakePluginContext(InMemoryDocStore store, PluginConfig config, FeedAccess feeds, SchemaStore schema) {
+        this(store, config, feeds, schema, null);
+    }
+
+    /**
+     * Creates a context wired to the given doubles, including file storage.
+     *
+     * @param store  the doc store; never {@code null}
+     * @param config the config; never {@code null}
+     * @param feeds  the feed access; never {@code null}
+     * @param schema the schema store, or {@code null} for a plugin that declares no schema
+     * @param blobs  the blob store, or {@code null} for a plugin that declares no {@code blobs} block
+     * @since 0.8.0
+     */
+    public FakePluginContext(InMemoryDocStore store, PluginConfig config, FeedAccess feeds, SchemaStore schema,
+                             PluginBlobs blobs) {
         this.store = Objects.requireNonNull(store, "store");
         this.config = Objects.requireNonNull(config, "config");
         this.feeds = Objects.requireNonNull(feeds, "feeds");
         this.schema = schema;
+        this.blobs = blobs;
     }
 
     /**
@@ -71,6 +93,17 @@ public final class FakePluginContext implements PluginContext {
     @Override
     public SchemaStore schema() {
         return schema;
+    }
+
+    /**
+     * The blob store this context is wired to, or {@code null} when none was supplied — the same
+     * {@code null} a plugin that declares no {@code blobs} block sees from the host.
+     *
+     * @return the blob store, or {@code null}
+     */
+    @Override
+    public PluginBlobs blobs() {
+        return blobs;
     }
 
     @Override

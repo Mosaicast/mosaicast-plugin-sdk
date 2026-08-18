@@ -7,6 +7,61 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-08-18
+
+A plugin could declare relational tables, publish documents and serve a deep-linked page — and could not
+store a **file**. The host's `BlobStore` had existed since branding shipped and had exactly one caller, so
+the contract had no way to reach it. That produced an odd asymmetry: the host's CSP lets a plugin display
+an image from *any* host on the web, and gave it no way to accept one from the site's own podcaster. The
+honest answer to "I drew a diagram" was "find an image host first", which is not an answer.
+
+The second gap is smaller and was found beside it. `ctx.route.navigate` is confined to a plugin's own
+`/p/<pluginId>/` subtree by construction — a property worth keeping — so a plugin that wanted to write
+"discussed in *The Kraken*, from 12:04" hardcoded `` `/episodes/${slug}` `` and became a thing that breaks
+when the host changes a route.
+
+**Nothing existing changes behaviour, and no test double breaks.** Both additions are new surface; the
+`FakePluginContext` constructors every plugin test already calls still compile and still mean the same
+thing. That is deliberate — 0.7.1 exists solely because 0.7.0 added a *required* member to a `ctx`
+sub-object. New members here are top-level and nullable, and new constructor parameters arrive as
+overloads. See [MIGRATION.md](MIGRATION.md); for most plugins it is a version bump and nothing else.
+
+### Added
+
+- **File storage: `ctx.blobs` (TypeScript) and `PluginContext.blobs()` (Java).** Opt-in through a new
+  manifest `blobs` block declaring a per-file ceiling, a total quota and the accepted MIME types; both
+  accessors are **`null`** without it, the same shape and the same reasoning as `ctx.schema`. What a plugin
+  declares is what an operator sees it asking for, and the operator's numbers win — they cap both ceilings
+  and intersect the type list with the install's own, so `quota()` is the only honest source for what was
+  actually granted.
+  - **Writes are the point here, unlike the schema surface.** The argument against schema writes over HTTP
+    is that no plugin code runs at request time to enforce a relational invariant. A file has none, so the
+    `data.writableBy` floor plus a quota is the whole authorization story and a plugin's own editing UI can
+    upload directly. Reads follow `data.readableBy` — one floor pair, now three surfaces.
+  - **A `ref` is the identity; a URL is derived from it.** Store the ref. The host is entitled to change how
+    URLs are shaped and is not entitled to invalidate what a plugin wrote down.
+  - Uploads are refused for reasons a plugin can predict and should surface: size, then the declared type
+    against the allow-list, then the *actual* type read from the leading bytes. SVG is never accepted — it
+    is a script container wearing an image's file extension, the same call branding uploads made.
+  - **Nothing collects orphans.** A file outlives the document that named it and only the plugin knows
+    which those are. The Java half exists largely for that: cleaning up on a schedule is a thing only a
+    backend can do.
+- **Test doubles that refuse what the host refuses**: `makeMockBlobs()` in `@mosaicast/plugin-sdk/testing`
+  and `InMemoryPluginBlobs` in the Java kit, both enforcing the ceilings and the allow-list rather than
+  accepting everything. A component that has only ever met an accepting double meets its first refusal in
+  front of a podcaster. Neither reads file formats — that would be a second, diverging copy of a security
+  rule — so `rejectContent(filename)` stands in for the host's content check.
+- **`ctx.links`** — `episode(slug, { t })` and `feed(slug, { season, tag, order })`, returning root-relative
+  URLs. **Strings, not navigation**: the visitor still clicks, and a real `href` is what middle-click, "open
+  in new tab" and crawlers need. It grants no new capability — a plugin could always write any `href` — it
+  moves knowledge of the host's URL shapes back to the host. `?t=` is core's timestamp deep link, which
+  seeks the player and beats the listener's stored position without overwriting it.
+
+### Changed
+
+- `FakePluginContext` gained a five-argument constructor taking a `PluginBlobs`. The four-argument form is
+  untouched and still means "no file storage".
+
 ## [0.7.1] — 2026-08-17
 
 Test kit only. **No contract change** — `platformApi` still matches on `major.minor`, so a plugin declaring
@@ -503,6 +558,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.8.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.8.0
 [0.7.1]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.6.0

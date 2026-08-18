@@ -121,6 +121,20 @@ public interface PluginContext {
     SchemaStore schema();
 
     /**
+     * File storage for plugins that declare a {@code blobs} block in their manifest (ARCHITECTURE §11).
+     *
+     * <p>Most plugins declare none and get {@code null} here, exactly as with {@link #schema()}. Declare one
+     * when your plugin has to accept a file from the site's own people rather than link to somebody else's
+     * host — a wiki's diagrams, a show-notes image. What you declare is what an installing operator sees you
+     * asking for, and they may grant less. See {@link PluginBlobs} for the surface.
+     *
+     * @return the blob store, or {@code null} when the manifest declares no {@code blobs} block (most
+     *         plugins)
+     * @since 0.8.0
+     */
+    PluginBlobs blobs();
+
+    /**
      * Read access to this plugin's declared configuration values (ARCHITECTURE §7.2).
      *
      * @return the config accessor; never {@code null}
