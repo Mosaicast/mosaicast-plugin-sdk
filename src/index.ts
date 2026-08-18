@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.7.1' as const;
+export const PLATFORM_API_VERSION = '0.8.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -472,6 +472,148 @@ export interface SchemaClient {
 }
 
 /**
+ * One stored file (ARCHITECTURE §11), as the host describes it.
+ *
+ * `ref` is the file's whole identity — opaque, host-assigned. Store *that*, never the URL: the URL is
+ * derived from it and the host is entitled to change how, while the ref stays true.
+ *
+ * `mime` is what the host determined the file to be from its bytes, not what was claimed on upload. The
+ * two differ exactly when someone lied, which is why this is the value worth keeping.
+ *
+ * @since 0.8.0
+ */
+export interface BlobInfo {
+  /** The host-assigned identifier; opaque, stable, never reused. Do not parse or construct one. */
+  ref: string;
+  /** The original filename, for display; `null` when none was supplied. Never a path the host resolves. */
+  filename: string | null;
+  /** The content type the host determined from the bytes. */
+  mime: string;
+  /** Size in bytes. */
+  size: number;
+  /** When the file was stored, as an ISO-8601 instant. */
+  updatedAt: string;
+}
+
+/** One page of {@link BlobInfo}, in the host's usual paging shape. @since 0.8.0 */
+export interface BlobPage {
+  items: BlobInfo[];
+  page: number;
+  size: number;
+  total: number;
+}
+
+/**
+ * How much room this plugin has for files, as the host currently sees it. @since 0.8.0
+ *
+ * These are the **effective** numbers, not what the manifest asked for: an operator caps both, so a plugin
+ * that declared more than the install allows gets the install's answer. Worth reading before letting
+ * someone pick a file — telling them up front beats a refusal after the upload.
+ */
+export interface BlobQuota {
+  usedBytes: number;
+  quotaBytes: number;
+  maxFileBytes: number;
+}
+
+/**
+ * File storage for a plugin that declares a `blobs` block in its manifest (ARCHITECTURE §11) — **`null`**
+ * on `ctx` when it does not, exactly like {@link SchemaClient}.
+ *
+ * Unlike the schema surface, **writes are the point here**. A schema write has relational invariants a
+ * client cannot be trusted with; a file has none, so the manifest's `data.writableBy` floor plus a quota
+ * is the whole authorization story, and a plugin's own editing UI can upload directly.
+ *
+ * ```ts
+ * const blobs = ctx.blobs;
+ * if (!blobs) return; // this plugin declared no `blobs` block
+ *
+ * const stored = await blobs.upload(file);
+ * img.src = blobs.urlFor(stored.ref);
+ * await ctx.api.put(`data/site/main/logo`, { ref: stored.ref }); // keep the ref, not the URL
+ * ```
+ *
+ * The host checks the size against your effective ceiling, the type against the effective allow-list, and
+ * then the *actual* type read from the leading bytes — so a file whose content contradicts its extension is
+ * refused, and SVG is never accepted at all. A refusal rejects the promise; show it, do not swallow it,
+ * because the person who picked the file is the only one who can pick a different one.
+ *
+ * Nothing collects orphans: a file outlives the document that referred to it, and only your plugin knows
+ * which those are. Delete what you stop pointing at, or clean up from the backend on a schedule.
+ *
+ * @since 0.8.0
+ */
+export interface BlobClient {
+  /**
+   * Stores a file.
+   *
+   * @param file the file or blob to store — a `File` from an `<input type="file">` carries its own name
+   * @param opts `filename` overrides the name, and supplies one for a bare `Blob`
+   * @returns the stored file's identity, carrying the host-determined MIME type
+   */
+  upload(file: File | Blob, opts?: { filename?: string }): Promise<BlobInfo>;
+  /**
+   * Lists this plugin's files, newest first.
+   *
+   * @param opts `page` from 0 and `size` (the host caps it)
+   */
+  list(opts?: { page?: number; size?: number }): Promise<BlobPage>;
+  /**
+   * Deletes a file. Idempotent — removing what is already gone resolves rather than rejecting.
+   *
+   * @param ref the identifier from {@link upload}
+   */
+  remove(ref: string): Promise<void>;
+  /**
+   * The URL to load this file from — host-served, same origin, so no CSP host and no consent decision.
+   *
+   * Derive it at render time; do not store it.
+   *
+   * @param ref the identifier from {@link upload}
+   */
+  urlFor(ref: string): string;
+  /** How much room is left, as the host currently sees it. */
+  quota(): Promise<BlobQuota>;
+}
+
+/**
+ * Builders for links to the host's own pages (ARCHITECTURE §6.4). @since 0.8.0
+ *
+ * **Strings only.** Nothing here navigates, and nothing here is a capability: a plugin can already put any
+ * `href` in its own markup. What it could not do was know the *shape* of a core URL without hardcoding it,
+ * so every plugin that wanted to link to an episode wrote `` `/episodes/${slug}` `` and became a thing that
+ * breaks when the host changes a route. This moves that knowledge back to the host.
+ *
+ * It is deliberately not part of {@link PluginRoute}, which is namespace-confined by construction —
+ * `navigate` cannot name a core route and that is a property worth keeping. Producing a link is not
+ * navigating: the visitor still clicks, and a real `href` is what middle-click, "open in new tab" and
+ * crawlers need.
+ *
+ * ```ts
+ * // "…discussed in The Kraken, from 12:04"
+ * const href = ctx.links.episode('kraken', { t: 724 });
+ * ```
+ */
+export interface PluginLinks {
+  /**
+   * A link to an episode's detail page, optionally at a position inside it.
+   *
+   * @param slug the episode's public slug — the one in `ctx.episodes`
+   * @param opts `t` is a start position in seconds; a negative or non-finite value is ignored
+   * @returns a root-relative URL
+   */
+  episode(slug: string, opts?: { t?: number }): string;
+  /**
+   * A link to a feed tab, optionally filtered.
+   *
+   * @param slug the feed's public slug
+   * @param opts the host's filter axes (§6.1); omitted or default values are left out of the URL
+   * @returns a root-relative URL
+   */
+  feed(slug: string, opts?: { season?: string; tag?: string; order?: 'newest' | 'oldest' }): string;
+}
+
+/**
  * The plugin's own URL subtree (ARCHITECTURE §6.4): where it is, when that changes, and how to move
  * within it.
  *
@@ -853,6 +995,19 @@ export interface PluginContext {
    */
   schema: SchemaClient | null;
   /**
+   * File storage for this plugin, or **`null`** when the manifest declares no `blobs` block
+   * (ARCHITECTURE §11).
+   *
+   * The frontend half of the Java `ctx.blobs()`, `null` for the same reason `schema` is: what a plugin may
+   * store is decided in the manifest and nowhere else. Check it before use — TypeScript will make you.
+   *
+   * This is what lets a plugin accept a file from the site's own podcaster instead of sending them to find
+   * an image host first. See {@link BlobClient}.
+   *
+   * @since 0.8.0
+   */
+  blobs: BlobClient | null;
+  /**
    * Writes one line to the host's log, attributed to this plugin.
    *
    * The counterpart of the backend's `ctx.logger()`, and the **only** supported way for a frontend
@@ -900,6 +1055,15 @@ export interface PluginContext {
    * {@link PluginRoute}.
    */
   route: PluginRoute;
+  /**
+   * Builders for links to the host's own pages — episodes, feed tabs (ARCHITECTURE §6.4).
+   *
+   * Strings, not navigation: put the result in an `href` and let the visitor click. See
+   * {@link PluginLinks} for why this is separate from {@link route}.
+   *
+   * @since 0.8.0
+   */
+  links: PluginLinks;
   /**
    * The active UI locale (ARCHITECTURE §12.7).
    *

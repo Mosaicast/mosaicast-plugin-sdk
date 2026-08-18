@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 The Mosaicast Authors
 
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_THEME, makeMockConsent, makeMockCtx, makeMockSchema } from './testing.js';
+import { DEFAULT_THEME, makeMockBlobs, makeMockConsent, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('makeMockCtx', () => {
   it('produces a full context with sensible defaults', () => {
@@ -108,6 +108,13 @@ describe('makeMockCtx', () => {
 
     const schema = makeMockSchema({ page: [] });
     expect(makeMockCtx({ schema }).schema).toBe(schema);
+  });
+
+  it('leaves blobs null unless supplied, so the no-file-storage case is exercised', () => {
+    expect(makeMockCtx().blobs).toBeNull();
+
+    const blobs = makeMockBlobs();
+    expect(makeMockCtx({ blobs }).blobs).toBe(blobs);
   });
 
   it('merges a route override over the default instead of replacing it', () => {
@@ -317,5 +324,101 @@ describe('makeMockSchema', () => {
     const schema = makeMockSchema(rows());
     schema.rows.revision = [{ id: 7, pageSlug: 'kraken' }];
     expect(await schema.count('revision')).toBe(1);
+  });
+});
+
+describe('makeMockBlobs', () => {
+  const png = (name: string, size = 16) =>
+    new File([new Uint8Array(size)], name, { type: 'image/png' });
+
+  it('stores, lists newest-first and removes', async () => {
+    const blobs = makeMockBlobs();
+
+    const first = await blobs.upload(png('a.png'));
+    const second = await blobs.upload(png('b.png'));
+
+    expect(first.ref).not.toBe(second.ref);
+    expect(first.mime).toBe('image/png');
+    expect((await blobs.list()).items.map((b) => b.filename)).toEqual(['b.png', 'a.png']);
+
+    await blobs.remove(first.ref);
+    expect((await blobs.list()).items.map((b) => b.filename)).toEqual(['b.png']);
+    // Idempotent, like the host — cleanup code needs no existence check.
+    await expect(blobs.remove(first.ref)).resolves.toBeUndefined();
+    expect(blobs.removals).toEqual([first.ref, first.ref]);
+  });
+
+  it('records what was asked of it, including the calls it refuses', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: ['image/png'] });
+
+    await expect(blobs.upload(new File(['%PDF'], 'notes.pdf', { type: 'application/pdf' }))).rejects.toThrow(
+      /not allowed/,
+    );
+
+    // Recorded before the refusal: a test asserting "the component tried" needs the attempt, not just
+    // the outcome.
+    expect(blobs.uploads).toEqual([{ filename: 'notes.pdf', mime: 'application/pdf', size: 4 }]);
+    expect(blobs.stored).toHaveLength(0);
+  });
+
+  it('refuses what the host refuses: per-file ceiling, then quota', async () => {
+    const blobs = makeMockBlobs({ maxFileBytes: 32, quotaBytes: 48 });
+
+    await expect(blobs.upload(png('big.png', 64))).rejects.toThrow(/larger than/);
+    await blobs.upload(png('a.png', 32));
+    // Each file fits; the collection does not. That is the failure a plugin actually meets.
+    await expect(blobs.upload(png('b.png', 32))).rejects.toThrow(/quota/);
+    expect(await blobs.quota()).toEqual({ usedBytes: 32, quotaBytes: 48, maxFileBytes: 32 });
+  });
+
+  it('stands in for the host content check on a named file', async () => {
+    const blobs = makeMockBlobs({ rejectContent: ['actually-a-script.png'] });
+
+    await expect(blobs.upload(png('actually-a-script.png'))).rejects.toThrow(/does not match/);
+  });
+
+  it('takes a filename override, and needs one for a bare Blob', async () => {
+    const blobs = makeMockBlobs();
+
+    const named = await blobs.upload(png('a.png'), { filename: 'renamed.png' });
+    expect(named.filename).toBe('renamed.png');
+
+    const bare = await blobs.upload(new Blob([new Uint8Array(4)], { type: 'image/png' }));
+    expect(bare.filename).toBeNull();
+  });
+
+  it('derives a URL from a ref rather than handing one back on upload', async () => {
+    const blobs = makeMockBlobs();
+    const stored = await blobs.upload(png('a.png'));
+
+    expect(blobs.urlFor(stored.ref)).toBe(`/api/plugins/test/blob/${stored.ref}`);
+  });
+});
+
+describe('ctx.links', () => {
+  it('builds episode links, with and without a timestamp', () => {
+    const { links } = makeMockCtx();
+
+    expect(links.episode('kraken')).toBe('/episodes/kraken');
+    expect(links.episode('kraken', { t: 724 })).toBe('/episodes/kraken?t=724');
+    // A position of zero is the start, which is what a bare link already means.
+    expect(links.episode('kraken', { t: 0 })).toBe('/episodes/kraken');
+    expect(links.episode('kraken', { t: -5 })).toBe('/episodes/kraken');
+    expect(links.episode('kraken', { t: 12.7 })).toBe('/episodes/kraken?t=12');
+  });
+
+  it('builds feed links and omits the default order', () => {
+    const { links } = makeMockCtx();
+
+    expect(links.feed('main')).toBe('/feeds/main');
+    expect(links.feed('main', { season: '2', tag: 'christmas' })).toBe('/feeds/main?season=2&tag=christmas');
+    // `newest` is the host's default: carrying it would make one view canonicalize two ways.
+    expect(links.feed('main', { order: 'newest' })).toBe('/feeds/main');
+    expect(links.feed('main', { order: 'oldest' })).toBe('/feeds/main?order=oldest');
+  });
+
+  it('escapes a slug rather than trusting it', () => {
+    const { links } = makeMockCtx();
+    expect(links.episode('a b/c')).toBe('/episodes/a%20b%2Fc');
   });
 });

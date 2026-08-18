@@ -11,6 +11,10 @@
  */
 
 import type {
+  BlobClient,
+  BlobInfo,
+  BlobPage,
+  BlobQuota,
   ConsentApi,
   FilterState,
   LogLevel,
@@ -335,6 +339,140 @@ export const DEFAULT_THEME: ThemeTokens = {
   border: '#dddddd',
 };
 
+/** One recorded {@link BlobClient.upload} call. @since 0.8.0 */
+export interface UploadRecord {
+  /** The filename the host would have been given — the override, else the `File`'s own name. */
+  filename: string | null;
+  /** The declared content type, as the browser reported it. */
+  mime: string;
+  /** The size in bytes. */
+  size: number;
+}
+
+/** A {@link BlobClient} that stores in memory and records what was asked of it. @since 0.8.0 */
+export type MockBlobClient = BlobClient & {
+  /** Every {@link BlobClient.upload} call, in order. */
+  uploads: UploadRecord[];
+  /** Every ref passed to {@link BlobClient.remove}, in order — including ones that stored nothing. */
+  removals: string[];
+  /** What is currently stored, newest last. */
+  stored: BlobInfo[];
+};
+
+/**
+ * A {@link BlobClient} double: uploads land in memory, `urlFor` returns the host's URL shape, and every
+ * call is recorded.
+ *
+ * **It refuses what the host refuses.** The per-file ceiling, the quota and the type allow-list are
+ * enforced here, because a component that only ever meets an accepting double will meet its first refusal
+ * in front of a podcaster — and a refusal is the case worth writing a test for, since the person who picked
+ * the file is the only one who can pick a different one.
+ *
+ * What it does **not** do is read file formats: the host refuses a file whose bytes contradict its declared
+ * type, and a second, diverging copy of that rule here would be worse than none. Drive that case with a
+ * `File` named in `rejectContent`.
+ *
+ * @param opts limits and refusals; the defaults are small on purpose, so a test moving real quantities of
+ *             data has to say so
+ * @returns a recording, in-memory blob client
+ *
+ * @example
+ * ```ts
+ * const blobs = makeMockBlobs({ mimeTypes: ['image/png'] });
+ * const ctx = makeMockCtx({ blobs });
+ *
+ * await mount(ctx);
+ * expect(blobs.uploads[0]).toMatchObject({ filename: 'diagram.png', mime: 'image/png' });
+ * ```
+ */
+export function makeMockBlobs(
+  opts: {
+    /** Accepted content types; anything else is refused as the host would refuse it. */
+    mimeTypes?: string[];
+    /** Per-file ceiling in bytes. */
+    maxFileBytes?: number;
+    /** Total ceiling in bytes. */
+    quotaBytes?: number;
+    /** Filenames to refuse as "content does not match", standing in for the host's sniffing. */
+    rejectContent?: string[];
+  } = {},
+): MockBlobClient {
+  const mimeTypes = opts.mimeTypes ?? ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+  const maxFileBytes = opts.maxFileBytes ?? 1024 * 1024;
+  const quotaBytes = opts.quotaBytes ?? 8 * 1024 * 1024;
+  const rejected = new Set(opts.rejectContent ?? []);
+
+  const uploads: UploadRecord[] = [];
+  const removals: string[] = [];
+  const stored: BlobInfo[] = [];
+  let nextRef = 1;
+
+  const usedBytes = () => stored.reduce((sum, blob) => sum + blob.size, 0);
+
+  const client: MockBlobClient = {
+    uploads,
+    removals,
+    stored,
+    upload: (file, uploadOpts) => {
+      const filename = uploadOpts?.filename ?? (file instanceof File ? file.name : null);
+      uploads.push({ filename, mime: file.type, size: file.size });
+      if (!mimeTypes.includes(file.type)) {
+        return Promise.reject(new Error(`content type not allowed for this plugin: ${file.type}`));
+      }
+      if (filename != null && rejected.has(filename)) {
+        return Promise.reject(new Error(`content does not match the declared type: ${file.type}`));
+      }
+      if (file.size > maxFileBytes) {
+        return Promise.reject(
+          new Error(`file is larger than this plugin may store: ${file.size} > ${maxFileBytes}`),
+        );
+      }
+      if (usedBytes() + file.size > quotaBytes) {
+        return Promise.reject(new Error(`storing this file would exceed the plugin's quota`));
+      }
+      const info: BlobInfo = {
+        ref: `blob-${nextRef++}`,
+        filename,
+        mime: file.type,
+        size: file.size,
+        updatedAt: new Date().toISOString(),
+      };
+      stored.push(info);
+      return Promise.resolve(info);
+    },
+    list: (listOpts) => {
+      const page = listOpts?.page ?? 0;
+      const size = listOpts?.size ?? 50;
+      // Newest first, like the host — a component that renders the list in order shows the same thing here.
+      const newestFirst = [...stored].reverse();
+      const from = Math.min(page * size, newestFirst.length);
+      const result: BlobPage = {
+        items: newestFirst.slice(from, from + size),
+        page,
+        size,
+        total: newestFirst.length,
+      };
+      return Promise.resolve(result);
+    },
+    remove: (ref) => {
+      removals.push(ref);
+      const at = stored.findIndex((blob) => blob.ref === ref);
+      if (at >= 0) {
+        stored.splice(at, 1);
+      }
+      // Idempotent, like the host: removing what is gone resolves rather than rejecting.
+      return Promise.resolve();
+    },
+    urlFor: (ref) => `/api/plugins/test/blob/${ref}`,
+    quota: () => {
+      const quota: BlobQuota = { usedBytes: usedBytes(), quotaBytes, maxFileBytes };
+      return Promise.resolve(quota);
+    },
+  };
+
+  return client;
+}
+
 /** A {@link PluginContext} wired for tests: the mock `api` and the recorded `log` calls are reachable. */
 export type MockPluginContext = PluginContext & {
   /** The recording client every `api` call goes through. */
@@ -380,10 +518,11 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api' | 'r
  * change any field; the returned `api` is a {@link MockApiClient} recording every call, and `logs`
  * collects every `ctx.log(...)`.
  *
- * `episodeLabels` is deliberately **absent** by default, and `schema` is **`null`**. Both are optional on
- * the real context — the host supplies labels partially, and gives a doc-store plugin no schema at all — so
- * a component that needs either has to survive its absence. The mock makes you face that unless you pass
- * one in ({@link makeMockSchema} for the schema).
+ * `episodeLabels` is deliberately **absent** by default, and `schema` and `blobs` are **`null`**. All three
+ * are optional on the real context — the host supplies labels partially, and gives a plugin no schema and
+ * no blob store unless its manifest declares them — so a component that needs any of them has to survive
+ * its absence. The mock makes you face that unless you pass one in ({@link makeMockSchema},
+ * {@link makeMockBlobs}).
  *
  * **`route` is the one override that merges** rather than replacing: `route: { path: 'kraken' }` pins the
  * subpath and keeps the recording `navigate`. Everything else is all-or-nothing, because everything else
@@ -408,6 +547,10 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     // Null, not a client: a plugin only has one if its manifest declares `storage.schema`, and a
     // component written against a schema that is always there never handles the doc-store case.
     schema: null,
+    // Null for the same reason, and it matters more here: `blobs` is the newer member, so a component
+    // written against a context that always has it would break on every plugin that declares no `blobs`
+    // block — which is most of them.
+    blobs: null,
     logs,
     navigations,
     log: (level, message) => {
@@ -425,6 +568,26 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
       // Assert on `navigations`; drive a route change by rendering again with a different `path`.
       navigate: (subpath, opts) => {
         navigations.push({ subpath, replace: opts?.replace ?? false });
+      },
+    },
+    // A real implementation, not a stub: these are pure string builders, so the double can simply be
+    // right. It mirrors the host's URL shapes (`ShellController`), and core has a test pinning them
+    // together — a mock that invented its own would let a component pass here and link nowhere in
+    // production.
+    links: {
+      episode: (slug, linkOpts) => {
+        const t = linkOpts?.t;
+        const at = t != null && Number.isFinite(t) && t > 0 ? `?t=${Math.floor(t)}` : '';
+        return `/episodes/${encodeURIComponent(slug)}${at}`;
+      },
+      feed: (slug, linkOpts) => {
+        const params = new URLSearchParams();
+        if (linkOpts?.season) params.set('season', linkOpts.season);
+        if (linkOpts?.tag) params.set('tag', linkOpts.tag);
+        // `newest` is the host's default and is left out, so one view has one URL.
+        if (linkOpts?.order === 'oldest') params.set('order', 'oldest');
+        const query = params.toString();
+        return `/feeds/${encodeURIComponent(slug)}${query ? `?${query}` : ''}`;
       },
     },
     locale: { current: () => 'en', onChange: () => noop },
