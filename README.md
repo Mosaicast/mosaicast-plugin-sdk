@@ -104,6 +104,52 @@ DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
 - The list is **paginated** (core's standard `PagedResponse` envelope) and **carries keys** (`DocEntry`), because neither end can address a doc without one.
 - `delete` is **idempotent**: removing an absent doc is not an error. The Java call returns whether anything was actually removed.
 
+### The typed client — `ctx.docs` (since 0.9.0)
+
+`ctx.api` is the raw surface and stays available. `ctx.docs` is the same endpoints with the path building,
+the key validation and the 404 handling done for you — which removes a whole class of bug, since every doc
+access above was string concatenation the plugin had to get right four segments at a time:
+
+```ts
+await ctx.docs.put('self', `mark:${ctx.scope.id}`, marks);   // data/user/me/mark:<slug>
+const board = await ctx.docs.get<Board>('site', 'leaderboard');   // null when absent, not a rejection
+const page  = await ctx.docs.list<Marks>('self', { prefix: 'mark:' });
+await ctx.docs.remove(ctx.scope, 'draft');                    // any Scope addresses its own partition
+```
+
+- **`'self'` is `data/user/me`** and `'site'` is `data/site/main` — the two singletons. Making the
+  per-user partition the *shortest* thing to write is deliberate: it is the most security-relevant
+  convention in the contract, and a convention only sticks when it is also the easy path.
+- **`get` resolves `null` on 404**, because a key nothing has written yet is a normal state rather than a
+  failure. The same is true of `ctx.api.getOrNull(path)`.
+- **A malformed key throws at the call site**, with `DOC_KEY_PATTERN` in the message, instead of costing a
+  400 round-trip whose body you then have to read.
+- Everything else is unchanged and still the host's: both access floors, `backendOwned`, the 400 on an
+  unknown scope, the 401 on an anonymous `user` request.
+
+### Typed failures — `PluginApiError` (since 0.9.0)
+
+Every `ctx.api` method rejects with an error carrying the **status** and the RFC 7807 body. Before 0.9.0 the
+rejection was untyped, so the only way to survive a 404 was `catch(() => undefined)` — which also swallowed
+the 500, the 403 and the network failure, and showed the visitor an empty widget for all four:
+
+```ts
+import { isPluginApiError } from '@mosaicast/plugin-sdk';
+
+try {
+  await ctx.docs.put('site', 'stats', computed);
+} catch (e) {
+  if (isPluginApiError(e) && e.status === 403) {
+    ctx.log('warn', e.problem?.detail ?? 'refused');  // backendOwned, or the write floor
+    return;
+  }
+  throw e;                                            // a real failure — surface it
+}
+```
+
+Use `isPluginApiError`, not `instanceof`: the error is constructed by the host and crosses a bundle
+boundary, so it does not share a constructor with anything in your plugin.
+
 ### Per-user data — the `user` scope (since 0.5.0)
 
 **Per-user data belongs in the `user` scope, never in the key.** A key is client-supplied, so the convention this README used to suggest — `mark:<userId>:cell` under an episode scope — was an access-control decision the host could not enforce: any caller past the plugin's read floor could address someone else's key directly, and scope ids are public slugs, so nothing had to be guessed.
@@ -252,6 +298,75 @@ const n   = await ctx.schema.count('page');
 Test it with `makeMockSchema({ page: [...] })` from `/testing`, which records every query. Its `search` is
 a substring match with the same caveat as `FakeSchemaStore`'s.
 
+## Episode snapshots — `ctx.feeds` (since 0.9.0)
+
+The Java contract could read an episode's display snapshot and the frontend could not, so a plugin that
+wanted to draw an episode card copied the host's own data into its doc store and kept it fresh on a
+schedule — a backend, a scheduled ingest, a `backendOwned` key and a copy that is stale between runs, for
+fields the host already has.
+
+```ts
+const cards = await ctx.feeds.displayMany(ctx.episodes.slice(0, 20));   // one request, not N
+for (const slug of ctx.episodes) {
+  const snap = cards[slug];
+  if (!snap) continue;                       // filtered out for this visitor — normal, not an error
+  render(slug, snap.title, resolveArtwork(snap), i18n.duration(snap.duration ?? 0));
+}
+
+const one = await ctx.feeds.display('kraken');   // null when absent or not visible
+```
+
+- **The host filters, the plugin consumes.** A `WITHDRAWN` or tier-gated episode is **absent** rather than
+  redacted, and this cannot enumerate episodes `ctx.episodes` did not already give you.
+- **No `readableBy` gate of its own** — it returns host data the same visitor can read from
+  `/api/episodes/*` anyway. It exists so a plugin need not know that URL shape, the same argument
+  `ctx.links` makes.
+- **Not authoritative.** The snapshot is overwritten on every feed refetch — that is the feature, and the
+  reason to read it live. Cache per render, never per install.
+- `displayMany` **clamps** at 200 slugs rather than erroring, so check what came back.
+
+Test it with `makeMockFeeds().withDisplay(slug, snapshot)`, mirroring the Java `FakeFeedAccess.withDisplay`.
+
+## Site-wide tags — `ctx.tags` / `ctx.tags()` (since 0.9.0)
+
+Tags existed in core only as a feed-derived filter axis over episodes: no vocabulary, no plugin surface. So
+every plugin that wanted tags grew a private free-text column, and a wiki's `lore` and an episode's `lore`
+were unrelated strings that could not be suggested, linked or counted together.
+
+Opt in from the manifest — reading and tagging your own subjects is one thing, tagging **episodes** is
+another:
+
+```json
+"tags": { "readsVocabulary": true, "writesEpisodes": false }
+```
+
+`ctx.tags` (TS) and `ctx.tags()` (Java) are **`null`** without it, the same shape as `schema` and `blobs`.
+
+```ts
+const tags = ctx.tags;
+if (!tags) return;
+
+for (const t of await tags.all()) suggest(t.label, t.tag);      // the site's real vocabulary
+await tags.tagSubject(`page:${slug}`, 'Maritime Lore');          // your own namespace
+const also = await tags.episodesWith('maritime lore');           // what else is about this
+a.href = ctx.links.feed('main', { tag: 'maritime lore' });       // and it links to the feed view
+```
+
+- **`tag` is the canonical key** (trim, collapse whitespace, casefold), applied on every path into the
+  vocabulary including feed ingest; **`label` is presentation**, kept from first use. Send any spelling,
+  store and compare on the key.
+- **Tagging an episode is a capability**, not a convenience: it changes the shell's filter options *and*
+  what core recommends beside that episode. Hence the second flag.
+- **What no plugin may do:** delete a tag from the vocabulary (it is shared), rename one (a vocabulary-wide
+  edit, and admin's), or remove another writer's assignment — the feed's included. Every plugin write
+  carries `source = plugin:<id>`, which makes the last one enforceable rather than merely discouraged.
+- A tag stops existing when nothing carries it.
+
+`subjectKey` is opaque and yours to invent — the same namespacing `ctx.schema` has for tables. Use the same
+key a `SearchProvider` hit resolves to, so a tag and a search result name one object.
+
+Test with `makeMockTags({ writesEpisodes })` / `FakeTags`, both of which refuse what the host refuses.
+
 ## Deep links & navigation — `ctx.route` (navigate since 0.7.0)
 
 A plugin declaring a `page` slot owns the URL subtree `/p/<pluginId>/*`. The host hands it the subpath
@@ -280,6 +395,35 @@ ctx.route.navigate('index', { replace: true });       // no back-button step (ta
   against the host's current router and is not part of the contract.
 - Pair it with `ShareMetadataProvider` (OpenGraph per subpath) and `SitemapProvider` on the backend so the
   URLs you navigate to also preview and index properly.
+
+### Reading the query, and matching a route (since 0.9.0)
+
+`navigate` always accepted a `?query`, and until 0.9.0 there was no supported way to read one back —
+`location.search` is exactly the "do not reach past this handle" the rule above forbids. Filters, sort
+order and pagination are the obvious shareable-link state:
+
+```ts
+const sort = ctx.route.query.get('sort') ?? 'newest';   // host-parsed URLSearchParams
+ctx.route.navigate(`moments?sort=${next}`, { replace: true });
+```
+
+`matchRoute` replaces the prefix matcher every page plugin hand-rolls — and the hand-rolled one is usually
+a `startsWith`, which matches `moments-archive` too:
+
+```ts
+import { matchRoute } from '@mosaicast/plugin-sdk';
+
+const match = matchRoute(ctx.route.path, ['', 'moments', 'highlight/:slug'] as const);
+switch (match?.pattern) {
+  case 'highlight/:slug': return renderDetail(match.params.slug);
+  case 'moments':         return renderMoments();
+  case '':                return renderIndex();
+  default:                return renderNotFound();      // null — nothing matched
+}
+```
+
+The whole path must be consumed, `:param` captures one non-empty segment (decoded), surrounding slashes and
+any `?query`/`#hash` are ignored, and the **first** matching pattern wins.
 
 ### Linking to core pages — `ctx.links` (since 0.8.0)
 
@@ -347,6 +491,125 @@ Test it with `makeMockBlobs()` from `/testing` and `InMemoryPluginBlobs` in the 
 ceilings and the allow-list**: a component that has only ever met an accepting double meets its first
 refusal in front of a podcaster. Neither reads file formats — name the file that should be refused
 (`rejectContent`) to exercise that path.
+
+## Host icons — `iconCss` / `iconMask` (since 0.9.0)
+
+The host publishes its icon set as `--mc-icon-*` custom properties, which inherit through the shadow
+boundary — so a plugin built against **this** SDK picks up an icon the day core publishes it, with no SDK
+release and no manifest bump. That is why the icon set is deliberately *not* on `ctx`, and why these
+helpers take a plain `string` rather than a closed union: either would pin the set to an SDK version.
+
+What they own is the mechanics, which are subtle enough to get wrong three ways:
+
+```ts
+import { iconCss } from '@mosaicast/plugin-sdk';
+
+const style = document.createElement('style');
+style.textContent = iconCss(['star', 'clock']);      // put it in YOUR shadow root
+root.append(style);
+root.insertAdjacentHTML('beforeend', '<i class="mc-icon mc-icon-star" aria-hidden="true"></i>');
+```
+
+- **Mask, never `background-image`.** `background: currentColor` behind a mask is what makes the icon
+  re-theme with the text beside it.
+- **Every reference needs a blank-image fallback.** An unresolved `var()` invalidates the declaration, so
+  `mask-image` falls back to its initial `none` — leaving an unmasked element painting `currentColor`
+  across its whole box. **A missing icon renders as a solid square, not as nothing**, and `mask-image: none`
+  is the obvious fallback and the one that causes it. `iconMask` emits a real blank SVG instead.
+- **A bundled `.css` file lands in the host document and cannot reach any shadow root.** It is the first
+  thing everyone tries and it silently does nothing.
+
+Don't declare into `--mc-*` yourself — that is the host's namespace.
+
+## Formatting — `createPluginI18n` (plurals & units since 0.9.0)
+
+`t(key, params)` interpolates; the rest formats against `ctx.locale`:
+
+```ts
+const i18n = createPluginI18n(catalogs, ctx.locale);
+
+i18n.plural('moments', n);                 // catalog keys: moments.one / moments.other / moments.few …
+i18n.n(1234.5);                            // 1.234,5 in de
+i18n.date(snapshot.publishedAt!);          // takes the ISO instants the contract hands over
+i18n.duration(snapshot.duration!);         // 'PT1H2M3S' → 1:02:03; also takes plain seconds
+i18n.bytes(quota.usedBytes);               // decimal units, locale separator — 5,2 MB in de
+```
+
+- **`plural` uses `Intl.PluralRules`.** A catalog could not express "1 highlight" / "5 highlights" at all,
+  so plugins shipped an English-shaped `if (n === 1)` — wrong in Polish, Russian and Arabic. Only the
+  `.other` form is required; a locale needing one you did not write falls back to it. `count` is
+  interpolated for you.
+- **`duration` and `bytes` are contract-adjacent**: `DisplaySnapshot.duration` *is* an ISO-8601 string and
+  `BlobQuota` *is* three raw byte counts. The SDK produces both, so it may as well render them — and the
+  hand-rolled byte formatter hardcodes `.` as the decimal separator, which is simply wrong in `de`.
+
+## The manifest, typed — `defineManifest` (since 0.9.0)
+
+```ts
+import { defineManifest, PLATFORM_API_VERSION } from '@mosaicast/plugin-sdk';
+
+export default defineManifest({
+  id: 'sample', version: '1.0.0', platformApi: PLATFORM_API_VERSION, name: 'Sample',
+  frontend: { entry: 'sample.es.js', elements: ['sample-card'] },
+  slots: [{ scope: 'episode', element: 'sample-card', placement: 'main', visibleTo: 'anonymous' }],
+  nav: [{ path: '', label: 'Sample', icon: 'star' }],
+  data: { writableBy: 'podcaster', readableBy: 'anonymous' },
+});
+```
+
+**Documentation, not enforcement** — the same caveat `PluginDataDeclaration` and
+`ConsentServiceDeclaration` have carried since 0.4.0. The manifest is owned and validated by the **host**;
+the SDK never reads `plugin.json`, and if this type and core disagree, **core wins**.
+
+What it buys you: emit `plugin.json` from a build step and the manifest stops being a second, unchecked
+copy of what your code already knows. `nav[]` and a plugin's own in-page tab bar are the same list of
+entrances declared twice, and a renamed path otherwise becomes a menu entry leading to an empty view with
+nothing to catch it. Note where the two *legitimately* diverge: `path`, `icon` and `role` are pinned
+between them, but the menu **label cannot be translated** — core has no plugin catalogs — while your
+in-page tab can.
+
+## Optional extension points — `SearchProvider` / `UserDataHandler` (since 0.9.0)
+
+Both are `ExtensionPoint`s a plugin MAY implement alongside `PluginBackend`, like `SitemapProvider`. No
+manifest declaration: not implementing one is how a plugin says it has nothing to contribute.
+
+**`SearchProvider`** puts plugin content into the site's search, instead of each plugin growing a private
+search box a visitor has no way to discover:
+
+```java
+public List<SearchHit> search(String query, Role role, int limit) {
+    return pages.matching(query, role).stream()
+            .map(p -> new SearchHit("glossary/" + p.slug(), p.title(), p.excerpt(), p.rank()))
+            .toList();
+}
+```
+
+`subpath` resolves to `/p/<pluginId>/<subpath>`, exactly as `ShareMetadataProvider.metaFor` works in
+reverse, so a hit is a real deep-linkable URL and the host keeps the URL shape. Results are **grouped by
+source**, not merged — your `score` and Postgres `ts_rank` are not on one scale — and a slow provider costs
+its own section, not the visitor's query.
+
+**Access is your job here, unusually.** Everywhere else the host resolves access; it cannot for objects it
+has no model of. A provider returning a draft page to an anonymous visitor is a leak the host will not
+catch, so `role` is `null` for anonymous and `SearchProviderHarness` calls you once per role:
+
+```java
+var results = new SearchProviderHarness(new WikiSearch(store)).search("kraken");
+assertFalse(results.leakedToAnonymous("draft/lighthouse"));
+```
+
+**`UserDataHandler`** is what §12's promise needs to be keepable — core cannot pseudonymise a plugin's
+contributions, cannot find them, and cannot know that pseudonymising is right rather than deleting:
+
+```java
+public void eraseUser(String userId) { revisions.anonymise(userId); }   // or a hard delete — your call
+```
+
+The `USER` scope is host-owned, so core drops `data/user/<id>/…` itself. Implement this for the hard half:
+**schema columns and blobs**, where identity lives in a column a plugin chose and the host never learned
+which one is a person. Handlers run *before* the account row goes, and **must be idempotent** — a failed
+deletion is retried. `UserDataHandlerHarness.eraseTwice(userId)` is that test, and it is the one authors
+skip: the second call is the one that throws, during a retry, when the alternative is a half-done deletion.
 
 ## Logging — `ctx.logger()` / `ctx.log()` (since 0.4.0)
 
@@ -492,6 +755,33 @@ document.body.appendChild(el);
 expect(el.shadowRoot!.querySelector('.card')).not.toBeNull();
 // el.ctx.api is a MockApiClient: assert el.ctx.api.calls after interactions
 ```
+
+**Awaiting a component's fetches** (`flushMockApi`, since 0.9.0). The mock resolves its promise before the
+component's `.then(setState)` runs, so `await Promise.resolve()` covers one hop and not two — which is why
+the symptom is an assertion that fails *only sometimes*, depending on how many hops the component happens
+to have:
+
+```ts
+mount(ctx);
+await flushMockApi(ctx.api);            // waits for the calls, then drains the hops behind them
+expect(root.querySelector('.title')?.textContent).toBe('The Kraken');
+```
+
+**Driving a failure.** `apiError(status, problem)` as a canned response makes the client reject with the
+host's error shape, so a component's 404 branch and its 500 branch are separately testable:
+
+```ts
+const ctx = makeMockCtx({ apiResponses: { 'get data/site/main/stats': apiError(403, { detail: 'backendOwned' }) } });
+```
+
+**The doubles refuse what the host refuses.** `makeMockTags()` throws on `tagEpisode` unless you pass
+`{ writesEpisodes: true }`, and its `untagEpisode` leaves a `withFeedTag` assignment alone. `makeMockBlobs`
+enforces the ceilings and the allow-list. A component that has only ever met a permissive double meets its
+first refusal in front of a podcaster.
+
+**The extension-point harnesses** (Java): `SearchProviderHarness` calls a provider once per role including
+anonymous; `UserDataHandlerHarness.eraseTwice(userId)` proves erasure survives the host's retry. Both are
+shown under [Optional extension points](#optional-extension-points--searchprovider--userdatahandler-since-090).
 
 ## Contributing
 Contributions welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). In short: `git commit -s` (DCO, required), SPDX header in new files, add tests.

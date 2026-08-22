@@ -7,6 +7,145 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-08-22
+
+The release that came out of *using* the contract. Every item here was found the same way — building
+`mosaicast-plugin-sample` and `mosaicast-plugin-wiki` against 0.8.0 and noticing what the plugin had to
+build for itself — and they turn out to be one shape of gap repeated: **the host holds something a plugin
+can only re-implement badly on its own**, so every plugin re-implements it, subtly differently, with the
+interesting failures in the ones that get it wrong quietly.
+
+Four examples of the same sentence. Tags exist in core as a feed-derived filter axis with no vocabulary and
+no plugin surface, so the wiki grew a private `tags` column and its `lore` and an episode's `lore` became
+unrelated strings. The Java contract can read an episode's `DisplaySnapshot` and the frontend cannot, so the
+wiki projects host data into its own doc store and keeps it stale on a schedule. Core searches episodes and
+nothing else, so each plugin builds a second search box on the same site. And `PluginApiClient` rejected
+with an untyped value, so every call site wrote `catch(() => undefined)` to survive a 404 — and swallowed
+the 500, the 403 and the network failure with it.
+
+The fifth is different in kind: ARCHITECTURE §12 promises that plugin contributions are **pseudonymised**
+on account deletion. Bingo is a plugin. Core cannot find its contributions, cannot pseudonymise them, and
+cannot know that pseudonymising is right rather than deleting — that judgement belongs to whoever designed
+the data, and there was no hook to ask. `UserDataHandler` is that hook, filed before core builds account
+deletion rather than after.
+
+**About half of this surface is contract ahead of implementation.** `ctx.feeds`, `ctx.tags`, `ctx.docs`,
+`route.query`, the typed errors and both extension points need core to build the other half; the SDK-side
+helpers (`iconCss`, `matchRoute`, the i18n formatters, `defineManifest`, `declaredTypeFor`, `flushMockApi`)
+work the day this ships. That is the deliberate order this time — core follows the contract — and it is the
+same position `SchemaStore` was in before 0.7.0, which is worth saying plainly rather than letting a plugin
+author discover it. Tracked as issues on `mosaicast-core`.
+
+**No plugin *code* changes.** Everything is additive. What breaks is a hand-built `ctx` literal in a test —
+`PluginContext` gained three members and `PluginRoute` two — and `makeMockCtx` absorbs it. See
+[MIGRATION.md](MIGRATION.md).
+
+### Added
+
+- **Site-wide tags: `ctx.tags` (TypeScript) and `PluginContext.tags()` (Java)** — the shared vocabulary
+  plugins can read and contribute to, instead of N private columns that look identical to a reader and
+  share nothing. Opt-in through a manifest `tags` block; both accessors are **`null`** without it, the same
+  shape as `schema` and `blobs`. Reads: `all`, `episodesWith`, `tagsOn`, `similarTo`, `subjectsWith`,
+  `tagsOnSubject`. Writes: `tagSubject` / `untagSubject`, and `tagEpisode` / `untagEpisode`.
+  - **Two writes that look alike and are not.** Tagging your own subjects touches keys you invented in your
+    own namespace, and `data.writableBy` is the whole story. Tagging an *episode* changes the shell's filter
+    options **and** what core recommends beside it — a real capability, so it needs a second flag
+    (`tags.writesEpisodes`) and what a plugin may do stays readable off its manifest.
+  - **The host owns a canonical key**; `label` is presentation, kept from first use. `Maritime`, `maritime`
+    and `maritime ` are one tag, and the rule applies to feed ingest too — a vocabulary normalised on one
+    path only is not normalised.
+  - **What no plugin may do:** delete a tag from the vocabulary (it is shared), rename one (a
+    vocabulary-wide edit, and admin's), or remove another writer's assignment, the feed's included. Every
+    plugin write is recorded with `source = plugin:<id>`, which is what makes the last one enforceable
+    rather than merely discouraged — and gives an operator something to revoke.
+- **`ctx.feeds`** — `display(slug)` and `displayMany(slugs)`, the frontend half of the Java `FeedAccess`.
+  This retires a piece of dead surface: `DisplaySnapshot` and `resolveArtwork` have shipped since 0.1 with
+  nothing in the contract that hands a frontend one. The host filters, so a `WITHDRAWN` or tier-gated
+  episode is **absent** rather than redacted, and this cannot enumerate episodes `ctx.episodes` withheld.
+  No `readableBy` gate of its own — it returns host data the visitor can already read; it exists so a
+  plugin need not know that URL shape, the argument `ctx.links` made. `displayMany` clamps at 200.
+- **`ctx.docs`** — a typed doc-store client over the endpoints `ctx.api` already reaches. `'self'` resolves
+  to `data/user/me` and `'site'` to `data/site/main`, which makes the most security-relevant convention in
+  the contract — per-user data goes in the `USER` scope, never in a key — the *shortest* thing to write.
+  That is the only reliable way to make a convention stick. Keys are validated client-side, turning a 400
+  round-trip into a thrown error carrying the pattern. `ctx.api` stays as the escape hatch.
+- **Typed API failures** — `PluginApiError` (with `status` and the RFC 7807 `problem` body),
+  `isPluginApiError`, and `PluginApiClient.getOrNull`. `getOrNull` is the one that changes behaviour in the
+  wild: absence stops being an exception, so the `catch` that remains is a real error path again. The guard
+  is **structural**, because the error crosses a bundle boundary from the host and `instanceof` against a
+  plugin's own copy of a class would answer `false` for a genuine one.
+- **`blobs.upload` normalises the declared type** by default, via the exported `declaredTypeFor(file)`.
+  A real cross-browser failure, not a hypothetical: Chromium fills `File.type` from its own table, Firefox
+  asks the OS MIME database, and where that lookup fails it hands over `''` — `FormData` then sends
+  `application/octet-stream` and the host refuses on the *declared* type before it sniffs anything. A valid
+  PNG, rejected in one browser only, on a machine the author cannot reproduce. Guessing is safe here
+  **specifically because the host still reads the bytes**: a wrong guess becomes the same 415 it would have
+  been. `{ declaredType: 'preserve' }` opts out; an unmapped extension is left alone so the refusal keeps
+  the host's wording.
+- **`iconCss(names)` / `iconMask(name)`** — the host icon mechanics, as CSS strings. The icon set stays off
+  `ctx` on purpose (§12.3): custom properties inherit through the shadow boundary, so a plugin picks up an
+  icon the day core publishes it with no SDK release. These keep that property (the name parameter is a
+  plain `string`; `KnownIconName` is an open hint) and own the part that is easy to get wrong — chiefly
+  that **a missing icon renders as a solid square, not as nothing**. An unresolved `var()` invalidates the
+  declaration, `mask-image` falls back to its initial `none`, and an unmasked element paints `currentColor`
+  across its whole box. `mask-image: none` is the obvious fallback and the cause; these emit a blank SVG.
+- **`ctx.route.query` and `ctx.route.hash`** — `navigate` always accepted a `?query` and there was no
+  supported way to read one back. The only route was `location.search`, which is exactly the "do not reach
+  past this handle" that `navigate` forbids, for the reason it gives. Filters, sort order and pagination are
+  the obvious shareable-link state.
+- **`matchRoute(path, patterns)`** — the prefix matcher every page plugin hand-rolls, and the hand-rolled
+  one is usually a `startsWith` that also matches `moments-archive`. Whole-path match, `:param` capture,
+  `null` for the not-found branch.
+- **Locale-bound formatting on `createPluginI18n`** — `plural`, `n`, `date`, `duration`, `bytes`. A catalog
+  could not express "1 highlight" / "5 highlights" at all, so plugins shipped an English-shaped
+  `if (n === 1)`, which is wrong in Polish, Russian and Arabic. `duration` and `bytes` earn their place by
+  being contract-adjacent: `DisplaySnapshot.duration` *is* an ISO-8601 string and `BlobQuota` *is* three raw
+  byte counts, so the SDK produces both and may as well render them — locale-correctly, unlike the
+  hand-rolled byte formatter that hardcodes `.` as the decimal separator.
+- **`PluginManifest` + `defineManifest(m)`** — the whole manifest typed, not two blocks of it.
+  **Documentation, not enforcement**, on exactly the terms `PluginDataDeclaration` already carried: the host
+  owns and validates the manifest, and if this type and core disagree, core wins. The argument for typing
+  the rest is drift — `nav[]` and a plugin's own in-page tab bar are one list of entrances declared twice,
+  and a renamed path becomes a menu entry leading to an empty view with nothing to catch it. Documented
+  where the two legitimately diverge: `path`/`icon`/`role` are pinned, the menu label deliberately is not,
+  because core has no plugin catalogs to translate it against.
+- **`SearchProvider`** (Java, optional `ExtensionPoint`) — plugin content contributed to the site's search,
+  keyed by a subpath under `/p/<id>/` exactly as `ShareMetadataProvider` works in reverse. Results are
+  **grouped by source rather than merged**: a plugin's `score` and Postgres `ts_rank` are not on one scale,
+  and pretending otherwise produces a ranking nobody can explain. **Access is the plugin's job here**,
+  unusually — the host has no model of a plugin's objects, so a provider returning a draft to an anonymous
+  visitor is a leak nothing else catches. `role` is `null` for anonymous.
+- **`UserDataHandler`** (Java, optional `ExtensionPoint`) — `eraseUser(userId)` plus a defaulted
+  `exportUser(userId)`. Erase or pseudonymise is **the plugin's call**; the host cannot make it. Both on one
+  interface deliberately: they need the same "find this user's rows" query, and shipping erasure alone means
+  every plugin writes it twice. Handlers run before the account row is dropped, and must be idempotent — a
+  failed deletion is retried.
+- **Test doubles for all of it**: `makeMockFeeds`, `makeMockTags`, `makeMockDocs`, `apiError(status)` and
+  `flushMockApi` in `@mosaicast/plugin-sdk/testing`; `FakeTags`, `SearchProviderHarness` and
+  `UserDataHandlerHarness` in the Java kit.
+  - **They refuse what the host refuses**, continuing the line 0.8.0 drew: `makeMockTags` / `FakeTags` throw
+    on an episode write without the declaration, and their `untagEpisode` leaves the feed's assignment
+    alone. A component that has only met a permissive double meets its first refusal in front of a user.
+  - **`flushMockApi` removes a real footgun.** The mock resolves before a component's `.then(setState)`
+    runs, so `await Promise.resolve()` covers one microtask hop and not two — the symptom is an assertion
+    that fails *only sometimes*, depending on how many hops the component happens to have.
+  - **`SearchProviderHarness` calls a provider once per role, anonymous included**, because that is the one
+    test the interface's unusual access rule demands and the one an author writes by hand incorrectly
+    (anonymous is `null`, not a fourth enum constant). `UserDataHandlerHarness.eraseTwice` is the
+    idempotency test that otherwise only fails during a production retry.
+
+### Changed
+
+- `FakePluginContext` gained **`withTags(Tags)`**, a chaining mutator rather than a sixth constructor
+  parameter. The constructor list was already at five, and each positional addition breaks every existing
+  plugin test to supply something almost none of them want — the mistake 0.7.1 was spent undoing on the
+  TypeScript side. The four- and five-argument constructors are untouched and still mean the same thing.
+- `makeMockCtx` wires `docs` and `feeds` as real (empty) doubles, `tags` as **`null`** like `schema` and
+  `blobs`, and adds an empty `query`/`hash` to the merged `route` default. The 0.7.1 merge already protects
+  a `route: { path }` override from the two new required members.
+- `makeMockBlobs` applies the same declared-type normalisation the real client does, so the double and the
+  host agree about a `File` whose `type` the browser left empty.
+
 ## [0.8.0] — 2026-08-18
 
 A plugin could declare relational tables, publish documents and serve a deep-linked page — and could not
@@ -558,6 +697,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.9.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.8.0
 [0.7.1]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.1
 [0.7.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.0

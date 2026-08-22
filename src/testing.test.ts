@@ -2,7 +2,19 @@
 // SPDX-FileCopyrightText: 2026 The Mosaicast Authors
 
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_THEME, makeMockBlobs, makeMockConsent, makeMockCtx, makeMockSchema } from './testing.js';
+import {
+  apiError,
+  DEFAULT_THEME,
+  flushMockApi,
+  makeMockBlobs,
+  makeMockConsent,
+  makeMockCtx,
+  makeMockDocs,
+  makeMockFeeds,
+  makeMockSchema,
+  makeMockTags,
+} from './testing.js';
+import { isPluginApiError } from './index.js';
 
 describe('makeMockCtx', () => {
   it('produces a full context with sensible defaults', () => {
@@ -420,5 +432,267 @@ describe('ctx.links', () => {
   it('escapes a slug rather than trusting it', () => {
     const { links } = makeMockCtx();
     expect(links.episode('a b/c')).toBe('/episodes/a%20b%2Fc');
+  });
+});
+
+describe('makeMockFeeds', () => {
+  const kraken = { title: 'The Kraken', description: 'a big squid', duration: 'PT42M' };
+
+  it('answers from registered snapshots and null for the rest', async () => {
+    const feeds = makeMockFeeds().withDisplay('kraken', kraken);
+
+    expect(await feeds.display('kraken')).toEqual(kraken);
+    // Not an error: the host answers the same way for an episode this visitor may not see.
+    expect(await feeds.display('gated')).toBeNull();
+    expect(feeds.requested).toEqual(['kraken', 'gated']);
+  });
+
+  it('omits unknown slugs from a batch rather than returning null entries', async () => {
+    const feeds = makeMockFeeds({ kraken });
+    const many = await feeds.displayMany(['kraken', 'gated']);
+
+    expect(Object.keys(many)).toEqual(['kraken']);
+    expect('gated' in many).toBe(false);
+  });
+
+  it('clamps an oversized batch instead of rejecting it', async () => {
+    const feeds = makeMockFeeds();
+    const slugs = Array.from({ length: 250 }, (_, i) => `ep-${i}`);
+
+    await expect(feeds.displayMany(slugs)).resolves.toEqual({});
+    expect(feeds.requested).toHaveLength(200); // DISPLAY_BATCH_LIMIT — clamped, not an error
+  });
+
+  it('is wired into makeMockCtx by default, empty', async () => {
+    const ctx = makeMockCtx();
+    expect(await ctx.feeds.display('anything')).toBeNull();
+  });
+});
+
+describe('makeMockTags', () => {
+  it('canonicalises the way the host does', async () => {
+    const tags = makeMockTags();
+    await tags.tagSubject('page:kraken', '  Maritime   Lore ');
+
+    expect(await tags.tagsOnSubject('page:kraken')).toEqual(['maritime lore']);
+    // Any spelling reaches the same tag, which is the whole point of a shared vocabulary.
+    expect(await tags.subjectsWith('MARITIME LORE')).toEqual(['page:kraken']);
+  });
+
+  it('keeps the display label from first use', async () => {
+    const tags = makeMockTags();
+    await tags.tagSubject('page:a', 'Maritime');
+    await tags.tagSubject('page:b', 'maritime');
+
+    const [entry] = await tags.all();
+    expect(entry).toMatchObject({ tag: 'maritime', label: 'Maritime', subjects: 2 });
+  });
+
+  it('refuses episode writes unless the manifest declared them', async () => {
+    const tags = makeMockTags();
+    await expect(tags.tagEpisode('kraken', 'lore')).rejects.toThrow(/writesEpisodes/);
+
+    const allowed = makeMockTags({ writesEpisodes: true });
+    await expect(allowed.tagEpisode('kraken', 'lore')).resolves.toBeUndefined();
+    expect(allowed.episodeTags.kraken).toEqual(['lore']);
+  });
+
+  it('cannot remove another writer\'s assignment', async () => {
+    const tags = makeMockTags({ writesEpisodes: true }).withFeedTag('kraken', 'lore');
+    await tags.tagEpisode('kraken', 'lore');
+
+    await tags.untagEpisode('kraken', 'lore');
+
+    // The plugin's own row is gone; the feed's stays, so the episode still carries the tag.
+    expect(await tags.tagsOn('kraken')).toEqual(['lore']);
+    expect(await tags.episodesWith('lore')).toEqual(['kraken']);
+  });
+
+  it('drops a tag from the vocabulary once nothing carries it', async () => {
+    const tags = makeMockTags();
+    await tags.tagSubject('page:a', 'lore');
+    expect(await tags.all()).toHaveLength(1);
+
+    await tags.untagSubject('page:a', 'lore');
+
+    // A plugin never deletes a tag; it stops existing because nothing carries it any more.
+    expect(await tags.all()).toEqual([]);
+  });
+
+  it('counts episodes site-wide but subjects only for this plugin', async () => {
+    const tags = makeMockTags({ writesEpisodes: true })
+      .withFeedTag('kraken', 'lore')
+      .withFeedTag('lighthouse', 'lore');
+    await tags.tagSubject('page:kraken', 'lore');
+
+    expect(await tags.all()).toEqual([
+      { tag: 'lore', label: 'lore', episodes: 2, subjects: 1 },
+    ]);
+  });
+
+  it('answers similarTo from co-occurrence', async () => {
+    const tags = makeMockTags()
+      .withFeedTag('kraken', 'lore')
+      .withFeedTag('kraken', 'maritime')
+      .withFeedTag('lighthouse', 'lore')
+      .withFeedTag('lighthouse', 'maritime')
+      .withFeedTag('lighthouse', 'ghosts');
+
+    const similar = await tags.similarTo('lore', 5);
+
+    expect(similar.map((t) => t.tag)).toEqual(['maritime', 'ghosts']);
+    expect(similar.map((t) => t.tag)).not.toContain('lore'); // never itself
+  });
+
+  it('is null on the context unless a test supplies one', () => {
+    expect(makeMockCtx().tags).toBeNull();
+    expect(makeMockCtx({ tags: makeMockTags() }).tags).not.toBeNull();
+  });
+});
+
+describe('makeMockDocs', () => {
+  it('resolves the singleton partitions the way the host does', async () => {
+    const docs = makeMockDocs();
+
+    await docs.put('self', 'marks', { b3: true });
+    await docs.put('site', 'logo', { ref: 'blob-1' });
+    await docs.put({ type: 'episode', id: 'kraken' }, 'board', { cells: 25 });
+
+    expect(docs.stored).toEqual({
+      'data/user/me/marks': { b3: true },
+      'data/site/main/logo': { ref: 'blob-1' },
+      'data/episode/kraken/board': { cells: 25 },
+    });
+  });
+
+  it('resolves null for an absent document rather than rejecting', async () => {
+    expect(await makeMockDocs().get('self', 'nothing')).toBeNull();
+  });
+
+  it('rejects a malformed key at the call site, with the pattern in the message', async () => {
+    const docs = makeMockDocs();
+    // A slash is the one that bites: a key travels as the final path segment.
+    await expect(docs.get('self', 'marks/s2e04')).rejects.toThrow(/doc key must match/);
+    await expect(docs.put('self', '', {})).rejects.toThrow(/doc key must match/);
+  });
+
+  it('lists a partition by prefix, paged', async () => {
+    const docs = makeMockDocs();
+    await docs.put('self', 'mark:a', 1);
+    await docs.put('self', 'mark:b', 2);
+    await docs.put('self', 'other', 3);
+    await docs.put('site', 'mark:c', 4); // a different partition — must not leak in
+
+    const page = await docs.list('self', { prefix: 'mark:' });
+
+    expect(page.items).toEqual([{ key: 'mark:a', value: 1 }, { key: 'mark:b', value: 2 }]);
+    expect(page.totalElements).toBe(2);
+  });
+
+  it('removes idempotently', async () => {
+    const docs = makeMockDocs({ 'data/user/me/marks': { b3: true } });
+    await docs.remove('self', 'marks');
+    await expect(docs.remove('self', 'marks')).resolves.toBeUndefined();
+    expect(docs.stored['data/user/me/marks']).toBeUndefined();
+  });
+});
+
+describe('the mock api client', () => {
+  it('rejects with the host error shape for a canned status', async () => {
+    const ctx = makeMockCtx({
+      apiResponses: {
+        'get data/site/main/stats': apiError(403, { detail: 'written by the plugin backend' }),
+      },
+    });
+
+    await expect(ctx.api.get('data/site/main/stats')).rejects.toThrow(/403/);
+    await ctx.api.get('data/site/main/stats').catch((e: unknown) => {
+      expect(isPluginApiError(e)).toBe(true);
+      expect((e as { status: number }).status).toBe(403);
+    });
+  });
+
+  it('getOrNull resolves null on 404 and still rejects everything else', async () => {
+    const ctx = makeMockCtx({
+      apiResponses: {
+        'get missing': apiError(404),
+        'get broken': apiError(500),
+        'get there': { ok: true },
+      },
+    });
+
+    expect(await ctx.api.getOrNull('missing')).toBeNull();
+    expect(await ctx.api.getOrNull('there')).toEqual({ ok: true });
+    // The failure the old `catch(() => undefined)` swallowed alongside the 404.
+    await expect(ctx.api.getOrNull('broken')).rejects.toThrow(/500/);
+  });
+
+  it('flushMockApi drains the hops a component adds behind a call', async () => {
+    const ctx = makeMockCtx({ apiResponses: { 'get board': { cells: 3 } } });
+    let rendered: number | undefined;
+
+    // Two `.then` hops — the shape that makes a single `await Promise.resolve()` flaky.
+    void ctx.api
+      .get<{ cells: number }>('board')
+      .then((b) => b.cells)
+      .then((cells) => {
+        rendered = cells;
+      });
+
+    await flushMockApi(ctx.api);
+
+    expect(rendered).toBe(3);
+  });
+
+  it('settled() waits for calls started while it was waiting', async () => {
+    const ctx = makeMockCtx({ apiResponses: { 'get a': 1, 'get b': 2 } });
+    const seen: unknown[] = [];
+
+    void ctx.api.get('a').then((a) => {
+      seen.push(a);
+      return ctx.api.get('b').then((b) => seen.push(b));
+    });
+
+    await flushMockApi(ctx.api);
+
+    expect(seen).toEqual([1, 2]);
+  });
+});
+
+describe('makeMockBlobs and the declared type', () => {
+  it('normalises an empty File.type before checking the allow-list', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: ['image/png'] });
+    // What Firefox hands over when the OS MIME lookup fails — and what used to be refused as
+    // application/octet-stream, in one browser only.
+    const file = new File(['x'], 'diagram.png', { type: '' });
+
+    const stored = await blobs.upload(file);
+
+    expect(stored.mime).toBe('image/png');
+    expect(blobs.uploads[0]).toMatchObject({ filename: 'diagram.png', mime: 'image/png' });
+  });
+
+  it('sends the browser\'s raw value when asked to preserve it', async () => {
+    const blobs = makeMockBlobs({ mimeTypes: ['image/png'] });
+    const file = new File(['x'], 'diagram.png', { type: '' });
+
+    await expect(blobs.upload(file, { declaredType: 'preserve' })).rejects.toThrow(/not allowed/);
+  });
+});
+
+describe('the route double', () => {
+  it('carries an empty query and hash by default', () => {
+    const ctx = makeMockCtx();
+    expect(ctx.route.query.get('sort')).toBeNull();
+    expect(ctx.route.hash).toBe('');
+  });
+
+  it('merges a query override while keeping the navigate recorder', () => {
+    const ctx = makeMockCtx({ route: { query: new URLSearchParams('sort=new'), path: 'moments' } });
+
+    expect(ctx.route.query.get('sort')).toBe('new');
+    expect(ctx.route.path).toBe('moments');
+    ctx.route.navigate('moments?sort=old');
+    expect(ctx.navigations).toEqual([{ subpath: 'moments?sort=old', replace: false }]);
   });
 });

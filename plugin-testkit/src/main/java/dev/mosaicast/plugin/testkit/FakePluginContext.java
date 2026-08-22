@@ -9,6 +9,7 @@ import dev.mosaicast.plugin.api.PluginBlobs;
 import dev.mosaicast.plugin.api.PluginConfig;
 import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.SchemaStore;
+import dev.mosaicast.plugin.api.Tags;
 import java.time.Duration;
 import java.util.Objects;
 
@@ -34,6 +35,7 @@ public final class FakePluginContext implements PluginContext {
     private final PluginConfig config;
     private final FeedAccess feeds;
     private final RecordingLogger logger = new RecordingLogger(LOGGER_NAME);
+    private Tags tags;
     private int scheduledCount;
 
     /** Creates a context with an empty doc store, empty config, empty feeds, no schema and no blobs. */
@@ -104,6 +106,37 @@ public final class FakePluginContext implements PluginContext {
     @Override
     public PluginBlobs blobs() {
         return blobs;
+    }
+
+    /**
+     * Wires a {@link Tags} into this context, standing in for a manifest that declares a {@code tags}
+     * block.
+     *
+     * <p><strong>A chaining mutator rather than a sixth constructor parameter.</strong> The constructor
+     * list is already at five, and every added positional parameter breaks every existing plugin test to
+     * supply something almost none of them want — the mistake 0.7.1 was spent undoing on the TypeScript
+     * side, and the reason 0.8.0 added an overload instead. {@link FakeFeedAccess#withDisplay} is the
+     * same shape.
+     *
+     * @param tags the tag surface, or {@code null} to go back to a plugin that declares none
+     * @return this instance, for chaining
+     * @since 0.9.0
+     */
+    public FakePluginContext withTags(Tags tags) {
+        this.tags = tags;
+        return this;
+    }
+
+    /**
+     * The tag surface this context is wired to, or {@code null} when none was supplied — the same
+     * {@code null} a plugin that declares no {@code tags} block sees from the host.
+     *
+     * @return the tag surface, or {@code null}
+     * @since 0.9.0
+     */
+    @Override
+    public Tags tags() {
+        return tags;
     }
 
     @Override

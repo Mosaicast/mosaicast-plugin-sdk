@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.8.0' as const;
+export const PLATFORM_API_VERSION = '0.9.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -275,14 +275,198 @@ export interface PagedDocs<T = unknown> {
  * ```
  */
 export interface PluginApiClient {
-  /** GET a path, resolving to the parsed JSON body. */
+  /**
+   * GET a path, resolving to the parsed JSON body.
+   *
+   * Rejects with a {@link PluginApiError} on any non-2xx response — **including 404**, which is the
+   * normal answer for a document that does not exist yet. Prefer {@link getOrNull} when absence is an
+   * expected outcome rather than a failure.
+   */
   get<T = unknown>(path: string): Promise<T>;
-  /** POST a JSON body, resolving to the parsed JSON response. */
+  /**
+   * Like {@link get}, but resolves **`null`** on a 404 instead of rejecting.
+   *
+   * "Nothing saved yet" is the ordinary state of a doc-store key, so every plugin ends up writing
+   * `get(path).catch(() => undefined)` — which also swallows the 500, the 403 from the read floor and
+   * the network failure, and reports all four to the visitor as an empty widget. This makes absence an
+   * answer, so the `catch` that remains is a real error path again.
+   *
+   * Every other non-2xx still rejects with a {@link PluginApiError}.
+   *
+   * @param path the path relative to the plugin's base
+   * @returns the parsed body, or `null` when the host answered 404
+   * @since 0.9.0
+   */
+  getOrNull<T = unknown>(path: string): Promise<T | null>;
+  /** POST a JSON body, resolving to the parsed JSON response. Rejects with a {@link PluginApiError}. */
   post<T = unknown>(path: string, body?: unknown): Promise<T>;
-  /** PUT a JSON body, resolving to the parsed JSON response. */
+  /** PUT a JSON body, resolving to the parsed JSON response. Rejects with a {@link PluginApiError}. */
   put<T = unknown>(path: string, body?: unknown): Promise<T>;
-  /** DELETE a path, resolving to the parsed JSON response. */
+  /** DELETE a path, resolving to the parsed JSON response. Rejects with a {@link PluginApiError}. */
   delete<T = unknown>(path: string): Promise<T>;
+}
+
+/**
+ * The RFC 7807 `application/problem+json` body the host sends with a refusal.
+ *
+ * Every field is optional: the host is entitled to answer with a bare status, and a plugin that
+ * destructures blindly breaks on the day it does.
+ *
+ * @since 0.9.0
+ */
+export interface ProblemDetail {
+  /** A URI identifying the problem type. */
+  type?: string;
+  /** A short, human-readable summary of the problem type. */
+  title?: string;
+  /** An explanation specific to this occurrence — the field worth showing an operator. */
+  detail?: string;
+  /** A URI identifying this specific occurrence. */
+  instance?: string;
+}
+
+/**
+ * What every {@link PluginApiClient} method rejects with on a non-2xx response.
+ *
+ * The status is the point. Without it a plugin cannot tell the 403 that means *the manifest's read floor
+ * refused you* from the 403 that means *this key is `backendOwned`* — the contract words those two
+ * differently on purpose, and an untyped rejection throws that distinction away. Nor can it tell either
+ * of them from a 500, which is the failure a plugin should surface rather than swallow.
+ *
+ * Test it with {@link isPluginApiError} rather than `instanceof`: the error crosses a bundle boundary
+ * from the host, so it is not guaranteed to share a constructor with anything in your plugin.
+ *
+ * ```ts
+ * try {
+ *   await ctx.api.put(`data/site/main/stats`, computed);
+ * } catch (e) {
+ *   if (isPluginApiError(e) && e.status === 403) {
+ *     ctx.log('warn', e.problem?.detail ?? 'refused');   // backendOwned, or the write floor
+ *     return;
+ *   }
+ *   throw e;                                            // a real failure — do not swallow it
+ * }
+ * ```
+ *
+ * @since 0.9.0
+ */
+export interface PluginApiError extends Error {
+  /** The HTTP status the host answered with — `404`, `403`, `415`, `500`, … */
+  readonly status: number;
+  /** The RFC 7807 body, when the host sent one. */
+  readonly problem?: ProblemDetail;
+}
+
+/**
+ * Whether a caught value is a {@link PluginApiError}.
+ *
+ * A **structural** check, deliberately: the error is constructed by the host and reaches your plugin
+ * across a bundle boundary, so `instanceof` against your own copy of a class would answer `false` for a
+ * genuine one. This tests what the contract actually promises — an `Error` carrying a numeric `status`.
+ *
+ * @param e the caught value
+ * @returns whether it carries the API error shape
+ * @since 0.9.0
+ */
+export function isPluginApiError(e: unknown): e is PluginApiError {
+  return e instanceof Error && typeof (e as PluginApiError).status === 'number';
+}
+
+/**
+ * The pattern every doc-store key must match — mirror of the Java `DocStore.KEY_PATTERN`.
+ *
+ * Note what is **not** in it: `/`. A key travels as the final path segment verbatim, so structure one
+ * with `:` / `.` / `-` (`mark:s2e04:b3`), never with a slash.
+ *
+ * @since 0.9.0
+ */
+export const DOC_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+
+/**
+ * Which partition a {@link DocClient} call addresses.
+ *
+ * A {@link Scope} for a page-level partition — `ctx.scope` is usually the one you want — or one of two
+ * shorthands for the singletons whose id is fixed:
+ *
+ * - **`'self'`** → `data/user/me`, the calling user's own partition.
+ * - **`'site'`** → `data/site/main`, the one site.
+ *
+ * @since 0.9.0
+ */
+export type DocTarget = Scope | 'self' | 'site';
+
+/**
+ * A typed client for this plugin's doc store — the same endpoints {@link PluginApiClient} reaches, with
+ * the path building, the key validation and the 404 handling done for you.
+ *
+ * Every doc access before this was string concatenation against a four-segment path, with the plugin
+ * responsible for `encodeURIComponent`, for {@link DOC_KEY_PATTERN}, for knowing that `site` is always
+ * `main` and `user` always `me`, and for remembering that a key cannot contain `/`:
+ *
+ * ```ts
+ * `data/episode/${encodeURIComponent(episodeSlug)}/favourites`   // every call site, every plugin
+ * ```
+ *
+ * ## Why `'self'` is the shortest thing to write
+ *
+ * Per-user data belongs in the `user` scope, never in a key — a key is client-supplied, so
+ * `mark:<userId>:cell` is an access-control decision the host cannot enforce, and scope ids are public
+ * slugs so nothing has to be guessed. That is the most security-relevant convention in the whole
+ * contract, and making it the *shortest* call is the only reliable way to make a convention stick:
+ *
+ * ```ts
+ * await ctx.docs.put('self', `mark:${ctx.scope.id}`, marks);   // the caller's own partition
+ * ```
+ *
+ * ## What it validates, and what it does not
+ *
+ * A key that fails {@link DOC_KEY_PATTERN} **throws at the call site**, with the pattern in the message,
+ * instead of costing a 400 round-trip you then have to read the body of. Everything else is the host's
+ * to enforce and is unchanged — the `readableBy`/`writableBy` floors, `backendOwned`, the 400 on an
+ * unknown scope, the 401 on an anonymous `user` request. See {@link PluginApiClient} for all of it;
+ * that client stays available as the escape hatch for anything this does not cover.
+ *
+ * @since 0.9.0
+ */
+export interface DocClient {
+  /**
+   * One document, or **`null`** when there is none.
+   *
+   * Null rather than a rejection: absence is the ordinary state of a key nothing has written yet, and
+   * making it an exception is what produced the `catch` that also swallowed every real failure. Other
+   * refusals still reject with a {@link PluginApiError}.
+   *
+   * @param target which partition — a {@link Scope}, `'self'` or `'site'`
+   * @param key    the document key; must match {@link DOC_KEY_PATTERN}
+   * @throws Error synchronously-thrown-as-rejection if the key is malformed
+   */
+  get<T = unknown>(target: DocTarget, key: string): Promise<T | null>;
+  /**
+   * Upserts a document. Last-write-wins, as everywhere on this store.
+   *
+   * @param target which partition
+   * @param key    the document key; must match {@link DOC_KEY_PATTERN}
+   * @param value  the JSON value to store
+   */
+  put<T = unknown>(target: DocTarget, key: string, value: T): Promise<void>;
+  /**
+   * One page of documents in a partition, each carrying its key.
+   *
+   * @param target which partition
+   * @param opts   `prefix` filters by key prefix; `page` is zero-based and `size` defaults to 50 (the
+   *               host caps it at 200)
+   */
+  list<T = unknown>(
+    target: DocTarget,
+    opts?: { prefix?: string; page?: number; size?: number },
+  ): Promise<PagedDocs<T>>;
+  /**
+   * Removes a document. Idempotent — removing what is already gone resolves.
+   *
+   * @param target which partition
+   * @param key    the document key; must match {@link DOC_KEY_PATTERN}
+   */
+  remove(target: DocTarget, key: string): Promise<void>;
 }
 
 /**
@@ -547,11 +731,19 @@ export interface BlobClient {
   /**
    * Stores a file.
    *
+   * The declared content type is **normalised by default** ({@link declaredTypeFor}), because the
+   * browser's own answer is not reliable across engines — see that function for the failure it fixes.
+   * Pass `declaredType: 'preserve'` to send `file.type` exactly as the browser reported it.
+   *
    * @param file the file or blob to store — a `File` from an `<input type="file">` carries its own name
-   * @param opts `filename` overrides the name, and supplies one for a bare `Blob`
+   * @param opts `filename` overrides the name and supplies one for a bare `Blob`; `declaredType`
+   *             chooses between the normalised claim (default) and the browser's raw one
    * @returns the stored file's identity, carrying the host-determined MIME type
    */
-  upload(file: File | Blob, opts?: { filename?: string }): Promise<BlobInfo>;
+  upload(
+    file: File | Blob,
+    opts?: { filename?: string; declaredType?: 'normalize' | 'preserve' },
+  ): Promise<BlobInfo>;
   /**
    * Lists this plugin's files, newest first.
    *
@@ -574,6 +766,179 @@ export interface BlobClient {
   urlFor(ref: string): string;
   /** How much room is left, as the host currently sees it. */
   quota(): Promise<BlobQuota>;
+}
+
+/**
+ * Filename extension → content type, for {@link declaredTypeFor}.
+ *
+ * Only the types the host's file storage accepts (§11.1) — SVG is deliberately absent, since it is never
+ * storable, and guessing a type the host refuses outright would turn a clear refusal into a confusing
+ * one. `jfif` is here because Windows still produces it for ordinary JPEGs.
+ */
+const EXTENSION_MIME_TYPES: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  jfif: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  avif: 'image/avif',
+};
+
+/**
+ * The content type to claim for a file, restoring the one the browser was supposed to report.
+ *
+ * ## The bug this exists for
+ *
+ * Chromium fills `File.type` from its own built-in extension table. **Firefox asks the operating
+ * system's MIME database**, and where that lookup fails — a sparse `shared-mime-info` on Linux, a missing
+ * or hijacked registry association on Windows — it hands over `File.type === ''`. `FormData` then sends
+ * the part as `application/octet-stream`, and the host refuses on the *declared* type before it ever
+ * sniffs the bytes (§11.1 checks size, declared type, actual type, quota — in that order). The result is
+ * a valid PNG rejected as "not a type this plugin may store", **in one browser only**, on a machine the
+ * plugin author cannot reproduce.
+ *
+ * ## Why guessing is safe here
+ *
+ * Specifically because the host still reads the leading bytes. A wrong guess becomes the same 415 it
+ * would have been, never a stored file of the wrong kind — this restores a claim, it does not grant
+ * anything. An extension nothing maps stays untouched, so the refusal still arrives in the host's own
+ * wording rather than one the SDK invented.
+ *
+ * {@link BlobClient.upload} calls this by default; use it directly only to show someone what will be
+ * sent before they commit to the upload.
+ *
+ * @param file the file or blob about to be uploaded
+ * @returns the browser's `type` when it gave one, else the type its extension implies, else `''`
+ * @since 0.9.0
+ */
+export function declaredTypeFor(file: File | Blob): string {
+  if (file.type) {
+    return file.type;
+  }
+  const name = file instanceof File ? file.name : '';
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) {
+    return '';
+  }
+  return EXTENSION_MIME_TYPES[name.slice(dot + 1).toLowerCase()] ?? '';
+}
+
+/**
+ * A transparent 1×1 SVG, as a `mask-image` value.
+ *
+ * This is the fallback every {@link iconMask} reference carries, and getting it wrong is a visible bug —
+ * see {@link iconMask} for why `none` is the obvious guess and the wrong one.
+ */
+const BLANK_MASK = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'/%3E")`;
+
+/** Icon names must be plain CSS identifiers — anything else could escape the `var()` it is spliced into. */
+const ICON_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/**
+ * The host icon names known when this SDK was published — **a hint, never a limit**.
+ *
+ * The `(string & {})` arm keeps the set open: autocomplete offers these, and any other string is still
+ * accepted without a type error. Closing this union would pin the icon set to the SDK version and undo
+ * the exact property the design protects (see {@link iconCss}).
+ *
+ * @since 0.9.0
+ */
+export type KnownIconName =
+  | 'star'
+  | 'clock'
+  | 'search'
+  | 'play'
+  | 'pause'
+  | 'close'
+  | 'check'
+  | 'chevron-left'
+  | 'chevron-right'
+  | 'external'
+  | 'info'
+  | 'warning'
+  | (string & {});
+
+/**
+ * A `mask-image` value for one host icon, with the fallback that keeps a missing icon invisible.
+ *
+ * ## The failure mode this prevents
+ *
+ * An unresolved `var()` makes the whole declaration invalid at computed-value time, so `mask-image`
+ * falls back to its *initial* value — `none` — leaving an unmasked element painting `currentColor`
+ * across its entire box. **A missing icon renders as a solid square, not as blank space.** Writing
+ * `mask-image: none` as the fallback is the obvious guess and produces exactly that; the fallback has to
+ * be a real, blank image, which is what this returns.
+ *
+ * @param name the icon name; must be a plain CSS identifier (`chevron-left`), since it is spliced into a
+ *             custom-property name
+ * @returns `var(--mc-icon-<name>, <blank svg>)`, ready to assign to `mask-image`
+ * @throws Error if the name is not a plain CSS identifier
+ * @since 0.9.0
+ */
+export function iconMask(name: KnownIconName): string {
+  if (!ICON_NAME_PATTERN.test(name)) {
+    throw new Error(`icon name must match ${ICON_NAME_PATTERN.source}, got: ${JSON.stringify(name)}`);
+  }
+  return `var(--mc-icon-${name}, ${BLANK_MASK})`;
+}
+
+/**
+ * A block of CSS rules for the host icons you name, to concatenate into your component's own `<style>`.
+ *
+ * ## Why this is a string helper and not something on `ctx`
+ *
+ * `--mc-icon-*` is deliberately not on the context (§12.3), and that decision is right: custom
+ * properties inherit through the shadow boundary, so a plugin built against **this** SDK version picks
+ * up an icon the day core publishes it — no SDK release, no manifest bump, no version skew. Putting the
+ * icon set on `ctx` would trade that away. So does typing the names as a closed union, which is why
+ * {@link KnownIconName} stays open.
+ *
+ * What was worth owning here is the *mechanics*, which are subtle enough to get wrong three ways:
+ *
+ * 1. **Mask, never `background-image`.** `background: currentColor` behind a mask is what makes an icon
+ *    re-theme with the text beside it.
+ * 2. **Every reference needs a blank-image fallback** — see {@link iconMask}, where a missing icon
+ *    otherwise paints a solid square.
+ * 3. **Don't declare into `--mc-*` yourself.** Those are the host's namespace.
+ *
+ * ## Put it in the shadow root
+ *
+ * The returned string belongs in your component's own `<style>` element. A bundled `.css` file lands in
+ * the host document, where it **cannot reach any shadow root** — that is the other thing everyone tries
+ * first, and it silently does nothing.
+ *
+ * ```ts
+ * const style = document.createElement('style');
+ * style.textContent = iconCss(['star', 'clock']);
+ * root.append(style);
+ * root.insertAdjacentHTML('beforeend', '<i class="mc-icon mc-icon-star" aria-hidden="true"></i>');
+ * ```
+ *
+ * @param names the icons to emit rules for
+ * @param opts  `className` renames the base class (default `mc-icon`); each icon gets
+ *              `<className>-<name>`
+ * @returns the CSS block — a base rule plus one rule per icon
+ * @since 0.9.0
+ */
+export function iconCss(names: readonly KnownIconName[], opts?: { className?: string }): string {
+  const base = opts?.className ?? 'mc-icon';
+  if (!ICON_NAME_PATTERN.test(base)) {
+    throw new Error(`className must match ${ICON_NAME_PATTERN.source}, got: ${JSON.stringify(base)}`);
+  }
+  // `background: currentColor` behind the mask is the whole point: the icon takes the colour of the text
+  // it sits beside, so it re-themes with the host without the plugin naming a single colour.
+  const rules = [
+    `.${base} { display: inline-block; width: 1em; height: 1em; background: currentColor;` +
+      ` -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;` +
+      ` -webkit-mask-position: center; mask-position: center;` +
+      ` -webkit-mask-size: contain; mask-size: contain; }`,
+  ];
+  for (const name of names) {
+    const mask = iconMask(name);
+    rules.push(`.${base}-${name} { -webkit-mask-image: ${mask}; mask-image: ${mask}; }`);
+  }
+  return rules.join('\n');
 }
 
 /**
@@ -624,8 +989,31 @@ export interface PluginLinks {
  * @since 0.7.0 — `navigate`; `path` and `onChange` have been here since 0.1.0
  */
 export interface PluginRoute {
-  /** The subpath below `/p/<pluginId>/`; empty when the plugin is not rendered as a page. */
+  /**
+   * The subpath below `/p/<pluginId>/`; empty when the plugin is not rendered as a page.
+   *
+   * The path only — the query string and fragment are {@link query} and {@link hash}.
+   */
   path: string;
+  /**
+   * The current subtree's query string, parsed by the host.
+   *
+   * {@link navigate} has always accepted a `?query`, and until 0.9.0 there was no way to read back what
+   * it wrote: the only route was `location.search`, which is exactly the "do not reach past this handle"
+   * that `navigate` forbids, for the reason it gives. Filters, sort order and pagination are the obvious
+   * shareable-link state, so a plugin either invented path segments for them or broke the rule.
+   *
+   * Treat it as read-only — mutating it changes nothing. Write with `navigate('page?sort=new')`.
+   *
+   * @since 0.9.0
+   */
+  readonly query: URLSearchParams;
+  /**
+   * The current fragment, **without** the leading `#`; empty when there is none.
+   *
+   * @since 0.9.0
+   */
+  readonly hash: string;
   /**
    * Subscribes to subpath changes — a back button, a shared link, your own {@link navigate}.
    *
@@ -653,6 +1041,85 @@ export interface PluginRoute {
    *                that should not become a back-button step, like an in-page tab or filter
    */
   navigate(subpath: string, opts?: { replace?: boolean }): void;
+}
+
+/**
+ * What {@link matchRoute} returns when a pattern matched.
+ *
+ * @typeParam P the literal pattern type, so `match.pattern` narrows against the array you passed
+ * @since 0.9.0
+ */
+export interface RouteMatch<P extends string = string> {
+  /** The pattern that matched, verbatim from the list you gave. */
+  pattern: P;
+  /** The `:name` segments, keyed by name and already `decodeURIComponent`-ed. */
+  params: Record<string, string>;
+}
+
+/**
+ * Matches a {@link PluginRoute.path} against a list of patterns, first match wins.
+ *
+ * Every page plugin hand-rolls this — a prefix check for `highlight/<slug>`, an `else` for the index —
+ * and the hand-rolled version is usually a `startsWith`, which matches `highlights-archive` too.
+ *
+ * A pattern is segments separated by `/`. A segment beginning with `:` captures one **non-empty**
+ * segment into {@link RouteMatch.params}; every other segment must match literally. The whole path must
+ * be consumed, so `moments` does not match `moments/3`. The empty pattern `''` is the plugin root.
+ *
+ * Leading and trailing slashes are ignored, and anything from a `?` or `#` is dropped — so passing a raw
+ * subpath works even where the host has not split it for you.
+ *
+ * **Order is yours**: list the specific pattern before the general one, since the first match wins.
+ *
+ * ```ts
+ * const match = matchRoute(ctx.route.path, ['', 'moments', 'highlight/:slug'] as const);
+ * switch (match?.pattern) {
+ *   case 'highlight/:slug': return renderDetail(match.params.slug);
+ *   case 'moments':         return renderMoments();
+ *   case '':                return renderIndex();
+ *   default:                return renderNotFound();   // null: nothing matched
+ * }
+ * ```
+ *
+ * @param path     the subpath to match, typically `ctx.route.path`
+ * @param patterns the patterns to try, in priority order
+ * @returns the first match, or **`null`** when none matched — which is your not-found branch
+ * @since 0.9.0
+ */
+export function matchRoute<P extends string>(
+  path: string,
+  patterns: readonly P[],
+): RouteMatch<P> | null {
+  const segments = routeSegments(path);
+  for (const pattern of patterns) {
+    const expected = routeSegments(pattern);
+    if (expected.length !== segments.length) {
+      continue;
+    }
+    const params: Record<string, string> = {};
+    let matched = true;
+    for (let i = 0; i < expected.length; i++) {
+      const part = expected[i]!;
+      if (part.startsWith(':')) {
+        params[part.slice(1)] = decodeURIComponent(segments[i]!);
+      } else if (part !== segments[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      return { pattern, params };
+    }
+  }
+  return null;
+}
+
+/** Splits a subpath into its non-empty segments, dropping any query string or fragment. */
+function routeSegments(path: string): string[] {
+  const end = Math.min(
+    ...[path.indexOf('?'), path.indexOf('#')].map((at) => (at < 0 ? path.length : at)),
+  );
+  return path.slice(0, end).split('/').filter((segment) => segment !== '');
 }
 
 /**
@@ -696,6 +1163,186 @@ export interface DisplaySnapshot {
  */
 export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
   return snapshot.imageUrl ?? snapshot.feedImageUrl;
+}
+
+/**
+ * The most slugs {@link FeedsClient.displayMany} will resolve in one call.
+ *
+ * Matching the host's existing clamp on its scope-episodes endpoint. Asking for more is not an error —
+ * the extras are simply not in the answer, so check what came back rather than assuming.
+ *
+ * @since 0.9.0
+ */
+export const DISPLAY_BATCH_LIMIT = 200;
+
+/**
+ * Read access to episode display snapshots — the frontend half of the Java `FeedAccess`.
+ *
+ * The Java contract could read a snapshot and the frontend could not, so a plugin that wanted to draw an
+ * episode card copied the host's own data into its doc store and kept it fresh on a schedule. That cost
+ * a backend, a scheduled ingest, a `backendOwned` key and a copy that is stale between runs — for fields
+ * the host already has. `DisplaySnapshot` and {@link resolveArtwork} have shipped since 0.1 with nothing
+ * in the contract that hands a frontend one; this is what they were for.
+ *
+ * ## What you get, and what you don't
+ *
+ * **The host filters, the plugin consumes** (ARCHITECTURE §7). The answer contains only what the caller
+ * may see, so a `WITHDRAWN` or tier-gated episode is **absent** rather than redacted — and this cannot
+ * be used to enumerate episodes {@link PluginContext.episodes} did not already give you.
+ *
+ * Unlike the doc store this has **no `readableBy` gate of its own**: it returns host data the same
+ * visitor can already read from `/api/episodes/*`. It exists so a plugin need not know that URL shape —
+ * the same argument {@link PluginLinks} makes.
+ *
+ * **Not authoritative, and it should keep saying so.** The snapshot is overwritten on every feed
+ * refetch. That is a feature — a feed edit propagates — and the reason to read it live rather than copy
+ * it. Cache per render, never per install.
+ *
+ * ```ts
+ * const cards = await ctx.feeds.displayMany(ctx.episodes.slice(0, 20));
+ * for (const slug of ctx.episodes) {
+ *   const snap = cards[slug];
+ *   if (!snap) continue;                       // filtered out for this visitor — not an error
+ *   render(slug, snap.title, resolveArtwork(snap));
+ * }
+ * ```
+ *
+ * @since 0.9.0
+ */
+export interface FeedsClient {
+  /**
+   * The display snapshot for one episode.
+   *
+   * @param slug the episode's public slug — one of {@link PluginContext.episodes}
+   * @returns the snapshot, or **`null`** when the host has none or the caller may not see it. The two
+   *          are deliberately indistinguishable: telling them apart would confirm the existence of an
+   *          episode this visitor was not shown
+   */
+  display(slug: string): Promise<DisplaySnapshot | null>;
+  /**
+   * The same, for many slugs in one request.
+   *
+   * Use this whenever you are drawing more than one card — the N-request version is the thing this
+   * surface exists to prevent.
+   *
+   * @param slugs the episode slugs; more than {@link DISPLAY_BATCH_LIMIT} is **clamped**, not rejected
+   * @returns a map from slug to snapshot, containing only the episodes the caller may see — so a missing
+   *          key is normal and must not be treated as a failure
+   */
+  displayMany(slugs: string[]): Promise<Record<string, DisplaySnapshot>>;
+}
+
+/**
+ * One entry of the site's shared tag vocabulary — mirror of the Java `TagInfo` record.
+ *
+ * `tag` is the host's **canonical key** (trim, collapse internal whitespace, casefold), applied on every
+ * path into the vocabulary including feed ingest; `label` is presentation, kept from first use. Send any
+ * spelling, store and compare on the key, show the label.
+ *
+ * The two counts are scoped differently on purpose: `episodes` is site-wide, `subjects` counts only
+ * **your own** plugin's subjects — you cannot see the size of a store you cannot read.
+ *
+ * @since 0.9.0
+ */
+export interface TagInfo {
+  /** The canonical key. */
+  tag: string;
+  /** The display label the host kept from first use. */
+  label: string;
+  /** How many episodes carry this tag, across every source. */
+  episodes: number;
+  /** How many of *this plugin's* subjects carry it. */
+  subjects: number;
+}
+
+/**
+ * The site's shared tag vocabulary, and this plugin's assignments against it — the frontend half of the
+ * Java `Tags` (ARCHITECTURE §6.1).
+ *
+ * `ctx.tags` is **`null`** unless the manifest declares a `tags` block, mirroring `ctx.schema` and
+ * `ctx.blobs`. Tags existed in core only as a feed-derived filter axis with no vocabulary and no plugin
+ * surface, so every plugin that wanted them grew a private free-text column — and a wiki's `lore` and an
+ * episode's `lore` were unrelated strings that could not be linked, suggested or counted together.
+ *
+ * ```ts
+ * const tags = ctx.tags;
+ * if (!tags) return;                                  // no `tags` block in this plugin's manifest
+ *
+ * for (const t of await tags.all()) suggest(t.label, t.tag);        // the site's real vocabulary
+ * const href = ctx.links.feed('the-sample-cast', { tag: 'kraken' }); // and it links to the feed view
+ * ```
+ *
+ * ## Two writes that look alike and are not
+ *
+ * {@link tagSubject} touches only keys you invented in your own namespace; `data.writableBy` is the
+ * whole authorization story. {@link tagEpisode} changes the shell's filter options **and** what core
+ * recommends beside that episode, so it needs `"tags": { "writesEpisodes": true }` in the manifest and
+ * rejects without it.
+ *
+ * ## What no plugin may do
+ *
+ * Delete a tag from the vocabulary (it is shared), rename one (that is a vocabulary-wide edit, and
+ * belongs in admin), or remove another writer's assignment — the feed's included. Every write of yours
+ * is recorded with your plugin as its source, which is what makes the last one enforceable rather than
+ * merely discouraged.
+ *
+ * @since 0.9.0
+ */
+export interface TagsClient {
+  /** The whole site vocabulary, most used first. */
+  all(): Promise<TagInfo[]>;
+  /**
+   * The episode slugs carrying a tag, filtered to what this visitor may see.
+   *
+   * @param tag any spelling; the host canonicalises it. An unknown tag resolves to an empty list
+   */
+  episodesWith(tag: string): Promise<string[]>;
+  /**
+   * The canonical keys on one episode, whatever put them there.
+   *
+   * @param episodeSlug the episode's public slug
+   */
+  tagsOn(episodeSlug: string): Promise<string[]>;
+  /**
+   * Tags that tend to appear alongside this one, best first — "what else on this site is about this".
+   *
+   * The ranking is the host's and is **not** part of the contract: treat the order as advice, and do not
+   * display or compare the counts as a similarity score.
+   *
+   * @param tag   any spelling of the tag
+   * @param limit the most entries to return; the host clamps rather than failing
+   */
+  similarTo(tag: string, limit?: number): Promise<TagInfo[]>;
+  /** This plugin's own subject keys carrying a tag. */
+  subjectsWith(tag: string): Promise<string[]>;
+  /** The canonical keys on one of this plugin's subjects. */
+  tagsOnSubject(subjectKey: string): Promise<string[]>;
+  /**
+   * Tags one of this plugin's own subjects, adding the tag to the vocabulary if it is new. Idempotent.
+   *
+   * `subjectKey` is opaque and yours to invent — the same namespacing property `ctx.schema` has for
+   * tables and `ctx.route.navigate` has for URLs. Use the same key a `SearchProvider` hit resolves to,
+   * so a tag and a search result name one object rather than two.
+   *
+   * @param subjectKey the subject in your namespace
+   * @param tag        any spelling; your spelling becomes the display label if the tag is new
+   */
+  tagSubject(subjectKey: string, tag: string): Promise<void>;
+  /** Removes a tag from one of this plugin's subjects. Idempotent; never removes the tag itself. */
+  untagSubject(subjectKey: string, tag: string): Promise<void>;
+  /**
+   * Tags an episode — **a capability, not a convenience**.
+   *
+   * Needs `tags.writesEpisodes` in the manifest; without it the host answers 403. Additive: an episode
+   * already carrying the tag from its feed keeps the feed's assignment and gains yours.
+   */
+  tagEpisode(episodeSlug: string, tag: string): Promise<void>;
+  /**
+   * Removes **this plugin's** assignment from an episode, and only that one.
+   *
+   * If the feed or a podcaster also put this tag there, the episode keeps carrying it.
+   */
+  untagEpisode(episodeSlug: string, tag: string): Promise<void>;
 }
 
 /**
@@ -952,6 +1599,208 @@ export interface ConsentServiceDeclaration {
 }
 
 /**
+ * The shape of your manifest's `tags` block — whether this plugin reads the site vocabulary, and whether
+ * it may tag **episodes**.
+ *
+ * Documentation, not enforcement, on the same terms as {@link PluginDataDeclaration}. Typed because the
+ * second flag is a capability: a plugin that tags episodes changes the shell's filter options and what
+ * core recommends, so what it may do should be readable off its manifest.
+ *
+ * ```ts
+ * const tags: PluginTagsDeclaration = { readsVocabulary: true, writesEpisodes: false };
+ * ```
+ *
+ * @since 0.9.0
+ */
+export interface PluginTagsDeclaration {
+  /**
+   * Whether this plugin may read the vocabulary and tag its own subjects.
+   *
+   * Declaring the block at all is what makes `ctx.tags` non-`null`; this is the read-and-own-subjects
+   * half, and `data.writableBy` governs the writes.
+   */
+  readsVocabulary?: boolean;
+  /**
+   * Whether this plugin may tag and untag **episodes**.
+   *
+   * Off by default. Without it `tagEpisode` / `untagEpisode` are refused — the host does not silently
+   * drop the write. Ask for it only if the plugin genuinely classifies episodes.
+   */
+  writesEpisodes?: boolean;
+}
+
+/**
+ * One entry of `slots[]`: which component the host mounts, where, and for whom (ARCHITECTURE §7.3).
+ *
+ * @since 0.9.0
+ */
+export interface PluginSlotDeclaration {
+  /** The scope level the slot appears on. */
+  scope: Scope['type'];
+  /** The custom-element tag to mount — must also appear in `frontend.elements`. */
+  element: string;
+  /** The named region of the host shell (`main`, `sidebar`, `card`, `admin`, `feed`, `site`, …). */
+  placement: string;
+  /** The minimum role that sees it. **Rendering only** — it never governs data access. */
+  visibleTo?: DataAccessRole;
+  /** Sort order within a region; ties break on plugin id. */
+  order?: number;
+}
+
+/**
+ * One entry of `nav[]`: an entrance to this plugin in the host's menu.
+ *
+ * @since 0.9.0
+ */
+export interface PluginNavDeclaration {
+  /** The subpath below `/p/<pluginId>/` this entry opens. */
+  path: string;
+  /**
+   * The menu label.
+   *
+   * **Not translatable**, and that is a real constraint rather than an oversight: core has no plugin
+   * catalogs, so it cannot translate a label a plugin supplied. Your own in-page tab bar *can* translate
+   * it, which is exactly where the two legitimately diverge — pin `path`, `icon` and `role` between the
+   * two lists, and let the label differ.
+   */
+  label: string;
+  /** A host icon name (`--mc-icon-*`), if the menu should show one. */
+  icon?: string;
+  /** The minimum role that sees this entry. */
+  role?: DataAccessRole;
+}
+
+/** One declared config field, rendered by core as a generic admin form (§7.2). @since 0.9.0 */
+export interface PluginConfigField {
+  /** The value type the admin form renders. */
+  type: 'string' | 'number' | 'boolean';
+  /** The value used until an operator changes it. */
+  default?: string | number | boolean;
+  /** The minimum role that may edit it. */
+  editableBy?: DataAccessRole;
+  /** A short explanation shown beside the field. */
+  description?: string;
+}
+
+/** The shape of the manifest's `blobs` block (ARCHITECTURE §11.1). @since 0.9.0 */
+export interface PluginBlobsDeclaration {
+  /** The per-file ceiling you are asking for; the operator may grant less. */
+  maxFileBytes: number;
+  /** The total quota you are asking for; the operator may grant less. */
+  quotaBytes: number;
+  /** The content types you want to store. `image/svg+xml` is refused at load — SVG is never storable. */
+  mimeTypes: string[];
+}
+
+/**
+ * The whole of `plugin.json`, typed.
+ *
+ * ## Read this before relying on it
+ *
+ * **Documentation, not enforcement** — the same caveat {@link PluginDataDeclaration} and
+ * {@link ConsentServiceDeclaration} have carried since 0.4.0, now extended to the rest of the file. The
+ * manifest is owned and validated by the **host**; the SDK does not read `plugin.json`, and nothing here
+ * runs at build or load time. If this type and core disagree, **core wins** — treat a mismatch as a bug
+ * in the SDK, not as permission to ignore the host. Unknown fields are ignored by the host, so this type
+ * permits them too.
+ *
+ * The argument for typing the two nested blocks was that a typo in a *security declaration* protects
+ * nothing and says nothing. The argument for the rest is drift: `nav[]` and a plugin's own in-page tab
+ * bar are the same list of entrances declared twice — once here for the host's menu, once in code — and
+ * a renamed path otherwise becomes a menu entry leading to an empty view with nothing to catch it. With
+ * a full type you can generate `plugin.json` from a TypeScript module at build time and delete the
+ * reconciliation test; even without generating it, the type alone catches an element listed in `slots[]`
+ * but missing from `frontend.elements`, which is currently a load-time failure found by hand.
+ *
+ * @since 0.9.0
+ */
+export interface PluginManifest {
+  /** The plugin id — the namespace for its data, its routes (`/p/<id>/…`) and its tables. */
+  id: string;
+  /** The plugin's own version. */
+  version: string;
+  /**
+   * The contract version this plugin was built against — {@link PLATFORM_API_VERSION}.
+   *
+   * The host matches `major.minor` **exactly** and rejects a mismatch at startup. There is no forward or
+   * backward tolerance, so this moves with every SDK minor.
+   */
+  platformApi: string;
+  /** The plugin's display name. */
+  name: string;
+  /** SPDX licence id. Never validated — credit is not a correctness concern. */
+  license?: string;
+  /** Who wrote it. */
+  author?: string;
+  /** Where the plugin lives. */
+  homepage?: string;
+  /** Who deserves credit — borrowed data, artwork, an upstream library. Separate from `homepage`. */
+  attribution?: string;
+  /** The backend half: where its API lives and which classes implement its extension points. */
+  backend?: {
+    /** The base path the host serves this plugin's data surface on. */
+    basePath?: string;
+    /**
+     * Fully-qualified class names implementing `PluginBackend` and any optional extension points —
+     * `SitemapProvider`, `ShareMetadataProvider`, `SearchProvider`, `UserDataHandler`.
+     */
+    extensions: string[];
+  };
+  /** The frontend half: the bundle and the custom elements it registers. */
+  frontend?: {
+    /** The ES module entry, relative to the plugin's bundle. */
+    entry: string;
+    /** Every custom-element tag the entry registers. Each `slots[].element` must be one of these. */
+    elements: string[];
+  };
+  /** Where this plugin's components mount. */
+  slots?: PluginSlotDeclaration[];
+  /** Entrances in the host's menu, for a plugin with a `page` placement. */
+  nav?: PluginNavDeclaration[];
+  /** `"doc"` for the generic JSON store, or a schema declaration for provisioned tables (§7.6). */
+  storage?: 'doc' | { schema: Record<string, Record<string, string>> };
+  /** Who may read and write the doc store, and which keys only the backend writes. */
+  data?: PluginDataDeclaration;
+  /** Opt-in file storage. Absent means no file storage at all. */
+  blobs?: PluginBlobsDeclaration;
+  /** Opt-in tag surface. Absent means `ctx.tags` is `null`. */
+  tags?: PluginTagsDeclaration;
+  /** Config fields core renders as an admin form; plugins never build their own config UI. */
+  config?: Record<string, PluginConfigField>;
+  /** Third-party services this plugin loads. Omit entirely when it loads none. */
+  consent?: { services: ConsentServiceDeclaration[] };
+  /** The host ignores fields it does not know, so this type does too. */
+  [field: string]: unknown;
+}
+
+/**
+ * Identity function that type-checks a manifest literal.
+ *
+ * It exists for the inference: writing `const manifest = { … }` gives you a widened object with no
+ * checking, while `defineManifest({ … })` checks the shape and still infers the literal types. Emit the
+ * result as `plugin.json` from a build step and the manifest stops being a second, unchecked copy of
+ * what your code already knows.
+ *
+ * **It validates nothing at runtime** — see {@link PluginManifest}. The host is the validator.
+ *
+ * ```ts
+ * export default defineManifest({
+ *   id: 'sample', version: '1.0.0', platformApi: PLATFORM_API_VERSION, name: 'Sample',
+ *   frontend: { entry: 'sample.es.js', elements: ['sample-card'] },
+ *   slots: [{ scope: 'episode', element: 'sample-card', placement: 'main', visibleTo: 'anonymous' }],
+ *   data: { writableBy: 'podcaster', readableBy: 'anonymous' },
+ * });
+ * ```
+ *
+ * @param m the manifest
+ * @returns the same object, unchanged
+ * @since 0.9.0
+ */
+export function defineManifest<const T extends PluginManifest>(m: T): T {
+  return m;
+}
+
+/**
  * Everything a frontend plugin is given, set by the host on the mounted custom element
  * (ARCHITECTURE §7.5). This is the **entire** interface a plugin author must learn.
  */
@@ -983,6 +1832,36 @@ export interface PluginContext {
    * uses via `ctx.store()`. See {@link PluginApiClient} for the endpoint shape and access rules.
    */
   api: PluginApiClient;
+  /**
+   * A typed client for the same doc store {@link api} reaches — path building, key validation and
+   * null-on-404 done for you.
+   *
+   * Never `null`: every plugin has a doc store. `ctx.api` remains the escape hatch for anything this
+   * does not cover. See {@link DocClient}, and note `'self'` for the caller's own partition.
+   *
+   * @since 0.9.0
+   */
+  docs: DocClient;
+  /**
+   * Episode display snapshots, resolved and access-filtered by the host — the frontend half of the Java
+   * `FeedAccess` (ARCHITECTURE §4.2).
+   *
+   * Never `null`, and gated by no manifest declaration: it returns host data the visitor can already
+   * read. See {@link FeedsClient}, and read it live — the snapshot is not authoritative.
+   *
+   * @since 0.9.0
+   */
+  feeds: FeedsClient;
+  /**
+   * The site's shared tag vocabulary, or **`null`** when the manifest declares no `tags` block
+   * (ARCHITECTURE §6.1).
+   *
+   * The frontend half of the Java `ctx.tags()`, `null` for the same reason `schema` and `blobs` are.
+   * See {@link TagsClient} — and note that tagging an *episode* is a second, separate declaration.
+   *
+   * @since 0.9.0
+   */
+  tags: TagsClient | null;
   /**
    * Read access to this plugin's provisioned relational tables, or **`null`** when the manifest declares
    * no `storage.schema` (ARCHITECTURE §7.6).
@@ -1198,6 +2077,75 @@ export interface PluginI18n {
    * @param params values for `{{placeholder}}` interpolation
    */
   t(key: string, params?: Record<string, string | number>): string;
+  /**
+   * Translates a **count-dependent** key, picking the plural form the active locale actually needs.
+   *
+   * A catalog could not express "1 highlight" / "5 highlights" at all, so plugins shipped an
+   * English-shaped `if (n === 1)` — wrong in Polish, Russian and Arabic, which have three to six forms —
+   * or wrote two keys and chose between them by hand.
+   *
+   * Catalog keys are the base key plus a dot and a CLDR category: `zero`, `one`, `two`, `few`, `many`,
+   * `other`. Only `other` is required; a locale that needs a form you did not write falls back to it.
+   *
+   * ```json
+   * { "moments.one": "{{count}} moment", "moments.other": "{{count}} moments" }
+   * ```
+   * ```ts
+   * i18n.plural('moments', list.length);          // `count` is interpolated for you
+   * ```
+   *
+   * Resolution walks the same path as {@link t}: active locale → `en` → the base key itself. `count` is
+   * added to `params` automatically, and a `count` you pass explicitly wins.
+   *
+   * @param key    the base message key, without the category suffix
+   * @param count  how many
+   * @param params values for `{{placeholder}}` interpolation, on top of `count`
+   * @since 0.9.0
+   */
+  plural(key: string, count: number, params?: Record<string, string | number>): string;
+  /**
+   * Formats a number for the active locale.
+   *
+   * @param value the number
+   * @param opts  passed straight to `Intl.NumberFormat`
+   * @since 0.9.0
+   */
+  n(value: number, opts?: Intl.NumberFormatOptions): string;
+  /**
+   * Formats a date for the active locale.
+   *
+   * Accepts the ISO-8601 instant strings the contract hands over — `DisplaySnapshot.publishedAt`,
+   * `BlobInfo.updatedAt` — as well as a `Date`.
+   *
+   * @param value an ISO-8601 instant or a `Date`
+   * @param opts  passed straight to `Intl.DateTimeFormat`; defaults to `{ dateStyle: 'medium' }`
+   * @returns the formatted date, or the input unchanged when it is not a readable date
+   * @since 0.9.0
+   */
+  date(value: string | Date, opts?: Intl.DateTimeFormatOptions): string;
+  /**
+   * Formats a runtime as `H:MM:SS` (or `M:SS` under an hour), with the active locale's digits.
+   *
+   * Contract-adjacent by design: `DisplaySnapshot.duration` is an **ISO-8601 duration string**, so this
+   * takes one directly as well as a plain number of seconds. Every plugin was hand-rolling the `90` →
+   * `"1:30"` conversion.
+   *
+   * @param value seconds, or an ISO-8601 duration such as `PT1H2M3S`
+   * @returns the formatted runtime, or `''` when the value cannot be read as one
+   * @since 0.9.0
+   */
+  duration(value: number | string): string;
+  /**
+   * Formats a byte count for the active locale — for showing a `BlobQuota` to a podcaster.
+   *
+   * **Decimal units** (1 kB = 1000 B), so the number agrees with what the visitor's own file manager
+   * showed them. Locale-correct throughout, including the decimal separator — the hand-rolled version
+   * hardcodes `.`, which is simply wrong in `de`.
+   *
+   * @param value a size in bytes
+   * @since 0.9.0
+   */
+  bytes(value: number): string;
   /** The currently active locale code. */
   readonly locale: string;
   /**
@@ -1211,6 +2159,24 @@ export interface PluginI18n {
 }
 
 const SOURCE_LOCALE = 'en';
+
+/** The decimal byte units, largest last — `bytes` walks this from the bottom. */
+const BYTE_UNITS: ReadonlyArray<[string, string]> = [
+  ['byte', 'B'],
+  ['kilobyte', 'kB'],
+  ['megabyte', 'MB'],
+  ['gigabyte', 'GB'],
+  ['terabyte', 'TB'],
+];
+
+/** `PT1H2M3S` → seconds. Returns `null` for anything that is not an ISO-8601 duration. */
+function parseIsoDuration(value: string): number | null {
+  const match = /^P(?:\d+D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/.exec(value.trim());
+  if (!match || (match[1] === undefined && match[2] === undefined && match[3] === undefined)) {
+    return null;
+  }
+  return Number(match[1] ?? 0) * 3600 + Number(match[2] ?? 0) * 60 + Number(match[3] ?? 0);
+}
 
 function interpolate(template: string, params?: Record<string, string | number>): string {
   if (!params) {
@@ -1257,6 +2223,69 @@ export function createPluginI18n(
       const template =
         catalogs[active]?.[key] ?? catalogs[SOURCE_LOCALE]?.[key] ?? key;
       return interpolate(template, params);
+    },
+    plural(key, count, params) {
+      // The locale decides which forms exist — an English-shaped `count === 1` is wrong in most of them.
+      const category = new Intl.PluralRules(active).select(count);
+      const template =
+        catalogs[active]?.[`${key}.${category}`] ??
+        catalogs[active]?.[`${key}.other`] ??
+        catalogs[SOURCE_LOCALE]?.[`${key}.${category}`] ??
+        catalogs[SOURCE_LOCALE]?.[`${key}.other`] ??
+        key;
+      return interpolate(template, { count, ...params });
+    },
+    n(value, opts) {
+      return new Intl.NumberFormat(active, opts).format(value);
+    },
+    date(value, opts) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        // Better a visible bad value than a component that throws mid-render over one malformed field.
+        return String(value);
+      }
+      return new Intl.DateTimeFormat(active, opts ?? { dateStyle: 'medium' }).format(date);
+    },
+    duration(value) {
+      const seconds = typeof value === 'number' ? value : parseIsoDuration(value);
+      if (seconds == null || !Number.isFinite(seconds) || seconds < 0) {
+        return '';
+      }
+      const whole = Math.floor(seconds);
+      const parts = [Math.floor(whole / 3600), Math.floor((whole % 3600) / 60), whole % 60];
+      const lead = new Intl.NumberFormat(active, { useGrouping: false });
+      const padded = new Intl.NumberFormat(active, { minimumIntegerDigits: 2, useGrouping: false });
+      // Drop the hour when there isn't one, so a 90-second clip reads `1:30` rather than `0:01:30`.
+      const shown = parts[0] === 0 ? parts.slice(1) : parts;
+      return shown.map((part, i) => (i === 0 ? lead : padded).format(part)).join(':');
+    },
+    bytes(value) {
+      if (!Number.isFinite(value)) {
+        return '';
+      }
+      // Decimal units so the number matches what the visitor's file manager told them.
+      let index = 0;
+      let scaled = Math.abs(value);
+      while (scaled >= 1000 && index < BYTE_UNITS.length - 1) {
+        scaled /= 1000;
+        index++;
+      }
+      const signed = value < 0 ? -scaled : scaled;
+      const [unit, symbol] = BYTE_UNITS[index]!;
+      // Whole bytes read oddly as `1.5 B`; everything above keeps one decimal.
+      const digits = index === 0 ? 0 : 1;
+      try {
+        return new Intl.NumberFormat(active, {
+          style: 'unit',
+          unit,
+          unitDisplay: 'short',
+          maximumFractionDigits: digits,
+        }).format(signed);
+      } catch {
+        // `style: 'unit'` is widely supported but not universal; the separator still has to be right.
+        const number = new Intl.NumberFormat(active, { maximumFractionDigits: digits }).format(signed);
+        return `${number} ${symbol}`;
+      }
     },
   };
 }

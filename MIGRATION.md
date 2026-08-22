@@ -1,136 +1,227 @@
-# Migrating a plugin to `platformApi` 0.8.0
+# Migrating a plugin to `platformApi` 0.9.0
 
-For plugin authors coming from `0.7.x`. **Small: a version bump, and nothing else unless you implement
-`PluginContext` yourself.** Everything in this release is new surface — no plugin *code* written against
-0.7.1 changes behaviour, and no existing test double breaks.
+For plugin authors coming from `0.8.x`. **Small: a version bump, and one likely compile break in your
+tests.** No plugin *code* written against 0.8.0 changes behaviour — everything in this release is new
+surface.
 
 **You have no choice about timing.** Core matches `major.minor` **exactly**, so the moment the host runs
-`0.8.0` every `0.7.x` plugin is rejected at load, with the reason in the admin log viewer.
+`0.9.0` every `0.8.x` plugin is rejected at load, with the reason in the admin log viewer.
 
-Coming from `0.6.x`? Do the [0.7.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.7.0/MIGRATION.md)
-first — the frontend schema client and `route.navigate` — then come back here.
+Coming from `0.7.x`? Do the [0.8.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.8.0/MIGRATION.md)
+first — file storage and `ctx.links` — then come back here.
 
 ---
 
 ## Why this release exists
 
-**A plugin could not store a file.** It could declare relational tables, publish documents and serve a
-deep-linked page — but not accept an upload. The host's `BlobStore` had existed since branding shipped and
-had exactly one caller. The result was an odd asymmetry: the host's CSP lets a plugin display an image from
-*any* host on the web, and gave it no way to accept one from the site's own podcaster. A wiki wants
-diagrams; the honest answer was "find an image host first", which is not an answer.
+Everything here was found by *using* the contract: writing `mosaicast-plugin-sample` and
+`mosaicast-plugin-wiki` against 0.8.0 and noticing what the plugin had to build for itself. It turned out
+to be one gap repeated — **the host holds something a plugin can only re-implement badly on its own**, so
+every plugin does, subtly differently.
 
-**A plugin could not link to an episode without hardcoding a URL.** `ctx.route.navigate` is confined to
-your own `/p/<pluginId>/` subtree by construction, and that is a property worth keeping — so every plugin
-that wanted to write "discussed in *The Kraken*, from 12:04" wrote `` `/episodes/${slug}` `` itself and
-became a thing that breaks when the host changes a route.
+The wiki grew a private `tags` column, because core's tags had no vocabulary and no plugin surface. It
+projects episode snapshots into its own doc store on a schedule, because the frontend could not read one.
+It is about to ship a private search box, because plugin content is invisible to the site's search. And
+every plugin swallows a 404 with `catch(() => undefined)`, because the rejection was untyped — swallowing
+the 500 and the 403 alongside it.
+
+## Read this before you plan around it
+
+**About half of the new surface is contract ahead of implementation.** `ctx.feeds`, `ctx.tags`, `ctx.docs`,
+`ctx.route.query`, the typed errors and both extension points need core to build the other half; they are
+tracked as issues on `mosaicast-core`. The SDK-side helpers — `iconCss`, `matchRoute`, the i18n formatters,
+`defineManifest`, `declaredTypeFor`, `flushMockApi` and every test double — work the day this ships.
+
+This is the deliberate order this time: the contract is settled first and core follows. It is worth knowing
+which half you are writing against before you plan a release around it.
 
 ## 1. Bump the version you build against
 
 `plugin.json`:
 
 ```diff
--  "platformApi": "0.7.1",
-+  "platformApi": "0.8.0",
+-  "platformApi": "0.8.0",
++  "platformApi": "0.9.0",
 ```
 
 and your dependencies:
 
 ```diff
--  "@mosaicast/plugin-sdk": "^0.7.0"
-+  "@mosaicast/plugin-sdk": "^0.8.0"
+-  "@mosaicast/plugin-sdk": "^0.8.0"
++  "@mosaicast/plugin-sdk": "^0.9.0"
 ```
 
 ```diff
-- implementation("dev.mosaicast:plugin-api:0.7.1")
-+ implementation("dev.mosaicast:plugin-api:0.8.0")
+- implementation("dev.mosaicast:plugin-api:0.8.0")
++ implementation("dev.mosaicast:plugin-api:0.9.0")
 ```
 
-That is the whole required migration. The rest of this page is opt-in.
+## 2. The one compile break: a hand-built `ctx` in tests
 
-## 2. Optional: store files (`ctx.blobs`)
+`PluginContext` gained three members (`docs`, `feeds`, `tags`) and `PluginRoute` gained two (`query`,
+`hash`). A test that constructs a context literal itself will stop compiling — and **`tsc --noEmit` is what
+catches it, not your test runner**, which is the same trap 0.7.0 sprang.
 
-Declare what you want to store. **Nothing is granted without this**, and what you declare is what an
-operator sees you asking for — they cap both numbers and intersect the type list with the install's own
-allow-list, so you may get less:
+The fix is not to add the members. It is to stop hand-building the context:
 
-```json
-"blobs": { "maxFileBytes": 5242880, "quotaBytes": 268435456,
-           "mimeTypes": ["image/png", "image/jpeg", "image/webp"] }
+```diff
+-const ctx = { scope: { type: 'site', id: 'main' }, episodes: [], user: null, /* … */ } as PluginContext;
++const ctx = makeMockCtx({ scope: { type: 'site', id: 'main' } });
 ```
 
-`ctx.blobs` (TypeScript) and `ctx.blobs()` (Java) are **`null`** without it — the same shape `ctx.schema`
-has, and for the same reason. Check before use; TypeScript will make you.
+`makeMockCtx` has covered every member since 0.1.0 and absorbs the next release too. A `route` override
+still **merges** (since 0.7.1), so `route: { path: 'kraken' }` keeps working and keeps the `navigations`
+recorder.
 
-From a Web Component:
+On the Java side there is **no** break: `FakePluginContext` gained `withTags(...)` as a chaining mutator
+rather than a sixth constructor parameter, so every existing call still compiles and still means the same
+thing.
+
+## 3. Delete the code the SDK now owns
+
+If your plugin has any of these, they can go — this is the point of the release.
+
+**A `declaredType(file)` helper and an extension→MIME table.** `blobs.upload` normalises by default now:
+
+```diff
+-const stored = await blobs.upload(file, { declaredType: declaredType(file) });
++const stored = await blobs.upload(file);
+```
+
+Pass `{ declaredType: 'preserve' }` if you specifically want the browser's raw `file.type`.
+
+**A `formatTime` / `formatBytes` pair.** Both were locale-blind, and the byte one almost certainly hardcodes
+`.` as the decimal separator — which is wrong in `de`:
+
+```diff
+-<span>{formatTime(seconds)} · {formatBytes(quota.usedBytes)}</span>
++<span>{i18n.duration(seconds)} · {i18n.bytes(quota.usedBytes)}</span>
+```
+
+`duration` takes an ISO-8601 string too, so `i18n.duration(snapshot.duration)` works directly.
+
+**An English-shaped plural.** `if (n === 1)` is wrong in Polish, Russian and Arabic:
+
+```diff
+-<span>{n === 1 ? t('moment_one') : t('moment_other', { count: n })}</span>
++<span>{i18n.plural('moments', n)}</span>
+```
+
+with catalog keys `moments.one` / `moments.other` (and `.few` / `.many` where a locale needs them; only
+`.other` is required).
+
+**A hand-rolled icon CSS file.** Check yours for the bug first — if the fallback is `mask-image: none`, your
+plugin ships **solid squares** to anyone on a host that predates an icon you used:
+
+```diff
+-style.textContent = MY_ICON_CSS;   // 113 lines, three rules to remember
++style.textContent = iconCss(['star', 'clock']);
+```
+
+**A `flush()` helper doing microtask hops.** `flushMockApi(ctx.api)` waits for the calls and then drains
+the hops behind them, instead of you guessing how many `await Promise.resolve()` a component needs.
+
+**A test asserting `nav[]` matches your in-page tab bar.** Generate `plugin.json` from a
+`defineManifest({ … })` module and the two stop being separate copies. Note what still legitimately
+differs: `path`/`icon`/`role` are pinned between them, but the host's menu label **cannot be translated** —
+core has no plugin catalogs — while your in-page tab can.
+
+**A doc-store path built by hand.** `ctx.docs` validates the key and resolves the singletons:
+
+```diff
+-await ctx.api.put(`data/user/me/${encodeURIComponent(key)}`, marks);
++await ctx.docs.put('self', key, marks);
+```
+
+**And a projection of host data into your own doc store**, if you have one — see §5.
+
+## 4. Optional: stop swallowing real failures
+
+The 404-swallowing `catch` is worth revisiting wherever you have one, because it is also catching the 500
+and the 403:
+
+```diff
+-ctx.api.get<Stats>(path).then(setStats).catch(() => setStats(undefined));
++ctx.api.getOrNull<Stats>(path).then(setStats);   // null when absent; a real failure still rejects
+```
+
+And where you do need to branch on a refusal:
 
 ```ts
-const blobs = ctx.blobs;
-if (!blobs) return; // this plugin declared no `blobs` block
+import { isPluginApiError } from '@mosaicast/plugin-sdk';
 
-const stored = await blobs.upload(file);          // a File from <input type="file">
-img.src = blobs.urlFor(stored.ref);
-await ctx.api.put('data/site/main/logo', { ref: stored.ref });
-```
-
-**Store the `ref`, never the URL.** The URL is derived from the ref and the host may change how; the ref is
-the identity.
-
-From a backend, for what only a backend can do — fetching on a schedule, and deleting files a document no
-longer points at:
-
-```java
-PluginBlobs blobs = ctx.blobs();
-try (InputStream in = Files.newInputStream(path)) {
-    BlobInfo stored = blobs.put("architecture.png", "image/png", in);
+catch (e) {
+  if (isPluginApiError(e) && e.status === 403) { /* backendOwned, or the write floor */ }
+  else throw e;
 }
 ```
 
-Three things to know before you build on it:
+Use `isPluginApiError`, not `instanceof` — the error comes from the host across a bundle boundary.
 
-- **Uploads are refused for reasons you can predict.** Size against your effective ceiling, declared type
-  against the effective allow-list, then the *actual* type read from the leading bytes — a file whose
-  content contradicts its extension is refused, and SVG is never accepted at all. Show the refusal; the
-  person who picked the file is the only one who can pick a different one. `quota()` reports the effective
-  numbers so you can say so before they pick.
-- **Nothing collects orphans.** A file outlives the document that referred to it, and only your plugin
-  knows which those are. Delete what you stop pointing at.
-- **Writes go through `data.writableBy`**, reads through `data.readableBy` — the same floors as the doc
-  surface. Unlike the schema surface, writes over HTTP are the point here: a file has no relational
-  invariant for plugin code to enforce, so the floors plus a quota are the whole authorization story.
+## 5. Optional: read snapshots instead of copying them (`ctx.feeds`)
 
-The test kit mirrors all of it — `makeMockBlobs()` in `@mosaicast/plugin-sdk/testing`, and
-`InMemoryPluginBlobs` in the Java kit. Both **enforce the ceilings and the allow-list**, because a component
-that has only ever met an accepting double meets its first refusal in front of a podcaster. Neither reads
-file formats; name the file that should be refused (`rejectContent`) to exercise that path.
-
-## 3. Optional: link to core pages (`ctx.links`)
-
-Strings, not navigation — put the result in a real `href` and let the visitor click (middle-click, "open in
-new tab" and crawlers all need one):
+If your plugin keeps a projection of episode titles and artwork, this is what it was working around:
 
 ```ts
-const href = ctx.links.episode('kraken', { t: 724 });   // /episodes/kraken?t=724
-const feed = ctx.links.feed('main', { season: '2' });   // /feeds/main?season=2
+const cards = await ctx.feeds.displayMany(ctx.episodes.slice(0, 20));   // one request, not N
+const snap = cards[slug];
+if (!snap) return;                       // filtered out for this visitor — normal, not an error
+render(snap.title, resolveArtwork(snap));
 ```
 
-`?t=` is the host's timestamp deep link: it seeks the player to that second and beats the listener's stored
-position for that navigation. Frontend only — this is where links get rendered.
+The snapshot is **not authoritative** — the host overwrites it on every feed refetch, which is exactly why
+reading it live beats copying it. Cache per render, never per install. A `WITHDRAWN` or tier-gated episode
+is **absent** from the answer rather than redacted, so a missing key must not be treated as a failure.
 
-## 4. If you implement `PluginContext` yourself
+Deleting the projection usually deletes a scheduled ingest and a `backendOwned` key with it.
 
-`PluginContext` gained `blobs()`. If you have your own implementation rather than using
-`FakePluginContext`, add it — returning `null` is correct for a plugin that declares no `blobs` block.
+## 6. Optional: use the site's tags (`ctx.tags`)
 
-**`FakePluginContext`'s existing constructors are unchanged.** The four-argument form every plugin test
-already calls still compiles and still means "no file storage"; a fifth argument is a *new* overload:
+Declare what you want — reading and tagging your own subjects is one thing, tagging **episodes** is another:
 
-```java
-var blobs = new InMemoryPluginBlobs().withMimeTypes(Set.of("image/png"));
-var ctx = new FakePluginContext(new InMemoryDocStore(), new MapPluginConfig(),
-        new FakeFeedAccess(Map.of()), null, blobs);
+```json
+"tags": { "readsVocabulary": true, "writesEpisodes": false }
 ```
 
-That is deliberate. 0.7.1 exists solely because 0.7.0 added a *required* member to a `ctx` sub-object and
-broke every hand-built test double downstream. New members here are top-level and nullable, and new
-constructor parameters come as overloads.
+`ctx.tags` (TS) and `ctx.tags()` (Java) are **`null`** without it. Check before use; TypeScript will make
+you.
+
+```ts
+for (const t of await tags.all()) suggest(t.label, t.tag);   // instead of a free-text box
+await tags.tagSubject(`page:${slug}`, 'Maritime Lore');       // your namespace, your key
+a.href = ctx.links.feed('main', { tag: 'maritime lore' });    // a wiki tag now links to the feed view
+```
+
+Migrating a private tag column: send your existing strings through `tagSubject` and read back the canonical
+keys. The host normalises (trim, collapse whitespace, casefold), so `Maritime` and `maritime ` converge on
+one tag — expect your column's near-duplicates to merge, and store the key from then on.
+
+**Tagging an episode is a capability.** It changes the shell's filter options *and* what core recommends
+beside that episode, which is why it needs the second flag. You cannot delete a tag from the vocabulary,
+rename one, or remove another writer's assignment — including the feed's.
+
+## 7. Optional: the two new extension points (Java)
+
+Both are optional `ExtensionPoint`s alongside `PluginBackend`, like `SitemapProvider`. Add the class to
+`backend.extensions` in your manifest; there is no declaration beyond that.
+
+**`SearchProvider`** — if you have a private search box, it should become one of these. **Read the access
+note before you implement it**: this is the one place where the host cannot filter for you, because it has
+no model of your objects. A provider that returns a draft page to an anonymous visitor is a leak nothing
+else catches. `role` is `null` for anonymous, and `SearchProviderHarness` calls you once per role so the
+test is one line.
+
+**`UserDataHandler`** — implement it if you hold personal data in **schema columns or blobs**. Core drops
+`data/user/<id>/…` itself (the `USER` scope is host-owned), but it has no idea which of your columns is a
+person. `eraseUser` may erase or pseudonymise — your call, and the host cannot make it. It **must be
+idempotent**, because a failed deletion is retried; `UserDataHandlerHarness.eraseTwice(userId)` is that test
+and it is the one authors skip.
+
+## What did not change
+
+- `ctx.api`, `ctx.store()`, `ctx.schema`, `ctx.blobs`, `ctx.links`, `ctx.consent`, `ctx.route.navigate`,
+  `ctx.player`, `ctx.progress`, `ctx.theme` — all unchanged.
+- Both access floors, `backendOwned`, and the `USER`-scope exemptions.
+- `FakePluginContext`'s existing constructors.
+- The manifest is still **owned and validated by the host**. `PluginManifest` is a type for your editor;
+  if it and core disagree, core wins.

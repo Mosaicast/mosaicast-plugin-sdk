@@ -16,17 +16,27 @@ import type {
   BlobPage,
   BlobQuota,
   ConsentApi,
+  DisplaySnapshot,
+  DocClient,
+  DocTarget,
+  FeedsClient,
   FilterState,
   LogLevel,
+  PagedDocs,
   PluginApiClient,
+  PluginApiError,
   PluginContext,
   PluginRoute,
+  ProblemDetail,
   SchemaClient,
   SchemaPage,
   SchemaPredicate,
   SchemaQuery,
+  TagInfo,
+  TagsClient,
   ThemeTokens,
 } from './index.js';
+import { DISPLAY_BATCH_LIMIT, DOC_KEY_PATTERN, declaredTypeFor } from './index.js';
 
 /** One recorded {@link PluginContext.log} call. */
 export interface LogRecord {
@@ -70,6 +80,51 @@ export interface RecordedCall {
   body?: unknown;
 }
 
+/**
+ * A canned failure: what the host would have answered instead of a body.
+ *
+ * Put one in {@link MockApiClient.responses} and the call rejects with a {@link PluginApiError} carrying
+ * that status — which is how a component's 404 branch and its 500 branch become separately testable.
+ *
+ * ```ts
+ * const ctx = makeMockCtx({ apiResponses: { 'get data/site/main/stats': apiError(403, {
+ *   detail: 'this key is written by the plugin backend',
+ * }) } });
+ * ```
+ *
+ * @param status  the HTTP status to fail with
+ * @param problem the RFC 7807 body, if the test cares about it
+ * @returns a marker the mock client turns into a rejection
+ * @since 0.9.0
+ */
+export function apiError(status: number, problem?: ProblemDetail): CannedApiError {
+  return { __mosaicastApiError: true, status, problem };
+}
+
+/** The marker {@link apiError} produces. Recognised by {@link MockApiClient}; not a real error. */
+export interface CannedApiError {
+  /** Discriminator, so an ordinary response object is never mistaken for a failure. */
+  __mosaicastApiError: true;
+  /** The status to reject with. */
+  status: number;
+  /** The problem body to attach. */
+  problem?: ProblemDetail;
+}
+
+function isCannedApiError(value: unknown): value is CannedApiError {
+  return typeof value === 'object' && value !== null && '__mosaicastApiError' in value;
+}
+
+/** Builds the error shape the host produces, so `isPluginApiError` and `e.status` behave as in production. */
+function toApiError(canned: CannedApiError, method: string, path: string): PluginApiError {
+  const error = new Error(
+    `${canned.status} on ${method.toUpperCase()} ${path}${canned.problem?.detail ? `: ${canned.problem.detail}` : ''}`,
+  ) as Error & { status: number; problem?: ProblemDetail };
+  error.status = canned.status;
+  error.problem = canned.problem;
+  return error;
+}
+
 /** A {@link PluginApiClient} that records calls and returns canned responses. */
 export interface MockApiClient extends PluginApiClient {
   /** Every call made through this client, in order. */
@@ -77,8 +132,50 @@ export interface MockApiClient extends PluginApiClient {
   /**
    * Canned responses keyed by `"<method> <path>"` (e.g. `"get /board"`) or bare `path`; the more
    * specific key wins. Missing keys resolve to `undefined`.
+   *
+   * A value built by {@link apiError} **rejects** with a {@link PluginApiError} instead of resolving.
    */
   responses: Record<string, unknown>;
+  /**
+   * Resolves once every call made so far has settled.
+   *
+   * A component typically does `ctx.api.get(...).then(setState)`, sometimes with another `.then` behind
+   * it, so the mock's already-resolved promise still needs one microtask hop per `.then` before the DOM
+   * reflects it. A single `await Promise.resolve()` covers one hop and not two — which is why the
+   * symptom is **an assertion that fails only sometimes**, depending on how many hops the component
+   * happens to have. This waits for the calls themselves rather than for a guessed number of hops.
+   *
+   * Prefer {@link flushMockApi}, which also drains the hops the component adds after the call settles.
+   *
+   * @since 0.9.0
+   */
+  settled(): Promise<void>;
+}
+
+/**
+ * Waits until every call recorded by a mock client has settled *and* the `.then` chains behind them have
+ * run.
+ *
+ * The two-part wait is the point: `await client.settled()` knows when the *requests* finished, and the
+ * microtask drain after it lets the component's own `.then(setState)` hops reach the DOM. Use it instead
+ * of counting `await Promise.resolve()` calls by hand.
+ *
+ * ```ts
+ * mount(ctx);
+ * await flushMockApi(ctx.api);
+ * expect(root.querySelector('.title')).toHaveTextContent('The Kraken');
+ * ```
+ *
+ * @param client the mock client — `ctx.api` from {@link makeMockCtx}
+ * @since 0.9.0
+ */
+export async function flushMockApi(client: MockApiClient): Promise<void> {
+  await client.settled();
+  // Two hops, because a component that chains `.then(parse).then(setState)` needs one per link and the
+  // cost of an extra hop is nothing. Anything deeper than this is a component doing its own async work,
+  // which is the component's to await.
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 /** The unsubscribe returned by the inert `onChange` doubles — there is nothing to detach. */
@@ -86,18 +183,44 @@ const noop = (): void => {};
 
 function makeMockApi(responses: Record<string, unknown>): MockApiClient {
   const calls: RecordedCall[] = [];
+  const inFlight: Promise<unknown>[] = [];
   const resolve = (method: RecordedCall['method'], path: string, body?: unknown): Promise<never> => {
     calls.push({ method, path, body });
     const canned = api.responses[`${method} ${path}`] ?? api.responses[path];
-    return Promise.resolve(canned as never);
+    const result = isCannedApiError(canned)
+      ? Promise.reject(toApiError(canned, method, path))
+      : Promise.resolve(canned as never);
+    // Tracked separately, and with its rejection absorbed, so `settled()` can await every call without
+    // becoming an unhandled-rejection source of its own.
+    inFlight.push(result.catch(() => undefined));
+    return result as Promise<never>;
   };
   const api: MockApiClient = {
     calls,
     responses,
     get: (path) => resolve('get', path),
+    getOrNull: async (path) => {
+      try {
+        return await resolve('get', path);
+      } catch (e) {
+        // Exactly the host's rule: 404 is an answer, everything else is a failure.
+        if (e instanceof Error && (e as PluginApiError).status === 404) {
+          return null;
+        }
+        throw e;
+      }
+    },
     post: (path, body) => resolve('post', path, body),
     put: (path, body) => resolve('put', path, body),
     delete: (path) => resolve('delete', path),
+    settled: async () => {
+      // Re-read the list each round: awaiting one call can start another.
+      let pending = inFlight.length;
+      do {
+        pending = inFlight.length;
+        await Promise.all(inFlight.slice());
+      } while (inFlight.length !== pending);
+    },
   };
   return api;
 }
@@ -322,6 +445,314 @@ export function makeMockSchema(rows: Record<string, Record<string, unknown>[]> =
   return client;
 }
 
+/** A {@link FeedsClient} answering from registered snapshots. @since 0.9.0 */
+export interface MockFeedsClient extends FeedsClient {
+  /**
+   * Registers the snapshot `display`/`displayMany` return for a slug.
+   *
+   * Mirrors the Java kit's `FakeFeedAccess.withDisplay(...)`, so both halves of a plugin describe the
+   * host's answer the same way.
+   *
+   * @param slug     the episode's public slug
+   * @param snapshot what the host would hand over
+   * @returns this client, for chaining
+   */
+  withDisplay(slug: string, snapshot: DisplaySnapshot): MockFeedsClient;
+  /** Every slug asked for, in order — batched calls contribute each slug separately. */
+  readonly requested: string[];
+}
+
+/**
+ * A {@link FeedsClient} double: snapshots you register, and **nothing for the ones you don't**.
+ *
+ * An unregistered slug resolves `null` (or is absent from a batch) rather than throwing, because that is
+ * what the host does for an episode this visitor may not see — a `WITHDRAWN` or tier-gated one is absent,
+ * not redacted. So the empty case a component must handle is the double's default, and a component that
+ * assumes every slug comes back fails here rather than in front of a visitor.
+ *
+ * ```ts
+ * const feeds = makeMockFeeds().withDisplay('kraken', { title: 'The Kraken', description: '' });
+ * const ctx = makeMockCtx({ feeds, episodes: ['kraken', 'gated'] });
+ *
+ * await mount(ctx);
+ * expect(root.textContent).toContain('The Kraken');   // and renders nothing for `gated`
+ * ```
+ *
+ * @param snapshots snapshots to start with, keyed by slug
+ * @returns a feeds double with `withDisplay` and a recorded `requested` list
+ * @since 0.9.0
+ */
+export function makeMockFeeds(snapshots: Record<string, DisplaySnapshot> = {}): MockFeedsClient {
+  const stored: Record<string, DisplaySnapshot> = { ...snapshots };
+  const requested: string[] = [];
+
+  const client: MockFeedsClient = {
+    requested,
+    withDisplay(slug, snapshot) {
+      stored[slug] = snapshot;
+      return client;
+    },
+    display: (slug) => {
+      requested.push(slug);
+      return Promise.resolve(stored[slug] ?? null);
+    },
+    displayMany: (slugs) => {
+      // Clamped, not rejected — the host's behaviour past the batch ceiling.
+      const asked = slugs.slice(0, DISPLAY_BATCH_LIMIT);
+      requested.push(...asked);
+      const result: Record<string, DisplaySnapshot> = {};
+      for (const slug of asked) {
+        const snapshot = stored[slug];
+        // Absent rather than null: a slug the caller may not see is simply not a key in the answer.
+        if (snapshot) result[slug] = snapshot;
+      }
+      return Promise.resolve(result);
+    },
+  };
+  return client;
+}
+
+/** A {@link TagsClient} backed by an in-memory vocabulary. @since 0.9.0 */
+export interface MockTagsClient extends TagsClient {
+  /** Seeds a tag the **feed** put on an episode — a row the plugin may read but must not remove. */
+  withFeedTag(episodeSlug: string, tag: string): MockTagsClient;
+  /** The canonical keys currently on each episode, for asserting without going through the client. */
+  readonly episodeTags: Record<string, string[]>;
+  /** The canonical keys currently on each of this plugin's subjects. */
+  readonly subjectTags: Record<string, string[]>;
+}
+
+/** The host's canonicalisation rule: trim, collapse internal whitespace, casefold. */
+function canonicalTag(tag: string): string {
+  const canonical = tag.trim().replace(/\s+/g, ' ').toLowerCase();
+  if (canonical === '') {
+    throw new Error('tag must not be blank');
+  }
+  return canonical;
+}
+
+/**
+ * A {@link TagsClient} double that **refuses what the host refuses**.
+ *
+ * Two refusals matter, and both are invisible to a component tested against a permissive double:
+ *
+ * - **Episode writes throw** unless you pass `writesEpisodes: true`, standing in for the manifest
+ *   declaration. Off by default, so the branch where the host says no gets exercised.
+ * - **`untagEpisode` removes only this plugin's own assignment.** Seed the feed's side with
+ *   {@link MockTagsClient.withFeedTag} and the tag survives your removal, exactly as the host's `source`
+ *   column makes it survive.
+ *
+ * Canonicalisation is applied as the host applies it, so a test that writes `'Maritime '` and reads
+ * `'maritime'` passes here for the same reason it passes against core.
+ *
+ * @param opts `writesEpisodes` grants the episode-write capability; `subjects` and `episodes` seed
+ *             assignments this plugin owns
+ * @returns a tags double
+ * @since 0.9.0
+ */
+export function makeMockTags(
+  opts: {
+    writesEpisodes?: boolean;
+    subjects?: Record<string, string[]>;
+    episodes?: Record<string, string[]>;
+  } = {},
+): MockTagsClient {
+  const labels = new Map<string, string>();
+  // `plugin` vs `feed`: which rows this plugin is allowed to take back.
+  const episodeRows: { slug: string; tag: string; source: 'feed' | 'plugin' }[] = [];
+  const subjects = new Map<string, Set<string>>();
+
+  const remember = (canonical: string, spelling: string): void => {
+    if (!labels.has(canonical)) labels.set(canonical, spelling.trim().replace(/\s+/g, ' '));
+  };
+  const addEpisodeRow = (slug: string, tag: string, source: 'feed' | 'plugin'): void => {
+    const canonical = canonicalTag(tag);
+    remember(canonical, tag);
+    if (!episodeRows.some((r) => r.slug === slug && r.tag === canonical && r.source === source)) {
+      episodeRows.push({ slug, tag: canonical, source });
+    }
+  };
+  const addSubject = (subjectKey: string, tag: string): void => {
+    if (subjectKey === '') throw new Error('subjectKey must not be blank');
+    const canonical = canonicalTag(tag);
+    remember(canonical, tag);
+    const existing = subjects.get(subjectKey) ?? new Set<string>();
+    existing.add(canonical);
+    subjects.set(subjectKey, existing);
+  };
+  const requireEpisodeWrites = (): void => {
+    if (!opts.writesEpisodes) {
+      throw new Error(
+        "this plugin's manifest does not declare tags.writesEpisodes; " +
+          'pass { writesEpisodes: true } to makeMockTags to test the granted case',
+      );
+    }
+  };
+  const infoFor = (canonical: string): TagInfo => ({
+    tag: canonical,
+    label: labels.get(canonical) ?? canonical,
+    episodes: new Set(episodeRows.filter((r) => r.tag === canonical).map((r) => r.slug)).size,
+    subjects: [...subjects.values()].filter((tags) => tags.has(canonical)).length,
+  });
+  const tagsOnEpisode = (slug: string): string[] =>
+    [...new Set(episodeRows.filter((r) => r.slug === slug).map((r) => r.tag))].sort();
+
+  for (const [slug, tags] of Object.entries(opts.episodes ?? {})) {
+    for (const tag of tags) addEpisodeRow(slug, tag, 'plugin');
+  }
+  for (const [subjectKey, tags] of Object.entries(opts.subjects ?? {})) {
+    for (const tag of tags) addSubject(subjectKey, tag);
+  }
+
+  const client: MockTagsClient = {
+    get episodeTags() {
+      const byEpisode: Record<string, string[]> = {};
+      for (const row of episodeRows) byEpisode[row.slug] = tagsOnEpisode(row.slug);
+      return byEpisode;
+    },
+    get subjectTags() {
+      const bySubject: Record<string, string[]> = {};
+      for (const [key, tags] of subjects) bySubject[key] = [...tags].sort();
+      return bySubject;
+    },
+    withFeedTag(episodeSlug, tag) {
+      addEpisodeRow(episodeSlug, tag, 'feed');
+      return client;
+    },
+    all: async () =>
+      [...labels.keys()]
+        .map(infoFor)
+        // A tag stops existing when nothing carries it — the host keeps no empty vocabulary rows.
+        .filter((info) => info.episodes > 0 || info.subjects > 0)
+        .sort((a, b) => b.episodes + b.subjects - (a.episodes + a.subjects) || a.tag.localeCompare(b.tag)),
+    episodesWith: async (tag) => {
+      const canonical = canonicalTag(tag);
+      return [...new Set(episodeRows.filter((r) => r.tag === canonical).map((r) => r.slug))].sort();
+    },
+    tagsOn: async (episodeSlug) => tagsOnEpisode(episodeSlug),
+    similarTo: async (tag, limit = 10) => {
+      const canonical = canonicalTag(tag);
+      const shared = new Map<string, number>();
+      const bump = (other: string): void => {
+        if (other !== canonical) shared.set(other, (shared.get(other) ?? 0) + 1);
+      };
+      for (const slug of new Set(episodeRows.filter((r) => r.tag === canonical).map((r) => r.slug))) {
+        tagsOnEpisode(slug).forEach(bump);
+      }
+      for (const tags of subjects.values()) {
+        if (tags.has(canonical)) tags.forEach(bump);
+      }
+      return [...shared.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, Math.max(0, limit))
+        .map(([other]) => infoFor(other));
+    },
+    subjectsWith: async (tag) => {
+      const canonical = canonicalTag(tag);
+      return [...subjects.entries()]
+        .filter(([, tags]) => tags.has(canonical))
+        .map(([key]) => key)
+        .sort();
+    },
+    tagsOnSubject: async (subjectKey) => [...(subjects.get(subjectKey) ?? [])].sort(),
+    tagSubject: async (subjectKey, tag) => {
+      addSubject(subjectKey, tag);
+    },
+    untagSubject: async (subjectKey, tag) => {
+      const tags = subjects.get(subjectKey);
+      if (!tags) return;
+      tags.delete(canonicalTag(tag));
+      if (tags.size === 0) subjects.delete(subjectKey);
+    },
+    tagEpisode: async (episodeSlug, tag) => {
+      requireEpisodeWrites();
+      addEpisodeRow(episodeSlug, tag, 'plugin');
+    },
+    untagEpisode: async (episodeSlug, tag) => {
+      requireEpisodeWrites();
+      const canonical = canonicalTag(tag);
+      // Only this plugin's row. A tag the feed also put here stays, and the episode keeps carrying it.
+      const at = episodeRows.findIndex(
+        (r) => r.slug === episodeSlug && r.tag === canonical && r.source === 'plugin',
+      );
+      if (at >= 0) episodeRows.splice(at, 1);
+    },
+  };
+  return client;
+}
+
+/** A {@link DocClient} storing in memory, keyed by resolved partition path. @since 0.9.0 */
+export interface MockDocClient extends DocClient {
+  /** What is currently stored, keyed `"<partition>/<key>"` — e.g. `"data/user/me/marks"`. */
+  readonly stored: Record<string, unknown>;
+}
+
+/** Resolves a {@link DocTarget} to the partition path the host would address. */
+function docPath(target: DocTarget): string {
+  if (target === 'self') return 'data/user/me';
+  if (target === 'site') return 'data/site/main';
+  return `data/${target.type}/${encodeURIComponent(target.id)}`;
+}
+
+function requireDocKey(key: string): string {
+  if (!DOC_KEY_PATTERN.test(key)) {
+    throw new Error(`doc key must match ${DOC_KEY_PATTERN.source}, got: ${JSON.stringify(key)}`);
+  }
+  return key;
+}
+
+/**
+ * A {@link DocClient} double: an in-memory store that **validates keys the way the client does**.
+ *
+ * A key with a `/` in it, or one over 200 characters, throws here rather than silently working — which
+ * matters, because against a permissive double the failure would first appear as a 400 in production.
+ *
+ * ```ts
+ * const docs = makeMockDocs({ 'data/user/me/marks': { b3: true } });
+ * const ctx = makeMockCtx({ docs });
+ *
+ * await mount(ctx);
+ * expect(docs.stored['data/user/me/marks']).toEqual({ b3: true, b4: true });
+ * ```
+ *
+ * @param initial documents to start with, keyed `"<partition>/<key>"`
+ * @returns a doc client double with an inspectable `stored` map
+ * @since 0.9.0
+ */
+export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClient {
+  const stored: Record<string, unknown> = { ...initial };
+
+  return {
+    stored,
+    get: async (target, key) => (stored[`${docPath(target)}/${requireDocKey(key)}`] ?? null) as never,
+    put: async (target, key, value) => {
+      stored[`${docPath(target)}/${requireDocKey(key)}`] = value;
+    },
+    list: async (target, opts) => {
+      const prefix = `${docPath(target)}/`;
+      const items = Object.entries(stored)
+        .filter(([path]) => path.startsWith(prefix))
+        .map(([path, value]) => ({ key: path.slice(prefix.length), value }))
+        .filter((entry) => entry.key.startsWith(opts?.prefix ?? ''))
+        .sort((a, b) => a.key.localeCompare(b.key));
+      const size = opts?.size ?? 50;
+      const page = opts?.page ?? 0;
+      const result: PagedDocs<never> = {
+        items: items.slice(page * size, page * size + size) as never,
+        page,
+        size,
+        totalElements: items.length,
+        totalPages: Math.ceil(items.length / size),
+      };
+      return result;
+    },
+    remove: async (target, key) => {
+      // Idempotent, like the host: removing what is gone resolves rather than rejecting.
+      delete stored[`${docPath(target)}/${requireDocKey(key)}`];
+    },
+  };
+}
+
 /** Escapes a string for literal use inside a `RegExp` — the non-wildcard parts of a `like` pattern. */
 function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -415,12 +846,16 @@ export function makeMockBlobs(
     stored,
     upload: (file, uploadOpts) => {
       const filename = uploadOpts?.filename ?? (file instanceof File ? file.name : null);
-      uploads.push({ filename, mime: file.type, size: file.size });
-      if (!mimeTypes.includes(file.type)) {
-        return Promise.reject(new Error(`content type not allowed for this plugin: ${file.type}`));
+      // The same normalisation the real client applies, so a `File` with an empty `type` — what Firefox
+      // hands over when the OS MIME lookup fails — is accepted here exactly as the host accepts it.
+      const declared =
+        uploadOpts?.declaredType === 'preserve' ? file.type : declaredTypeFor(file);
+      uploads.push({ filename, mime: declared, size: file.size });
+      if (!mimeTypes.includes(declared)) {
+        return Promise.reject(new Error(`content type not allowed for this plugin: ${declared}`));
       }
       if (filename != null && rejected.has(filename)) {
-        return Promise.reject(new Error(`content does not match the declared type: ${file.type}`));
+        return Promise.reject(new Error(`content does not match the declared type: ${declared}`));
       }
       if (file.size > maxFileBytes) {
         return Promise.reject(
@@ -433,7 +868,7 @@ export function makeMockBlobs(
       const info: BlobInfo = {
         ref: `blob-${nextRef++}`,
         filename,
-        mime: file.type,
+        mime: declared,
         size: file.size,
         updatedAt: new Date().toISOString(),
       };
@@ -514,15 +949,18 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api' | 'r
  *
  * Defaults: `site` scope, no episodes, anonymous user, **all consent denied** (a {@link makeMockConsent}
  * double — pass your own to drive grants), empty filter, a player
- * parked at 0s, empty route, `en` locale, unknown progress, and {@link DEFAULT_THEME}. Pass overrides to
- * change any field; the returned `api` is a {@link MockApiClient} recording every call, and `logs`
- * collects every `ctx.log(...)`.
+ * parked at 0s, empty route with an empty query and hash, `en` locale, unknown progress, and
+ * {@link DEFAULT_THEME}. Pass overrides to change any field; the returned `api` is a
+ * {@link MockApiClient} recording every call, and `logs` collects every `ctx.log(...)`.
  *
- * `episodeLabels` is deliberately **absent** by default, and `schema` and `blobs` are **`null`**. All three
- * are optional on the real context — the host supplies labels partially, and gives a plugin no schema and
- * no blob store unless its manifest declares them — so a component that needs any of them has to survive
- * its absence. The mock makes you face that unless you pass one in ({@link makeMockSchema},
- * {@link makeMockBlobs}).
+ * `docs` and `feeds` are real doubles ({@link makeMockDocs}, {@link makeMockFeeds}), because every plugin
+ * has both — the empty ones give a component nothing to render, which is the case worth defaulting to.
+ *
+ * `episodeLabels` is deliberately **absent** by default, and `schema`, `blobs` and `tags` are **`null`**.
+ * All four are optional on the real context — the host supplies labels partially, and gives a plugin no
+ * schema, no blob store and no tag surface unless its manifest declares them — so a component that needs
+ * any of them has to survive its absence. The mock makes you face that unless you pass one in
+ * ({@link makeMockSchema}, {@link makeMockBlobs}, {@link makeMockTags}).
  *
  * **`route` is the one override that merges** rather than replacing: `route: { path: 'kraken' }` pins the
  * subpath and keeps the recording `navigate`. Everything else is all-or-nothing, because everything else
@@ -544,6 +982,14 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     episodes: [],
     user: null,
     api: mockApi,
+    // Real doubles rather than null: every plugin has a doc store and every plugin can read snapshots,
+    // so there is no "declared it or not" case for a component to handle here.
+    docs: makeMockDocs(),
+    feeds: makeMockFeeds(),
+    // Null, like schema and blobs: `ctx.tags` exists only for a plugin whose manifest declares a `tags`
+    // block, and a component written against a context that always has one breaks on every plugin that
+    // does not.
+    tags: null,
     // Null, not a client: a plugin only has one if its manifest declares `storage.schema`, and a
     // component written against a schema that is always there never handles the doc-store case.
     schema: null,
@@ -563,6 +1009,10 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     player: { currentTime: () => 0, seekTo: () => {}, on: () => noop },
     route: {
       path: '',
+      // Parsed like the host's, and empty by default — a component reading a filter off the query has to
+      // survive arriving without one, which is how a visitor first reaches the page.
+      query: new URLSearchParams(),
+      hash: '',
       onChange: () => noop,
       // Recorded rather than applied: the double has no router and no URL, so `path` does not move.
       // Assert on `navigations`; drive a route change by rendering again with a different `path`.
