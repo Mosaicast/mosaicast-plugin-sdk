@@ -135,6 +135,24 @@ public interface PluginContext {
     PluginBlobs blobs();
 
     /**
+     * The site's shared tag vocabulary, for plugins that declare a {@code tags} block in their manifest
+     * (ARCHITECTURE §6.1).
+     *
+     * <p>{@code null} without the declaration, exactly as with {@link #schema()} and {@link #blobs()}.
+     * Declare it when your plugin has something to label and wants the site's own vocabulary rather than
+     * a private column — the difference between a wiki's {@code lore} and an episode's {@code lore} being
+     * one tag or two unrelated strings.
+     *
+     * <p>Reading and tagging your own subjects is one declaration; tagging <em>episodes</em> is a second,
+     * because it changes the shell's filters and core's recommendations. See {@link Tags}.
+     *
+     * @return the tag surface, or {@code null} when the manifest declares no {@code tags} block (most
+     *         plugins)
+     * @since 0.9.0
+     */
+    Tags tags();
+
+    /**
      * Read access to this plugin's declared configuration values (ARCHITECTURE §7.2).
      *
      * @return the config accessor; never {@code null}
