@@ -33,7 +33,9 @@ The contract version is a **single SemVer anchor** mirrored in four places that 
 **How the host matches it:** core compares `major.minor` **exactly**. A plugin declaring `0.3.x` is
 rejected the moment the host runs `0.7.0` — with the reason shown in the admin log viewer. While the SDK
 is pre-1.0 a breaking change is therefore a **minor** bump (`0.6.0` → `0.7.0`), not a major one; from
-`1.0.0` on, normal SemVer applies and breaking means major.
+`1.0.0` on, normal SemVer applies and breaking means major. **The patch floats** — a plugin declaring
+`0.9.0` loads on a `0.9.1` host, which is what makes a purely additive release (a new optional extension
+point, a test double) cheap: it rejects nothing already installed.
 
 ## Build & test
 ```bash
@@ -49,8 +51,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.7.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.7.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.9.1")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.9.1") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -394,7 +396,8 @@ ctx.route.navigate('index', { replace: true });       // no back-button step (ta
 - **Do not reach past this handle.** `history.pushState` plus a synthetic `popstate` happens to work
   against the host's current router and is not part of the contract.
 - Pair it with `ShareMetadataProvider` (OpenGraph per subpath) and `SitemapProvider` on the backend so the
-  URLs you navigate to also preview and index properly.
+  URLs you navigate to also preview and index properly — and with `PageRouteProvider` (since 0.9.1) so the
+  ones that do *not* exist answer 404 instead of a 200 with a not-found view in it.
 
 ### Reading the query, and matching a route (since 0.9.0)
 
@@ -568,9 +571,9 @@ nothing to catch it. Note where the two *legitimately* diverge: `path`, `icon` a
 between them, but the menu **label cannot be translated** — core has no plugin catalogs — while your
 in-page tab can.
 
-## Optional extension points — `SearchProvider` / `UserDataHandler` (since 0.9.0)
+## Optional extension points — `SearchProvider`, `UserDataHandler`, `PageRouteProvider`
 
-Both are `ExtensionPoint`s a plugin MAY implement alongside `PluginBackend`, like `SitemapProvider`. No
+All three are `ExtensionPoint`s a plugin MAY implement alongside `PluginBackend`, like `SitemapProvider`. No
 manifest declaration: not implementing one is how a plugin says it has nothing to contribute.
 
 **`SearchProvider`** puts plugin content into the site's search, instead of each plugin growing a private
@@ -610,6 +613,30 @@ The `USER` scope is host-owned, so core drops `data/user/<id>/…` itself. Imple
 which one is a person. Handlers run *before* the account row goes, and **must be idempotent** — a failed
 deletion is retried. `UserDataHandlerHarness.eraseTwice(userId)` is that test, and it is the one authors
 skip: the second call is the one that throws, during a retry, when the alternative is a half-done deletion.
+
+**`PageRouteProvider`** (since 0.9.1) is how a plugin's unknown subpaths become real 404s. Declare a `page`
+slot and *every* subpath under `/p/<id>/` answers `200` — a page never written, a mistyped slug, the URL of
+a page deleted last year — each rendering your not-found view inside a `200 OK`. §6.6 rules that soft-404
+out for core's own routes, and the host cannot fix it alone: only the plugin knows whether a subpath is a
+thing.
+
+```java
+public boolean hasRoute(String subpath) {
+    return subpath.isEmpty() || subpath.startsWith("_search/") || pages.exists(slugOf(subpath));
+}
+```
+
+**Not `ShareMetadataProvider`** — the tempting shortcut, and wrong: `_search/<term>` and `_admin` return an
+empty `metaFor` *on purpose*, so reading "no share metadata" as "no page" would 404 working routes. Absent
+means today's behaviour, the **root is a route** (`subpath` is empty there), it runs on a request so keep it
+a lookup, and a provider that throws is logged and skipped and the route answers `200` — a broken plugin
+must not turn a working page into a 404. It decides the status line only; the shell still renders the
+not-found view. `PageRouteProviderHarness` asks about a handful of subpaths at once, root included:
+
+```java
+var routes = new PageRouteProviderHarness(new WikiRoutes(store)).check("glossary/kraken", "glossary/tpyo");
+assertEquals(List.of("glossary/tpyo"), routes.notFound());
+```
 
 ## Logging — `ctx.logger()` / `ctx.log()` (since 0.4.0)
 
@@ -780,8 +807,10 @@ enforces the ceilings and the allow-list. A component that has only ever met a p
 first refusal in front of a podcaster.
 
 **The extension-point harnesses** (Java): `SearchProviderHarness` calls a provider once per role including
-anonymous; `UserDataHandlerHarness.eraseTwice(userId)` proves erasure survives the host's retry. Both are
-shown under [Optional extension points](#optional-extension-points--searchprovider--userdatahandler-since-090).
+anonymous; `UserDataHandlerHarness.eraseTwice(userId)` proves erasure survives the host's retry;
+`PageRouteProviderHarness.check(...)` answers which subpaths 404, always probing the plugin root. All three
+are shown under
+[Optional extension points](#optional-extension-points--searchprovider-userdatahandler-pagerouteprovider).
 
 ## Contributing
 Contributions welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). In short: `git commit -s` (DCO, required), SPDX header in new files, add tests.

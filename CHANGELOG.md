@@ -7,6 +7,44 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-08-24
+
+One optional extension point, and the reason it is a patch. **No contract change** — `platformApi` matches
+on `major.minor`, so every plugin declaring `0.9.0` keeps loading, unchanged, and nothing needs
+re-declaring. That is the whole argument for shipping it here rather than in `0.10.0`: the interface can
+exist without rejecting a single installed plugin.
+
+`/p/<pluginId>/<anything>` answers `200` for every subpath once a plugin declares a `page` slot. A wiki page
+that was never written, a mistyped slug and the URL of a page deleted last year all render the plugin's
+not-found view inside a `200 OK`. ARCHITECTURE §6.6 rules that out for core's own routes — "real HTTP 404s
+for unknown episodes/routes, no soft-404" — and the consequence is that a crawler indexes a plugin's typos
+and its deleted pages. The host cannot fix this alone: only the plugin knows whether a subpath is a thing.
+
+### Added
+
+- **`PageRouteProvider`** (Java, optional) — `boolean hasRoute(String subpath)`, alongside
+  `SitemapProvider` and `ShareMetadataProvider`. The plugin answers whether it renders something at a
+  subpath; the host turns a `false` into a real `404`.
+  - **Absent means today's behaviour.** A plugin that does not implement it keeps answering `200` for
+    everything under its subtree. Core only asks plugins that declare a `page` slot.
+  - **Not `ShareMetadataProvider`, and the docs say why.** A plugin's subtree legitimately contains views
+    with nothing to describe — the wiki's `_search/<term>` and `_admin` return an empty `metaFor` *on
+    purpose* — so treating "no share metadata" as "no page" would 404 working routes. That mistake is why
+    this is a separate interface rather than a second reading of an existing one.
+  - **It runs on a request**, like `SearchProvider`: keep it cheap and bounded. A provider that throws is
+    logged and skipped and the route answers `200` — the same failure posture the other extension points
+    have, because a broken plugin must not turn a working page into a 404.
+  - **It decides the status line, not the body.** The shell still renders its own not-found view, so a
+    plugin does not need to produce one.
+- **`PageRouteProviderHarness`** (test kit) — asks a provider about a handful of subpaths in one call and
+  reports what the host would answer. It always probes the **root** whether the test lists it or not (a
+  lookup over the plugin's own slugs answers `false` for `""` and 404s the plugin's landing page), and it
+  **records a throw** as the `200` the host would serve instead of ending the run.
+
+**Core does not implement this yet** — `mosaicast-core#89` is the branch in `PluginPageController.page`,
+and it follows this release. Until then a plugin can implement and test the provider; the status line does
+not change.
+
 ## [0.9.0] — 2026-08-22
 
 The release that came out of *using* the contract. Every item here was found the same way — building
@@ -697,6 +735,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.9.1]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.9.1
 [0.9.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.8.0
 [0.7.1]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.7.1

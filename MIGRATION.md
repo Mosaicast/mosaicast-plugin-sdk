@@ -1,11 +1,85 @@
-# Migrating a plugin to `platformApi` 0.9.0
+# Migrating a plugin to `platformApi` 0.9.1
+
+Two migrations in one file. **On `0.9.0`?** Read the next section and stop — the rest is the `0.8.x` guide.
+**On `0.8.x`?** Do [0.8.x → 0.9.0](#08x--090-the-release-that-came-out-of-using-the-contract) first, then
+come back to the top.
+
+---
+
+# 0.9.0 → 0.9.1: real 404s for your unknown subpaths
+
+**Nothing to do.** This is a patch: core matches `platformApi` on `major.minor` and lets the patch float, so
+a plugin declaring `0.9.0` keeps loading against a `0.9.1` host, unchanged. You may leave your manifest
+alone. Bump the dependency when you want the new interface:
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.9.0")
++ implementation("dev.mosaicast:plugin-api:0.9.1")
+```
+
+## What the release adds, and why you might want it
+
+Today every subpath under your plugin answers **200**, once you declare a `page` slot. A page that was never
+written, a mistyped slug and the URL of a page you deleted last year all render your not-found view inside a
+`200 OK`. That is a soft-404: a crawler indexes your typos and your deleted pages, and there is nothing in
+the response to tell it otherwise. The host cannot fix it for you — only your plugin knows whether a subpath
+is a thing.
+
+```java
+public final class WikiRoutes implements PageRouteProvider {
+    @Override
+    public boolean hasRoute(String subpath) {
+        return subpath.isEmpty()                        // your own landing page — do not forget this one
+                || subpath.startsWith("_search/")
+                || subpath.equals("_admin")
+                || pages.exists(slugOf(subpath));
+    }
+}
+```
+
+Add the class to `backend.extensions`; there is no declaration beyond that. **Implement it and your unknown
+subpaths start answering a real 404** — which is the point, and worth saying out loud before you ship it:
+anything you forget to claim here disappears from search results.
+
+Four things that are easy to get wrong:
+
+- **The root is a route.** `subpath` is empty at `/p/<id>/`, exactly as `ShareMetadataProvider.metaFor`
+  receives it. A provider written as a lookup over your own slugs answers `false` there and 404s your own
+  landing page. `PageRouteProviderHarness` probes the root whether you list it or not, for this reason.
+- **Do not reuse `ShareMetadataProvider`.** It is the tempting shortcut and it is wrong: your subtree
+  legitimately holds views with nothing to describe — `_search/<term>` and `_admin` return an empty
+  `metaFor` *on purpose* — so reading "no share metadata" as "no page" 404s working routes. `metaFor` says
+  how to describe a page; `hasRoute` says whether it exists.
+- **It runs on a request**, like `SearchProvider`. A lookup, not a scan. A provider that throws is logged and
+  skipped and the route answers `200` — a broken plugin must not turn a working page into a 404, so the
+  failure is silent from a visitor's side and only your tests will tell you.
+- **It decides the status line, not the body.** The shell renders its own not-found view; you do not need to
+  produce one, and if you already render your own it keeps rendering.
+
+The test is one line per subpath:
+
+```java
+var routes = new PageRouteProviderHarness(new WikiRoutes(store))
+        .check("glossary/kraken", "glossary/tpyo", "_search/kraken", "_admin");
+
+assertEquals(List.of("glossary/tpyo"), routes.notFound());
+assertTrue(routes.servesRoot());
+assertTrue(routes.failures().isEmpty());     // a throw means the host serves 200 anyway
+```
+
+**Core does not implement this yet** ([`mosaicast-core#89`](https://github.com/Mosaicast/mosaicast-core/issues/89)).
+Write and test the provider now; the status line changes when core's half ships.
+
+---
+
+# 0.8.x → 0.9.0: the release that came out of using the contract
 
 For plugin authors coming from `0.8.x`. **Small: a version bump, and one likely compile break in your
 tests.** No plugin *code* written against 0.8.0 changes behaviour — everything in this release is new
 surface.
 
 **You have no choice about timing.** Core matches `major.minor` **exactly**, so the moment the host runs
-`0.9.0` every `0.8.x` plugin is rejected at load, with the reason in the admin log viewer.
+`0.9.x` every `0.8.x` plugin is rejected at load, with the reason in the admin log viewer.
 
 Coming from `0.7.x`? Do the [0.8.0 migration](https://github.com/Mosaicast/mosaicast-plugin-sdk/blob/v0.8.0/MIGRATION.md)
 first — file storage and `ctx.links` — then come back here.
@@ -55,6 +129,10 @@ and your dependencies:
 - implementation("dev.mosaicast:plugin-api:0.8.0")
 + implementation("dev.mosaicast:plugin-api:0.9.0")
 ```
+
+`0.9.0` in the manifest is right even on a `0.9.1` host — the patch floats. Take the latest patch as your
+*dependency*, then read [0.9.0 → 0.9.1](#090--091-real-404s-for-your-unknown-subpaths) once you are through
+here.
 
 ## 2. The one compile break: a hand-built `ctx` in tests
 
