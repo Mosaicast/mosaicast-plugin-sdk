@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.mosaicast.plugin.api.PageRouteProvider;
 import dev.mosaicast.plugin.api.Role;
 import dev.mosaicast.plugin.api.SearchHit;
 import dev.mosaicast.plugin.api.SearchProvider;
@@ -19,7 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
-/** Tests the two extension-point harnesses and {@link FakePluginContext#withTags}. */
+/** Tests the three extension-point harnesses and {@link FakePluginContext#withTags}. */
 class HarnessTest {
 
     /** A provider that hides drafts from anyone below podcaster — the case worth testing. */
@@ -61,6 +62,62 @@ class HarnessTest {
         assertFalse(safe.leakedToAnonymous("draft/lighthouse"));
         // Access is the plugin's job here: the host has no model of a draft, so nothing else catches this.
         assertTrue(leaky.leakedToAnonymous("draft/lighthouse"));
+    }
+
+    /** A wiki's routes: its own pages, its root, and two built-in views with no share metadata. */
+    private static final class WikiRoutes implements PageRouteProvider {
+        @Override
+        public boolean hasRoute(String subpath) {
+            return subpath.isEmpty()                       // the plugin's own landing page
+                    || subpath.startsWith("_search/")
+                    || subpath.equals("_admin")
+                    || subpath.equals("glossary/kraken");
+        }
+    }
+
+    @Test
+    void routeHarnessSeparatesTheRealPagesFromTheTypos() {
+        var routes = new PageRouteProviderHarness(new WikiRoutes())
+                .check("glossary/kraken", "glossary/tpyo", "_search/kraken", "_admin");
+
+        assertEquals(List.of("glossary/tpyo"), routes.notFound());
+        assertTrue(routes.servesRoot());
+        // The reason this is not ShareMetadataProvider: both of these return an empty metaFor on purpose.
+        assertTrue(routes.serves("_search/kraken"));
+        assertTrue(routes.serves("_admin"));
+        assertTrue(routes.failures().isEmpty());
+    }
+
+    @Test
+    void routeHarnessProbesTheRootEvenWhenTheTestForgetsTo() {
+        // The mistake: a lookup over the plugin's own slugs, where the empty string is not one of them.
+        PageRouteProvider slugsOnly = subpath -> subpath.equals("glossary/kraken");
+
+        var routes = new PageRouteProviderHarness(slugsOnly).check("glossary/kraken");
+
+        assertFalse(routes.servesRoot());
+        assertEquals(List.of(""), routes.notFound());
+    }
+
+    @Test
+    void routeHarnessRecordsAThrowAsTheHostsTwoHundred() {
+        PageRouteProvider broken = subpath -> {
+            throw new IllegalStateException("index not built");
+        };
+
+        var routes = new PageRouteProviderHarness(broken).check("glossary/tpyo");
+
+        // Logged and skipped by the host, so the soft-404 is back — with nothing in the response to show it.
+        assertTrue(routes.threw("glossary/tpyo"));
+        assertTrue(routes.serves("glossary/tpyo"));
+        assertEquals(List.of(), routes.notFound());
+    }
+
+    @Test
+    void routeHarnessRefusesAnAssertionAboutASubpathItNeverAsked() {
+        var routes = new PageRouteProviderHarness(new WikiRoutes()).check("glossary/kraken");
+
+        assertThrows(IllegalArgumentException.class, () -> routes.serves("glossary/krakn"));
     }
 
     @Test
