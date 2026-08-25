@@ -1,8 +1,67 @@
-# Migrating a plugin to `platformApi` 0.9.1
+# Migrating a plugin to `platformApi` 0.10.0
 
-Two migrations in one file. **On `0.9.0`?** Read the next section and stop — the rest is the `0.8.x` guide.
-**On `0.8.x`?** Do [0.8.x → 0.9.0](#08x--090-the-release-that-came-out-of-using-the-contract) first, then
-come back to the top.
+Three migrations in one file. **On `0.9.x`?** Read the next section and stop. **On `0.8.x`?** Do
+[0.8.x → 0.9.0](#08x--090-the-release-that-came-out-of-using-the-contract) first, then work upward.
+
+---
+
+# 0.9.x → 0.10.0: the site's languages, and translation
+
+**This one you must do.** `platformApi` matches on `major.minor`, so a plugin declaring `0.9.x` is rejected
+by a `0.10.0` host. Re-declare, rebuild, reinstall.
+
+```diff
+  // plugin.json
+- "platformApi": "0.9.1",
++ "platformApi": "0.10.0",
+```
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.9.1")
++ implementation("dev.mosaicast:plugin-api:0.10.0")
+- "@mosaicast/plugin-sdk": "^0.9.1"
++ "@mosaicast/plugin-sdk": "^0.10.0"
+```
+
+## The one compile break: a hand-built `ctx` in tests
+
+`PluginContext` gained `translation`, and `ctx.locale` gained `available()` and `content()`. If your tests
+build a context literal by hand, they stop compiling — **and `tsc --noEmit` is what tells you, not the test
+runner**, which is the same trap 0.9.0 had. Use `makeMockCtx()`, which fills both:
+
+```diff
+- const ctx = { scope: …, locale: { current: () => 'en', onChange: () => () => {} }, … } as PluginContext;
++ const ctx = makeMockCtx({ scope: … });
+```
+
+`createPluginI18n(catalogs, ctx.locale)` is **unchanged** — it now asks for only `current` and `onChange`,
+so a two-method double you pass it directly keeps working.
+
+On the Java side there is no break: `FakePluginContext` grew `withLocales(...)` / `withTranslation(...)` as
+chaining mutators rather than constructor parameters.
+
+## What you may now want to use
+
+**`ctx.locale.content()`** if your plugin authors anything per language. Core made languages a runtime
+registry, so the list is the operator's and it changes: an admin drops a catalog in and enables it. Build
+your editor's tabs from `content()`, not `available()` — a site can require a Dutch imprint with an
+English-only UI, and `available()` would leave that language out. On the backend, check writes with
+`ctx.locales().isContentLocale(locale)`; the browser's list is a hint, what reaches storage is input.
+
+**`ctx.translation`** if you have text worth translating. `null` when the admin configured no provider,
+which is every site until somebody chooses one — so `if (ctx.translation?.available())`, and handle the
+failure rather than falling back to the untranslated string. Java's `TranslationException` is checked and
+carries `reason()` / `retryable()`.
+
+Two things to get right, because neither is obvious:
+
+- **Markdown is not a format.** `'text'` and `'html'` are. Markdown sent as text comes back with mangled
+  links and code fences.
+- **Machine output is a draft.** Store it flagged and let a human confirm it, the way core's legal-page
+  prefill hands the admin something unsaved.
+
+**Core does not implement `ctx.translation` yet** — it is `null` on every current host. The contract ships
+first, as `0.9.0`'s did; the locale lists are live.
 
 ---
 
