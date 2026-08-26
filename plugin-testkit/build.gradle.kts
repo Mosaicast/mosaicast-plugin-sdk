@@ -12,5 +12,5 @@
 
 dependencies {
     api(project(":plugin-api"))
-    api("tools.jackson.core:jackson-databind:3.2.1")
+    api("tools.jackson.core:jackson-databind:3.2.2")
 }
