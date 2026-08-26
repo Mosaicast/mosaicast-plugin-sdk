@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.9.1' as const;
+export const PLATFORM_API_VERSION = '0.10.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -1801,6 +1801,85 @@ export function defineManifest<const T extends PluginManifest>(m: T): T {
 }
 
 /**
+ * One language the host knows about (ARCHITECTURE §12.7).
+ *
+ * @since 0.10.0
+ */
+export interface LocaleInfo {
+  /** The locale code, lower-cased: `en`, `de`, `pt-br`. */
+  code: string;
+  /** The language's name in its own language — `Nederlands`, not `Dutch`. Ready to render in a menu. */
+  nativeName: string;
+  /** Whether this is the site default: the last fallback for anything stored per locale. */
+  isDefault: boolean;
+}
+
+/**
+ * One thing to translate.
+ *
+ * @since 0.10.0
+ */
+export interface TranslationRequest {
+  /** The text. The host caps length and rejects an oversized request rather than truncating it. */
+  text: string;
+  /** A locale code, or `'auto'` to let the provider detect it. Defaults to `'auto'`. */
+  from?: string;
+  /** A locale code. Required — there is no default target. */
+  to: string;
+  /**
+   * `'text'` (default) or `'html'`. Markdown is neither: send it as text and expect links and code fences
+   * to come back mangled, because a translator does not know they are markup.
+   */
+  format?: 'text' | 'html';
+}
+
+/**
+ * What came back.
+ *
+ * @since 0.10.0
+ */
+export interface TranslationResult {
+  text: string;
+  /** What the provider thinks the source language was, or `null` when it does not say. */
+  detectedSourceLanguage: string | null;
+  /** Which provider produced it — the admin chooses one per site, and may change it. */
+  providerId: string;
+  /** Whether the host answered from its cache instead of calling the provider. */
+  fromCache: boolean;
+}
+
+/**
+ * Machine translation, mediated by the host (ARCHITECTURE §12.7).
+ *
+ * **The host owns the provider, the credentials and the cache.** A plugin never talks to a translation
+ * service directly: the site admin picks one, or none, and this is the only way through. That is
+ * deliberate — the alternative is every plugin shipping its own API key, which is both a support burden
+ * for the operator and a bill they never agreed to.
+ *
+ * **Machine output is a draft. Show it as one.** Core's own legal-page prefill never writes a translated
+ * page without a human saving it, for the same reason §12.6 declines to ship legal texts at all: a
+ * translation nobody has read is not made safer by being automatic.
+ *
+ * @since 0.10.0
+ */
+export interface TranslationClient {
+  /**
+   * Translates one string.
+   *
+   * @param request what to translate, and into what
+   * @returns the translation
+   * @throws PluginApiError 409 when the admin removed the provider between your `available()` check and
+   *         this call, 429 when the site is over its rate limit, 503 when the host is saturated, 504 on a
+   *         provider timeout. Show the failure rather than silently falling back to the untranslated
+   *         string — a reader who cannot tell a translation from an original is worse off than one who
+   *         sees an error.
+   */
+  translate(request: TranslationRequest): Promise<TranslationResult>;
+  /** Whether a call would even be attempted. Disable your button on this rather than letting a click 409. */
+  available(): boolean;
+}
+
+/**
  * Everything a frontend plugin is given, set by the host on the mounted custom element
  * (ARCHITECTURE §7.5). This is the **entire** interface a plugin author must learn.
  */
@@ -1944,12 +2023,50 @@ export interface PluginContext {
    */
   links: PluginLinks;
   /**
-   * The active UI locale (ARCHITECTURE §12.7).
+   * The UI locale, and which languages this site has (ARCHITECTURE §12.7).
    *
    * `onChange` returns an {@link Unsubscribe}. {@link createPluginI18n} subscribes to this for you and
    * hands back a `dispose` to undo it.
+   *
+   * **`available` and `content` are different lists, and the difference matters.** `available` is what
+   * the shell can *render* in — use it if you mirror the language switcher. `content` is what the admin
+   * permits text to be *authored* in, and it is the one an editor wants: a site can require a Dutch
+   * imprint without offering a Dutch UI, and a plugin that offered authoring tabs from `available` would
+   * silently refuse the language its operator actually asked for.
+   *
+   * Both are the host's answer, not yours: they change when an admin edits them, and a language in
+   * `content` may have no catalog at all — so do not assume `ctx.locale.content()` and your own
+   * `createPluginI18n` catalogs line up. They routinely will not, and that is fine: your UI falls back to
+   * English while the *content* is written in Dutch.
    */
-  locale: { current(): string; onChange(cb: (l: string) => void): Unsubscribe };
+  locale: {
+    current(): string;
+    onChange(cb: (l: string) => void): Unsubscribe;
+    /**
+     * The languages the shell can render in.
+     *
+     * @since 0.10.0
+     */
+    available(): LocaleInfo[];
+    /**
+     * The languages content may be authored in.
+     *
+     * @since 0.10.0
+     */
+    content(): LocaleInfo[];
+  };
+  /**
+   * Machine translation, or **`null`** when the site admin has configured no provider
+   * (ARCHITECTURE §12.7).
+   *
+   * `null` for the same reason `schema`, `blobs` and `tags` are: whether the capability exists is the
+   * operator's decision, not yours, and TypeScript should make you notice. Unlike those three it is not
+   * gated by your manifest — a site either has a translation provider or it does not, and that can change
+   * under a running plugin.
+   *
+   * @since 0.10.0
+   */
+  translation: TranslationClient | null;
   /** Core listening progress in seconds, or `null` if unknown (ARCHITECTURE §6.5). */
   progress: { get(episodeId: string): Promise<number | null> };
   /** Host theme tokens, also injected as `--mc-*` CSS custom properties. */
@@ -2203,7 +2320,10 @@ function interpolate(template: string, params?: Record<string, string | number>)
  */
 export function createPluginI18n(
   catalogs: I18nCatalogs,
-  locale: PluginContext['locale'],
+  // Narrowed to the two members this actually uses. `ctx.locale` grew `available()` and `content()` in
+  // 0.10.0, and asking for the whole handle would break every plugin test that hands in a two-method
+  // double — for a widening this function does not care about.
+  locale: Pick<PluginContext['locale'], 'current' | 'onChange'>,
 ): PluginI18n {
   let active = locale.current();
   const unsubscribe = locale.onChange((l) => {

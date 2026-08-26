@@ -35,6 +35,9 @@ import type {
   TagInfo,
   TagsClient,
   ThemeTokens,
+  TranslationClient,
+  TranslationRequest,
+  TranslationResult,
 } from './index.js';
 import { DISPLAY_BATCH_LIMIT, DOC_KEY_PATTERN, declaredTypeFor } from './index.js';
 
@@ -908,6 +911,61 @@ export function makeMockBlobs(
   return client;
 }
 
+/** A {@link TranslationClient} that records what it was asked to translate. */
+export interface MockTranslationClient extends TranslationClient {
+  /** Every {@link TranslationClient.translate} call, in order. */
+  readonly requests: TranslationRequest[];
+}
+
+/**
+ * A translation double.
+ *
+ * The default `translate` marks the text rather than pretending to translate it — `"[nl] Hello"` — so an
+ * assertion says *that the component asked for Dutch*, which is the thing worth pinning. A double that
+ * returned plausible Dutch would let a test pass while the component sent the wrong target language.
+ *
+ * ```ts
+ * const ctx = makeMockCtx({ translation: makeMockTranslation() });
+ * // …and for the failure path a component must handle:
+ * const angry = makeMockTranslation({ fail: apiError(429, { detail: 'slow down' }) });
+ * ```
+ *
+ * @param opts `translate` replaces the marker, `providerId` and `fromCache` fill the result, and `fail`
+ *             (from {@link apiError}) makes every call reject instead
+ * @returns a recording translation double
+ * @since 0.10.0
+ */
+export function makeMockTranslation(
+  opts: {
+    translate?: (request: TranslationRequest) => string;
+    providerId?: string;
+    fromCache?: boolean;
+    fail?: CannedApiError;
+  } = {},
+): MockTranslationClient {
+  const requests: TranslationRequest[] = [];
+  const mark = opts.translate ?? ((request: TranslationRequest) => `[${request.to}] ${request.text}`);
+  return {
+    requests,
+    available: () => true,
+    translate: (request) => {
+      requests.push(request);
+      if (opts.fail) {
+        return Promise.reject(toApiError(opts.fail, 'post', 'translate'));
+      }
+      const result: TranslationResult = {
+        text: mark(request),
+        // Null unless a test says otherwise: a provider that does not report a detected language is the
+        // ordinary case, and a component reading this has to survive it.
+        detectedSourceLanguage: request.from && request.from !== 'auto' ? request.from : null,
+        providerId: opts.providerId ?? 'mock',
+        fromCache: opts.fromCache ?? false,
+      };
+      return Promise.resolve(result);
+    },
+  };
+}
+
 /** A {@link PluginContext} wired for tests: the mock `api` and the recorded `log` calls are reachable. */
 export type MockPluginContext = PluginContext & {
   /** The recording client every `api` call goes through. */
@@ -1040,7 +1098,19 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
         return `/feeds/${encodeURIComponent(slug)}${query ? `?${query}` : ''}`;
       },
     },
-    locale: { current: () => 'en', onChange: () => noop },
+    // English only, and English is the default: the smallest site there is. A component that lists
+    // languages has to survive there being exactly one, which is what a fresh install looks like.
+    locale: {
+      current: () => 'en',
+      onChange: () => noop,
+      available: () => [{ code: 'en', nativeName: 'English', isDefault: true }],
+      content: () => [{ code: 'en', nativeName: 'English', isDefault: true }],
+    },
+    // Null, like `tags`/`schema`/`blobs`: whether the site has a translation provider is the operator's
+    // decision, and a component written against one that is always there breaks on every site that
+    // configured none — which is every site by default. Pass {@link makeMockTranslation} when the test
+    // is about translating.
+    translation: null,
     progress: { get: () => Promise.resolve(null) },
     theme: DEFAULT_THEME,
   };

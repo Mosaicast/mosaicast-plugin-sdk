@@ -7,6 +7,50 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — unreleased
+
+Two additions, both about something plugins could not previously see: **what languages this site has**, and
+**whether it can translate**. A minor bump, because `platformApi` matches on `major.minor` — every plugin
+re-declares and rebuilds.
+
+### Added
+
+- **`ctx.locale.available()` / `ctx.locale.content()`** (TS) and **`ctx.locales()`** (Java). Core made
+  languages a runtime registry — an operator drops a catalog into `MOSAICAST_LOCALES_DIR` and enables it —
+  so a plugin that hardcoded a language list is now simply wrong. A wiki whose articles are written per
+  language cannot ask "which ones?" without this.
+  - **Two lists, deliberately.** `available()` is what the shell can *render* in; `content()` is what the
+    admin permits text to be *authored* in. A language needs a catalog for the first and nothing at all
+    for the second, so a Dutch imprint on an English-only site is expressible — and an editor built from
+    `available()` would offer the wrong list.
+  - `Locales.isContentLocale(String)` is the backend check for a per-locale write. The browser's list is a
+    hint; what reaches your storage is input.
+- **`ctx.translation`** (TS) / **`ctx.translation()`** (Java) — host-mediated machine translation, `null`
+  when the site admin configured no provider. The host owns the provider, the credentials and the cache,
+  so an operator does not have to trust every plugin with an API key, and two plugins translating the same
+  paragraph cost one call. `TranslationException` is **checked** and carries a `reason()`: somebody else's
+  service refusing is a routine outcome rather than an exceptional one, and the compiler is the cheapest
+  place to discover a plugin has not decided what to do about it.
+- Test doubles: `makeMockTranslation()` (TS), `FakeTranslation` and `FakeLocales` (Java), plus
+  `FakePluginContext.withTranslation(...)` / `.withLocales(...)` — chaining mutators, never new
+  constructor parameters, for the reason `withTags` records in that file.
+
+### Changed
+
+- **`createPluginI18n(catalogs, locale)` now asks for only the two members it uses**
+  (`Pick<PluginContext['locale'], 'current' | 'onChange'>`). Widening `ctx.locale` would otherwise have
+  broken every plugin test that hands in a two-method double, over members this function never touches.
+- **`translation` defaults to `null` in `makeMockCtx`**, like `schema`/`blobs`/`tags` — a component
+  written against a translator that is always there breaks on every site that has none, which is every
+  site by default.
+
+### Migration
+
+`ctx.locale` and `PluginContext` gained members, so a plugin that hand-builds a context literal in its
+tests stops compiling until it supplies them — caught by `tsc --noEmit`, not by the test runner. See
+`MIGRATION.md`. **Core does not implement `ctx.translation` yet** (`mosaicast-core`, external-services
+milestone); the locale lists land with it.
+
 ## [0.9.1] — 2026-08-24
 
 One optional extension point, and the reason it is a patch. **No contract change** — `platformApi` matches

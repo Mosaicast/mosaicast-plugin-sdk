@@ -153,6 +153,35 @@ public interface PluginContext {
     Tags tags();
 
     /**
+     * Which languages this site has, and which content may be authored in (ARCHITECTURE §12.7).
+     *
+     * <p>Always present — a site always has at least English. Read it when you need it: an admin edits these
+     * lists on a page, so a copy taken at {@code register()} time goes stale.
+     *
+     * <p>Anything stored per locale should be validated against {@link Locales#isContentLocale(String)} here,
+     * on the backend. The list the browser used is a hint; what arrives at your storage is input.
+     *
+     * @return the language registry; never {@code null}
+     * @since 0.10.0
+     */
+    Locales locales();
+
+    /**
+     * Machine translation, or {@code null} when the site admin has configured no provider
+     * (ARCHITECTURE §12.7).
+     *
+     * <p>{@code null} for the same reason {@link #schema()}, {@link #blobs()} and {@link #tags()} are — but
+     * on a different decision. Those three are gated by <em>your manifest</em>; this one is gated by the
+     * <em>operator's</em> choice, and it can appear or disappear while your plugin is running. Do not hold
+     * the handle across a scheduled run: ask again, and treat {@code null} as "this site does not do that"
+     * rather than as an error.
+     *
+     * @return the translation surface, or {@code null} when no provider is configured
+     * @since 0.10.0
+     */
+    Translation translation();
+
+    /**
      * Read access to this plugin's declared configuration values (ARCHITECTURE §7.2).
      *
      * @return the config accessor; never {@code null}

@@ -5,11 +5,13 @@ package dev.mosaicast.plugin.testkit;
 
 import dev.mosaicast.plugin.api.DocStore;
 import dev.mosaicast.plugin.api.FeedAccess;
+import dev.mosaicast.plugin.api.Locales;
 import dev.mosaicast.plugin.api.PluginBlobs;
 import dev.mosaicast.plugin.api.PluginConfig;
 import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.SchemaStore;
 import dev.mosaicast.plugin.api.Tags;
+import dev.mosaicast.plugin.api.Translation;
 import java.time.Duration;
 import java.util.Objects;
 
@@ -36,6 +38,8 @@ public final class FakePluginContext implements PluginContext {
     private final FeedAccess feeds;
     private final RecordingLogger logger = new RecordingLogger(LOGGER_NAME);
     private Tags tags;
+    private Locales locales = FakeLocales.englishOnly();
+    private Translation translation;
     private int scheduledCount;
 
     /** Creates a context with an empty doc store, empty config, empty feeds, no schema and no blobs. */
@@ -137,6 +141,55 @@ public final class FakePluginContext implements PluginContext {
     @Override
     public Tags tags() {
         return tags;
+    }
+
+    /**
+     * Wires a {@link Locales} into this context, for a plugin whose behaviour depends on which languages a
+     * site has.
+     *
+     * <p>A chaining mutator, for the reason {@link #withTags(Tags)} spells out. Unlike {@code tags} this is
+     * never {@code null}: a site always has at least English, so the default is
+     * {@link FakeLocales#englishOnly()} rather than nothing.
+     *
+     * @param locales the language registry; {@code null} restores the English-only default
+     * @return this instance, for chaining
+     * @since 0.10.0
+     */
+    public FakePluginContext withLocales(Locales locales) {
+        this.locales = locales == null ? FakeLocales.englishOnly() : locales;
+        return this;
+    }
+
+    @Override
+    public Locales locales() {
+        return locales;
+    }
+
+    /**
+     * Wires a {@link Translation} into this context, standing in for a site whose admin selected a provider.
+     *
+     * <p>A chaining mutator, same as {@link #withTags(Tags)}. The default is {@code null} — the same
+     * {@code null} a plugin sees on a site that configured no provider, which is every site until an
+     * operator chooses one. See {@link FakeTranslation}.
+     *
+     * @param translation the translation surface, or {@code null} to go back to a site with none
+     * @return this instance, for chaining
+     * @since 0.10.0
+     */
+    public FakePluginContext withTranslation(Translation translation) {
+        this.translation = translation;
+        return this;
+    }
+
+    /**
+     * The translation surface this context is wired to, or {@code null} when none was supplied.
+     *
+     * @return the translation surface, or {@code null}
+     * @since 0.10.0
+     */
+    @Override
+    public Translation translation() {
+        return translation;
     }
 
     @Override

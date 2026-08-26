@@ -546,6 +546,79 @@ i18n.bytes(quota.usedBytes);               // decimal units, locale separator �
   `BlobQuota` *is* three raw byte counts. The SDK produces both, so it may as well render them — and the
   hand-rolled byte formatter hardcodes `.` as the decimal separator, which is simply wrong in `de`.
 
+## Which languages the site has — `ctx.locale.available()` / `.content()` (since 0.10.0)
+
+`ctx.locale` used to answer one question: what language the UI is in right now. It now also answers what
+languages this instance *has* — because an operator can drop a catalog into `MOSAICAST_LOCALES_DIR` and
+enable it, and a plugin that hardcoded a language list would be wrong the moment they did.
+
+```ts
+ctx.locale.current();      // 'de' — the active UI language, as before
+ctx.locale.available();    // [{ code, nativeName, isDefault }] — what the shell can render in
+ctx.locale.content();      // …what the admin permits content to be *authored* in
+```
+
+**They are different lists, and the difference is the whole point.** A language needs a catalog to be
+offered in the shell and needs nothing at all to be one an imprint is written in — so a site can require a
+Dutch imprint with an English-only UI. **An editor wants `content()`.** A plugin that built its authoring
+tabs from `available()` would silently refuse the language its operator actually asked for.
+
+Your own catalogs and `content()` will routinely disagree, and that is fine: your UI falls back to English
+while the *content* is written in Dutch. Do not assume they line up.
+
+On the backend the same thing is `ctx.locales()` — never `null`, because every site has at least one
+language — and it is where a per-locale write should be checked:
+
+```java
+if (!ctx.locales().isContentLocale(locale)) {
+    throw new IllegalArgumentException("not a content language: " + locale);
+}
+```
+
+The browser's list is a hint. What arrives at your storage is input, and a row stored under a language
+nobody offers is invisible to every reader and to your own editor's tab strip.
+
+## Machine translation — `ctx.translation` (since 0.10.0)
+
+```ts
+if (ctx.translation?.available()) {
+  const { text, providerId } = await ctx.translation.translate({ text: body, to: 'nl' });
+}
+```
+
+```java
+Translation translation = ctx.translation();
+if (translation != null && translation.available()) {
+    TranslationResult result = translation.translate(TranslationRequest.of(body, "nl"));
+}
+```
+
+**`null` when the site admin configured no provider** — which is every site until somebody chooses one.
+Same shape as `schema`/`blobs`/`tags`, different decision: those are gated by *your manifest*, this by the
+*operator's* choice, and it can appear or disappear while your plugin is running. Do not cache the handle.
+
+**The host owns the provider, the credentials and the cache.** You never call a translation service
+directly. That spares operators having to trust every plugin with an API key, and it means two plugins
+translating the same paragraph cost one call.
+
+**Machine output is a draft. Store it marked as one.** Core's own legal-page prefill hands the admin an
+unsaved draft for exactly this reason. A translation nobody has read is not made safer by being automatic.
+
+Three things that will bite:
+
+- **Markdown is not a format.** Send `'text'` or `'html'`; markdown sent as text comes back with mangled
+  links and code fences, because a translator does not know they are markup. Splitting markdown into
+  translatable blocks is your job, and a real one.
+- **Calls are slow, metered and refusable.** Do it on `ctx.onSchedule(...)` or behind an explicit editor
+  action, never on a path a visitor waits behind. `TranslationException` is checked, and carries a
+  `reason()` plus `retryable()` so you can retry a `BUSY` and give up on a `NO_PROVIDER`.
+- **Do not fall back to the untranslated string.** A reader who cannot tell a translation from an original
+  is worse off than one who sees an error.
+
+Test doubles: `makeMockTranslation()` (TS) and `FakeTranslation.marking()` / `.failing(reason)` plus
+`FakeLocales` (Java). Both *mark* the text — `"[nl] Hello"` — rather than faking Dutch, so an assertion
+pins that you asked for the right target language.
+
 ## The manifest, typed — `defineManifest` (since 0.9.0)
 
 ```ts

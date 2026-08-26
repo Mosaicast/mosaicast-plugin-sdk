@@ -13,6 +13,7 @@ import {
   makeMockFeeds,
   makeMockSchema,
   makeMockTags,
+  makeMockTranslation,
 } from './testing.js';
 import { isPluginApiError } from './index.js';
 
@@ -694,5 +695,65 @@ describe('the route double', () => {
     expect(ctx.route.path).toBe('moments');
     ctx.route.navigate('moments?sort=old');
     expect(ctx.navigations).toEqual([{ subpath: 'moments?sort=old', replace: false }]);
+  });
+});
+
+describe('the locale double', () => {
+  it('is a one-language site by default, which is what a fresh install is', () => {
+    const ctx = makeMockCtx();
+
+    expect(ctx.locale.available()).toEqual([{ code: 'en', nativeName: 'English', isDefault: true }]);
+    expect(ctx.locale.content()).toEqual(ctx.locale.available());
+  });
+
+  it('lets a test make content and shell languages differ', () => {
+    // The asymmetry is the point: a Dutch imprint on an English-only site is a real configuration, and a
+    // component that filled its editor tabs from `available()` would offer the wrong list.
+    const ctx = makeMockCtx({
+      locale: {
+        current: () => 'en',
+        onChange: () => () => {},
+        available: () => [{ code: 'en', nativeName: 'English', isDefault: true }],
+        content: () => [
+          { code: 'en', nativeName: 'English', isDefault: true },
+          { code: 'nl', nativeName: 'Nederlands', isDefault: false },
+        ],
+      },
+    });
+
+    expect(ctx.locale.available().map((l) => l.code)).toEqual(['en']);
+    expect(ctx.locale.content().map((l) => l.code)).toEqual(['en', 'nl']);
+  });
+});
+
+describe('the translation double', () => {
+  it('is absent by default, like every other operator-gated capability', () => {
+    expect(makeMockCtx().translation).toBeNull();
+  });
+
+  it('marks the text and records what it was asked for', async () => {
+    const translation = makeMockTranslation();
+    const ctx = makeMockCtx({ translation });
+
+    const result = await ctx.translation!.translate({ text: 'Hello', to: 'nl' });
+
+    expect(result.text).toBe('[nl] Hello');
+    expect(result.detectedSourceLanguage).toBeNull();
+    expect(result.fromCache).toBe(false);
+    expect(translation.requests).toEqual([{ text: 'Hello', to: 'nl' }]);
+  });
+
+  it('echoes a stated source language rather than inventing a detection', async () => {
+    const translation = makeMockTranslation();
+
+    const result = await translation.translate({ text: 'Hallo', from: 'de', to: 'nl' });
+
+    expect(result.detectedSourceLanguage).toBe('de');
+  });
+
+  it('can refuse, so the branch that breaks in production is testable', async () => {
+    const translation = makeMockTranslation({ fail: apiError(429, { detail: 'slow down' }) });
+
+    await expect(translation.translate({ text: 'Hello', to: 'nl' })).rejects.toMatchObject({ status: 429 });
   });
 });
