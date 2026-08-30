@@ -4,7 +4,13 @@
 package dev.mosaicast.plugin.api;
 
 /**
- * Machine translation, mediated by the host (ARCHITECTURE §12.7).
+ * Machine translation, mediated by the host (ARCHITECTURE §16, §12.7).
+ *
+ * <p><strong>Reaching this interface takes a manifest declaration.</strong> A plugin whose
+ * {@code external.kinds} does not contain {@code "translation"} sees {@code null} from
+ * {@link PluginContext#translation()} whatever the operator configured — the same shape {@code blobs} and
+ * {@code tags} have, and for a sharper reason: a call here spends the operator's money on somebody else's
+ * metered API, so what a plugin may spend should be readable off its manifest before it is installed.
  *
  * <p><strong>The host owns the provider, the credentials and the cache.</strong> A plugin never speaks to a
  * translation service itself: the site admin selects one, or none, and this is the only way through. The

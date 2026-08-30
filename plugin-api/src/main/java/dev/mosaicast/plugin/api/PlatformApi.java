@@ -31,5 +31,5 @@ public final class PlatformApi {
      *
      * <p>Mirror of the npm package version and the TypeScript {@code PLATFORM_API_VERSION} constant.
      */
-    public static final String VERSION = "0.10.0";
+    public static final String VERSION = "0.11.0";
 }

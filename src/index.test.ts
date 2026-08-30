@@ -31,7 +31,7 @@ import { makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.10.0');
+    expect(PLATFORM_API_VERSION).toBe('0.11.0');
   });
 });
 
@@ -384,12 +384,27 @@ describe('defineManifest', () => {
       data: { writableBy: 'podcaster', readableBy: 'anonymous' },
       tags: { readsVocabulary: true, writesEpisodes: false },
       blobs: { maxFileBytes: 1024, quotaBytes: 4096, mimeTypes: ['image/png'] },
+      external: { kinds: ['translation'], usedBy: 'podcaster' },
     });
 
     // Identity, not validation — the host owns the manifest and remains the validator.
     expect(manifest.id).toBe('sample');
     expect(manifest.slots?.[0]?.element).toBe(manifest.frontend?.elements[0]);
     expect(manifest.tags?.writesEpisodes).toBe(false);
+    expect(manifest.external?.kinds).toEqual(['translation']);
+  });
+
+  it('accepts an external block that leaves usedBy to the podcaster default', () => {
+    const manifest = defineManifest({
+      id: 'sample',
+      version: '1.0.0',
+      platformApi: PLATFORM_API_VERSION,
+      name: 'Sample',
+      external: { kinds: ['translation'] },
+    });
+
+    // Absent, not defaulted — the SDK fills nothing in. The host applies the `podcaster` floor.
+    expect(manifest.external?.usedBy).toBeUndefined();
   });
 });
 

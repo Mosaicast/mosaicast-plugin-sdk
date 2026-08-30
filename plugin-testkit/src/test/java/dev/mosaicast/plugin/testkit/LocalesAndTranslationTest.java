@@ -91,13 +91,30 @@ class LocalesAndTranslationTest {
 
         // Never null: every site has a language. Unlike tags/schema/blobs, absence is not expressible.
         assertEquals("en", ctx.locales().defaultLocale());
-        // Null until an operator selects a provider — which is every site by default.
+        // Null until the manifest declares the kind *and* an operator selects a provider.
         assertNull(ctx.translation());
 
         ctx.withTranslation(FakeTranslation.marking()).withLocales(FakeLocales.englishOnly().withUi("de"));
 
         assertEquals("[de] Hello", ctx.translation().translate(TranslationRequest.of("Hello", "de")).text());
         assertTrue(ctx.locales().isContentLocale("de"));
+    }
+
+    @Test
+    void bothGatesProduceTheSameNull() {
+        // Since 0.11.0 there are two independent reasons for a null translator: a manifest with no
+        // `external.kinds: ["translation"]`, and an operator who configured no provider. The contract keeps
+        // them indistinguishable, so the fake does too — a plugin that branched on which would be testing
+        // something it cannot observe on a real host.
+        FakePluginContext undeclared = new FakePluginContext();
+        FakePluginContext unconfigured = new FakePluginContext().withTranslation(null);
+
+        assertNull(undeclared.translation());
+        assertNull(unconfigured.translation());
+
+        // And going back to null is how a test says the operator removed the provider mid-run.
+        assertNull(new FakePluginContext().withTranslation(FakeTranslation.marking())
+                .withTranslation(null).translation());
     }
 
     @Test

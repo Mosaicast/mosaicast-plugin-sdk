@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.10.0' as const;
+export const PLATFORM_API_VERSION = '0.11.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -1693,6 +1693,61 @@ export interface PluginBlobsDeclaration {
 }
 
 /**
+ * One kind of admin-configured third-party service (ARCHITECTURE §16).
+ *
+ * A closed union rather than `string`, and that is the point: the host ships one provider bean per kind, so
+ * a kind it does not have is not a service that is merely unconfigured — it is a name nothing answers to.
+ * Transcription, text-to-speech and embeddings are the shapes §16 is built to take next; each arrives as a
+ * member here on a minor bump.
+ *
+ * @since 0.11.0
+ */
+export type ExternalServiceKind = 'translation';
+
+/**
+ * The shape of your manifest's `external` block — which admin-configured services this plugin uses, and who
+ * may trigger a call (ARCHITECTURE §16).
+ *
+ * **Declaring this is what makes {@link PluginContext.translation} non-`null`.** Without it the handle is
+ * `null` no matter what the operator configured, exactly as `blobs` and `tags` behave. That is not
+ * bookkeeping: an external call spends the operator's money on somebody else's metered API, and the host's
+ * rate limiter keys on kind and provider, so a site whose budget is gone should be able to read off the
+ * installed manifests which plugins could have spent it.
+ *
+ * ```ts
+ * const external: PluginExternalDeclaration = { kinds: ['translation'], usedBy: 'podcaster' };
+ * ```
+ *
+ * @since 0.11.0
+ */
+export interface PluginExternalDeclaration {
+  /**
+   * Which service kinds this plugin will use.
+   *
+   * A list, though `'translation'` is the only member today: a plugin that later wants transcription adds
+   * an entry rather than a second block.
+   */
+  kinds: ExternalServiceKind[];
+  /**
+   * The lowest role that may trigger a call **from this plugin's UI**. Defaults to `podcaster`, matching
+   * {@link PluginDataDeclaration.writableBy}'s floor.
+   *
+   * **Browser-side only.** A backend has no visitor and no role — `register()` and `onSchedule` run at
+   * startup or on a timer — so this never governs the Java `ctx.translation()`. There, declaring the kind
+   * is the whole gate. Core enforces this floor at the endpoint the browser client calls.
+   *
+   * `anonymous` is legal and is almost always wrong: a metered provider plus an anonymous floor is an open
+   * spending endpoint, reachable by anyone who can load the page. Ask for it only if you can say why the
+   * operator would want to pay for a stranger's translation.
+   *
+   * One floor for the whole plugin, not one per kind. Should a later kind need its own, it arrives as an
+   * additional field that **narrows** this one and never widens it — so a manifest written today keeps
+   * meaning what it says.
+   */
+  usedBy?: DataAccessRole;
+}
+
+/**
  * The whole of `plugin.json`, typed.
  *
  * ## Read this before relying on it
@@ -1765,6 +1820,8 @@ export interface PluginManifest {
   blobs?: PluginBlobsDeclaration;
   /** Opt-in tag surface. Absent means `ctx.tags` is `null`. */
   tags?: PluginTagsDeclaration;
+  /** Opt-in use of admin-configured third-party services. Absent means `ctx.translation` is `null`. */
+  external?: PluginExternalDeclaration;
   /** Config fields core renders as an admin form; plugins never build their own config UI. */
   config?: Record<string, PluginConfigField>;
   /** Third-party services this plugin loads. Omit entirely when it loads none. */
@@ -1849,12 +1906,16 @@ export interface TranslationResult {
 }
 
 /**
- * Machine translation, mediated by the host (ARCHITECTURE §12.7).
+ * Machine translation, mediated by the host (ARCHITECTURE §16, §12.7).
  *
  * **The host owns the provider, the credentials and the cache.** A plugin never talks to a translation
  * service directly: the site admin picks one, or none, and this is the only way through. That is
  * deliberate — the alternative is every plugin shipping its own API key, which is both a support burden
  * for the operator and a bill they never agreed to.
+ *
+ * **Reaching this interface takes a manifest declaration** — `external.kinds` must contain `'translation'`
+ * ({@link PluginExternalDeclaration}), and `external.usedBy` is the floor the host enforces on the browser
+ * call. See {@link PluginContext.translation} for the two ways you end up with `null` instead.
  *
  * **Machine output is a draft. Show it as one.** Core's own legal-page prefill never writes a translated
  * page without a human saving it, for the same reason §12.6 declines to ship legal texts at all: a
@@ -1868,11 +1929,11 @@ export interface TranslationClient {
    *
    * @param request what to translate, and into what
    * @returns the translation
-   * @throws PluginApiError 409 when the admin removed the provider between your `available()` check and
-   *         this call, 429 when the site is over its rate limit, 503 when the host is saturated, 504 on a
-   *         provider timeout. Show the failure rather than silently falling back to the untranslated
-   *         string — a reader who cannot tell a translation from an original is worse off than one who
-   *         sees an error.
+   * @throws PluginApiError 403 when the visitor is below {@link PluginExternalDeclaration.usedBy}, 409 when
+   *         the admin removed the provider between your `available()` check and this call, 429 when the
+   *         site is over its rate limit, 503 when the host is saturated, 504 on a provider timeout. Show
+   *         the failure rather than silently falling back to the untranslated string — a reader who cannot
+   *         tell a translation from an original is worse off than one who sees an error.
    */
   translate(request: TranslationRequest): Promise<TranslationResult>;
   /** Whether a call would even be attempted. Disable your button on this rather than letting a click 409. */
@@ -2056,13 +2117,27 @@ export interface PluginContext {
     content(): LocaleInfo[];
   };
   /**
-   * Machine translation, or **`null`** when the site admin has configured no provider
-   * (ARCHITECTURE §12.7).
+   * Machine translation, or **`null`** (ARCHITECTURE §16, §12.7).
    *
-   * `null` for the same reason `schema`, `blobs` and `tags` are: whether the capability exists is the
-   * operator's decision, not yours, and TypeScript should make you notice. Unlike those three it is not
-   * gated by your manifest — a site either has a translation provider or it does not, and that can change
-   * under a running plugin.
+   * ## There are two independent reasons for `null`, and you must handle both
+   *
+   * 1. **Your manifest did not ask.** `external.kinds` does not contain `'translation'` — see
+   *    {@link PluginExternalDeclaration}. Yours to fix, in your own `plugin.json`.
+   * 2. **The operator configured no provider.** Which is every site until an admin chooses one, and it
+   *    can change back while your plugin is running.
+   *
+   * They are deliberately **indistinguishable at runtime**: one `null`, no discriminator. The first is a
+   * static fact about a file you wrote, so a plugin that wants to know can read its own manifest, and a
+   * handle that answered it would be API surface for a question the author already has the answer to. If
+   * you are staring at an unexpected `null`, check the manifest before the admin panel.
+   *
+   * `null` for the same reason `schema`, `blobs` and `tags` are — a capability that may not exist should be
+   * one TypeScript makes you notice. Unlike those three, half of the gate moves under a running plugin, so
+   * **do not cache the handle**: read `ctx.translation` at the point of use.
+   *
+   * {@link PluginExternalDeclaration.usedBy} is the other half of the browser story: the host refuses a
+   * call from a visitor below that role even when this handle is non-`null`, so a low-privilege visitor can
+   * hold a handle whose `translate()` is a 403.
    *
    * @since 0.10.0
    */

@@ -51,8 +51,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.9.1")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.9.1") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.11.0")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.11.0") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -578,7 +578,13 @@ if (!ctx.locales().isContentLocale(locale)) {
 The browser's list is a hint. What arrives at your storage is input, and a row stored under a language
 nobody offers is invisible to every reader and to your own editor's tab strip.
 
-## Machine translation — `ctx.translation` (since 0.10.0)
+## Machine translation — `ctx.translation` (since 0.10.0; declaration since 0.11.0)
+
+**Declare it first.** Since 0.11.0 the handle is gated by your manifest as well as by the operator:
+
+```json
+"external": { "kinds": ["translation"], "usedBy": "podcaster" }
+```
 
 ```ts
 if (ctx.translation?.available()) {
@@ -593,9 +599,28 @@ if (translation != null && translation.available()) {
 }
 ```
 
-**`null` when the site admin configured no provider** — which is every site until somebody chooses one.
-Same shape as `schema`/`blobs`/`tags`, different decision: those are gated by *your manifest*, this by the
-*operator's* choice, and it can appear or disappear while your plugin is running. Do not cache the handle.
+**Two independent reasons for `null`, and you must handle both:** your manifest did not declare
+`external.kinds: ["translation"]`, or the site admin configured no provider — which is every site until
+somebody chooses one. They are deliberately indistinguishable at runtime: whether you declared is a static
+fact about a file you wrote, so a discriminator would be API surface for a question you can answer by
+opening `plugin.json`. **Staring at an unexpected `null`? Check the manifest before the admin panel.**
+
+Same shape as `schema`/`blobs`/`tags`, with one difference: half of this gate moves under a running plugin,
+because an admin can add or remove the provider at any time. Do not cache the handle.
+
+**`usedBy` is the lowest role that may trigger a call from your UI**, defaulting to `podcaster` — the same
+floor `data.writableBy` uses. It exists because a translate button in a browser is an endpoint that spends
+the operator's money on a metered API, and every other plugin write surface already has a floor. `anonymous`
+is legal and almost always wrong: ask for it only if you can say why an operator would want to pay for a
+stranger's translation. A non-null handle is not permission — the host enforces the floor at the call, so a
+visitor below it gets a **403** from a handle they are holding.
+
+**`usedBy` does not reach the backend.** `register()` runs at startup and `onSchedule` on a timer; there is
+no visitor and no role. On the Java side, declaring the kind is the whole gate.
+
+One floor for the whole plugin, not one per kind — with one kind, per-kind would be per-plugin with extra
+syntax. Should a later kind need its own, it arrives as a field that **narrows** this one and never widens
+it, so a manifest written today keeps meaning what it says.
 
 **The host owns the provider, the credentials and the cache.** You never call a translation service
 directly. That spares operators having to trust every plugin with an API key, and it means two plugins
@@ -630,6 +655,7 @@ export default defineManifest({
   slots: [{ scope: 'episode', element: 'sample-card', placement: 'main', visibleTo: 'anonymous' }],
   nav: [{ path: '', label: 'Sample', icon: 'star' }],
   data: { writableBy: 'podcaster', readableBy: 'anonymous' },
+  external: { kinds: ['translation'], usedBy: 'podcaster' },
 });
 ```
 
