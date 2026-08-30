@@ -166,13 +166,19 @@ public final class FakePluginContext implements PluginContext {
     }
 
     /**
-     * Wires a {@link Translation} into this context, standing in for a site whose admin selected a provider.
+     * Wires a {@link Translation} into this context, standing in for a plugin that declared
+     * {@code external.kinds: ["translation"]} on a site whose admin selected a provider.
      *
-     * <p>A chaining mutator, same as {@link #withTags(Tags)}. The default is {@code null} — the same
-     * {@code null} a plugin sees on a site that configured no provider, which is every site until an
-     * operator chooses one. See {@link FakeTranslation}.
+     * <p>A chaining mutator, same as {@link #withTags(Tags)}. The default is {@code null}, which since
+     * 0.11.0 stands in for <strong>either</strong> of the two reasons the host produces one: a manifest
+     * that never declared the kind, or an operator who configured no provider. This fake does not tell
+     * them apart because {@link PluginContext#translation()} does not either — a double that distinguished
+     * them would let a test assert something no plugin can observe in production. See
+     * {@link FakeTranslation}, and {@link FakeTranslation#unavailable()} for the third state: declared,
+     * configured, and gone by the time you call.
      *
-     * @param translation the translation surface, or {@code null} to go back to a site with none
+     * @param translation the translation surface, or {@code null} to go back to a plugin with no
+     *                    declaration, a site with no provider, or both
      * @return this instance, for chaining
      * @since 0.10.0
      */
@@ -182,7 +188,9 @@ public final class FakePluginContext implements PluginContext {
     }
 
     /**
-     * The translation surface this context is wired to, or {@code null} when none was supplied.
+     * The translation surface this context is wired to, or {@code null} when none was supplied — the same
+     * {@code null} a plugin sees when it declared no {@code external.translation} kind, when the site has
+     * no provider, or both.
      *
      * @return the translation surface, or {@code null}
      * @since 0.10.0

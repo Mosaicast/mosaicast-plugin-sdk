@@ -727,8 +727,19 @@ describe('the locale double', () => {
 });
 
 describe('the translation double', () => {
-  it('is absent by default, like every other operator-gated capability', () => {
+  it('is absent by default, like every other gated capability', () => {
     expect(makeMockCtx().translation).toBeNull();
+  });
+
+  it('gives the same null whichever of the two gates is shut', () => {
+    // Since 0.11.0 `ctx.translation` is null when the manifest declares no `external.kinds:
+    // ['translation']` *or* when the operator configured no provider. The contract keeps them
+    // indistinguishable on purpose, so a component cannot branch on which — and neither can this double.
+    const undeclared = makeMockCtx();
+    const unconfigured = makeMockCtx({ translation: null });
+
+    expect(undeclared.translation).toBeNull();
+    expect(unconfigured.translation).toBeNull();
   });
 
   it('marks the text and records what it was asked for', async () => {
@@ -755,5 +766,13 @@ describe('the translation double', () => {
     const translation = makeMockTranslation({ fail: apiError(429, { detail: 'slow down' }) });
 
     await expect(translation.translate({ text: 'Hello', to: 'nl' })).rejects.toMatchObject({ status: 429 });
+  });
+
+  it('can refuse a visitor below the declared usedBy floor', async () => {
+    // A non-null handle is not permission: `external.usedBy` is enforced by the host at the call, so a
+    // fan holding a handle a podcaster-floored plugin declared still gets a 403.
+    const translation = makeMockTranslation({ fail: apiError(403, { detail: 'below external.usedBy' }) });
+
+    await expect(translation.translate({ text: 'Hello', to: 'nl' })).rejects.toMatchObject({ status: 403 });
   });
 });

@@ -1,7 +1,81 @@
-# Migrating a plugin to `platformApi` 0.10.0
+# Migrating a plugin to `platformApi` 0.11.0
 
-Three migrations in one file. **On `0.9.x`?** Read the next section and stop. **On `0.8.x`?** Do
-[0.8.x → 0.9.0](#08x--090-the-release-that-came-out-of-using-the-contract) first, then work upward.
+Four migrations in one file. **On `0.10.x`?** Read the next section and stop. **On `0.9.x`?** Do
+[0.9.x → 0.10.0](#09x--0100-the-sites-languages-and-translation) first, then work upward.
+
+---
+
+# 0.10.x → 0.11.0: declaring what external services you use
+
+**This one you must do.** `platformApi` matches on `major.minor`, so a plugin declaring `0.10.x` is
+rejected by a `0.11.0` host. Re-declare, rebuild, reinstall.
+
+```diff
+  // plugin.json
+- "platformApi": "0.10.0",
++ "platformApi": "0.11.0",
+```
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.10.0")
++ implementation("dev.mosaicast:plugin-api:0.11.0")
+- "@mosaicast/plugin-sdk": "^0.10.0"
++ "@mosaicast/plugin-sdk": "^0.11.0"
+```
+
+## The one that will catch you: `ctx.translation` goes `null` until you declare
+
+**There is no compile error for this.** `translation` was already `TranslationClient | null`, so nothing
+in the type system changes — the handle simply becomes `null` at runtime, and you find out because a
+translate button stopped working. That is the worst shape a change can have, which is why it leads this
+section.
+
+If your plugin used `ctx.translation` or `ctx.translation()` on 0.10.0, add the block:
+
+```diff
+  // plugin.json
++ "external": { "kinds": ["translation"], "usedBy": "podcaster" }
+```
+
+Nothing else changes. Your existing null-check is already the right code — it now covers two reasons
+instead of one:
+
+1. **Your manifest did not ask** (the new gate).
+2. **The operator configured no provider** (the 0.10.0 gate), which is still every site by default.
+
+They are indistinguishable on purpose: whether you declared is a static fact about a file you wrote, so
+the contract does not spend a discriminator on it. **Unexpected `null`? Check the manifest before the
+admin panel.**
+
+## Choosing `usedBy`
+
+It is the lowest role that may trigger a call **from your UI**, and it defaults to `podcaster` — the same
+floor `data.writableBy` uses. Leave it alone unless you have a reason.
+
+```jsonc
+"external": { "kinds": ["translation"], "usedBy": "podcaster" }  // the default, spelled out
+"external": { "kinds": ["translation"], "usedBy": "fan" }        // fans may translate; you are paying for it
+"external": { "kinds": ["translation"], "usedBy": "anonymous" }  // legal, and almost always wrong
+```
+
+An external call spends the operator's money on a metered API. `anonymous` makes that an open spending
+endpoint reachable by anyone who can load the page — ask for it only if you can say why an operator would
+want to pay for a stranger's translation.
+
+Two things to know about how it behaves:
+
+- **A non-null handle is not permission.** The host enforces the floor at the call, so a visitor below it
+  holds a handle whose `translate()` rejects with **403**. Handle it like the 429 and 503 you already do.
+- **It does not reach your backend.** `register()` runs at startup and `onSchedule` on a timer — no
+  visitor, no role. On the Java side, declaring the kind is the whole gate, and `usedBy` is ignored.
+
+## What did *not* change
+
+`TranslationRequest`, `TranslationResult`, `TranslationClient`, `TranslationException`, `ctx.locale` and
+every test double keep their 0.10.0 shape. `FakePluginContext.withTranslation(...)` and
+`makeMockTranslation()` are unchanged — a `null` translation in a fake now stands in for either gate,
+which is exactly what a plugin observes in production. There is no new SDK type on the Java side: the
+manifest has never had one.
 
 ---
 

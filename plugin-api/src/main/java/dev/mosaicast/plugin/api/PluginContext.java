@@ -167,16 +167,33 @@ public interface PluginContext {
     Locales locales();
 
     /**
-     * Machine translation, or {@code null} when the site admin has configured no provider
-     * (ARCHITECTURE §12.7).
+     * Machine translation, or {@code null} (ARCHITECTURE §16, §12.7).
      *
-     * <p>{@code null} for the same reason {@link #schema()}, {@link #blobs()} and {@link #tags()} are — but
-     * on a different decision. Those three are gated by <em>your manifest</em>; this one is gated by the
-     * <em>operator's</em> choice, and it can appear or disappear while your plugin is running. Do not hold
-     * the handle across a scheduled run: ask again, and treat {@code null} as "this site does not do that"
-     * rather than as an error.
+     * <p><strong>Two independent reasons for {@code null}, and a plugin must handle both:</strong>
+     * <ol>
+     *   <li><strong>Your manifest did not ask.</strong> Its {@code external.kinds} does not contain
+     *       {@code "translation"}. Yours to fix, in your own {@code plugin.json}.</li>
+     *   <li><strong>The operator configured no provider.</strong> Which is every site until an admin
+     *       chooses one, and it can change back while your plugin is running.</li>
+     * </ol>
      *
-     * @return the translation surface, or {@code null} when no provider is configured
+     * <p>They are deliberately <em>indistinguishable at runtime</em>: one {@code null}, no discriminator.
+     * The first is a static fact about a file you wrote, so a plugin that wants to know can read its own
+     * manifest, and a method answering it would be API surface for a question the author already has the
+     * answer to. Staring at an unexpected {@code null}? Check the manifest before the admin panel.
+     *
+     * <p>{@code null} for the same reason {@link #schema()}, {@link #blobs()} and {@link #tags()} are: a
+     * capability that may not exist should be one the caller is made to notice. Unlike those three, half
+     * of this gate moves under a running plugin — so do not hold the handle across a scheduled run. Ask
+     * again, and treat {@code null} as "this site does not do that" rather than as an error.
+     *
+     * <p><strong>{@code external.usedBy} does not reach here.</strong> That floor governs who may trigger a
+     * call from the plugin's <em>browser</em> UI, and a backend has no visitor and no role: {@code register}
+     * runs at startup and {@link #onSchedule(java.time.Duration, Runnable)} on a timer. On this side,
+     * declaring the kind is the whole gate.
+     *
+     * @return the translation surface, or {@code null} when the manifest declares no {@code translation}
+     *         kind or no provider is configured
      * @since 0.10.0
      */
     Translation translation();

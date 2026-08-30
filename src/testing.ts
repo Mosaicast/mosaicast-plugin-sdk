@@ -924,10 +924,15 @@ export interface MockTranslationClient extends TranslationClient {
  * assertion says *that the component asked for Dutch*, which is the thing worth pinning. A double that
  * returned plausible Dutch would let a test pass while the component sent the wrong target language.
  *
+ * Passing it stands in for a plugin that declared `external.kinds: ['translation']` running on a site whose
+ * admin selected a provider — both gates open. Leaving `ctx.translation` at its `null` default is the other
+ * test, and the one more plugins get wrong.
+ *
  * ```ts
  * const ctx = makeMockCtx({ translation: makeMockTranslation() });
- * // …and for the failure path a component must handle:
+ * // …and for the failure paths a component must handle:
  * const angry = makeMockTranslation({ fail: apiError(429, { detail: 'slow down' }) });
+ * const refused = makeMockTranslation({ fail: apiError(403, { detail: 'below external.usedBy' }) });
  * ```
  *
  * @param opts `translate` replaces the marker, `providerId` and `fromCache` fill the result, and `fail`
@@ -1106,10 +1111,11 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
       available: () => [{ code: 'en', nativeName: 'English', isDefault: true }],
       content: () => [{ code: 'en', nativeName: 'English', isDefault: true }],
     },
-    // Null, like `tags`/`schema`/`blobs`: whether the site has a translation provider is the operator's
-    // decision, and a component written against one that is always there breaks on every site that
-    // configured none — which is every site by default. Pass {@link makeMockTranslation} when the test
-    // is about translating.
+    // Null, like `tags`/`schema`/`blobs`, and since 0.11.0 for either of two reasons the contract keeps
+    // indistinguishable: a manifest that never declared `external.kinds: ['translation']`, or an operator
+    // who configured no provider — which is every site by default. A component written against a
+    // translator that is always there breaks on both. Pass {@link makeMockTranslation} when the test is
+    // about translating; leaving it null is the test that you handled its absence.
     translation: null,
     progress: { get: () => Promise.resolve(null) },
     theme: DEFAULT_THEME,

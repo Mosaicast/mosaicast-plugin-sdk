@@ -7,7 +7,61 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.10.0] — unreleased
+## [0.11.0] — unreleased
+
+One manifest block, and a handle that now has **two** ways of being `null`. A minor bump, because
+`platformApi` matches on `major.minor` — every plugin re-declares and rebuilds.
+
+0.10.0 shipped `ctx.translation` ahead of core's implementation. Implementing it exposed a hole the
+contract could not express: the handle was gated **only** by the operator's provider choice, with no
+manifest declaration and no role floor. Harmless on a backend, which has no HTTP routes and calls at
+startup or on a timer. Not harmless in a browser, where `translate()` means anyone who can load the page
+can spend the operator's money on a metered API. Every other plugin write surface has a floor —
+`data.writableBy`, `tags.writesEpisodes`, `blobs` — and this one had none, while the host's rate limiter
+keys on kind and provider, so one plugin could exhaust a site's budget with nothing recording which.
+
+### Added
+
+- **`external` in the manifest** — `PluginExternalDeclaration` (TS): `kinds: ExternalServiceKind[]` and an
+  optional `usedBy` role floor. Typed on the same terms as `blobs` and `tags`: documentation the host
+  validates, not enforcement the SDK performs.
+  - **`kinds` is a list with one member today.** A plugin that later wants transcription adds an entry
+    rather than a second block; `ExternalServiceKind` is a closed union because a kind the host has no bean
+    for is not an unconfigured service, it is a name nothing answers to.
+  - **`usedBy` defaults to `podcaster`**, matching `data.writableBy`'s floor, and is **browser-side only** —
+    `register()` and `onSchedule` have no visitor and no role. `anonymous` is legal and almost always
+    wrong: a metered provider plus an anonymous floor is an open spending endpoint.
+  - One floor per plugin, not per kind. With one kind the two are the same thing spelled differently, and a
+    later per-kind value can only **narrow** this one, so a manifest written today keeps meaning what it
+    says.
+
+### Changed
+
+- **`ctx.translation` / `ctx.translation()` are now manifest-gated as well as operator-gated.** `null` when
+  `external.kinds` does not contain `'translation'`, **or** when the admin configured no provider. The two
+  reasons are deliberately **indistinguishable** — whether you declared is a static fact about a file you
+  wrote, so a runtime discriminator would be API surface for a question `plugin.json` already answers, and
+  a second nullability shape across four capability handles is the real cost. Rule of thumb for an
+  unexpected `null`: check the manifest before the admin panel.
+- **`translate()` can now reject with 403** when the visitor is below `usedBy`. A non-null handle is not
+  permission; the host enforces the floor at the call.
+
+### Migration
+
+**A silent behaviour change**, and the only one here: a plugin that used 0.10.0's ungated handle keeps
+compiling and gets `null` at runtime until it declares `external`. `translation` was already nullable, so
+no type error catches it — it surfaces as a button that stopped working. See `MIGRATION.md`.
+
+### Deviation flagged (not changed here)
+
+`docs/ARCHITECTURE.md` is read-only in this repo, synced from `mosaicast-core`. **§16 describes the
+operator half and never says a plugin must declare its use.** Proposed for core to amend and re-sync:
+
+> A plugin declares the kinds it uses in its manifest (`external.kinds`) and the lowest role that may
+> trigger a call from its UI (`external.usedBy`, default `podcaster`); an undeclared kind is `null` on the
+> plugin's context and 404 on its endpoint, independently of whether a provider is configured.
+
+## [0.10.0] — 2026-08-26
 
 Two additions, both about something plugins could not previously see: **what languages this site has**, and
 **whether it can translate**. A minor bump, because `platformApi` matches on `major.minor` — every plugin
