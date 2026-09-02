@@ -397,7 +397,8 @@ ctx.route.navigate('index', { replace: true });       // no back-button step (ta
   against the host's current router and is not part of the contract.
 - Pair it with `ShareMetadataProvider` (OpenGraph per subpath) and `SitemapProvider` on the backend so the
   URLs you navigate to also preview and index properly — and with `PageRouteProvider` (since 0.9.1) so the
-  ones that do *not* exist answer 404 instead of a 200 with a not-found view in it.
+  ones that do *not* exist answer 404 instead of a 200 with a not-found view in it. If your pages come in
+  more than one language, [say so](#saying-what-language-a-page-is-in-since-0120) (since 0.12.0).
 
 ### Reading the query, and matching a route (since 0.9.0)
 
@@ -737,6 +738,43 @@ var routes = new PageRouteProviderHarness(new WikiRoutes(store)).check("glossary
 assertEquals(List.of("glossary/tpyo"), routes.notFound());
 ```
 
+### Saying what language a page is in (since 0.12.0)
+
+A URL can now name a language — `?lang=de` (§12.7) — and `sitemap.xml` emits `hreflang` alternates with
+`x-default` on the bare URL. Before 0.12.0 a plugin could not join in, and the host **deliberately emitted
+no alternates** for plugin entries rather than assuming the site's UI languages apply to content it cannot
+read. Two components close that:
+
+```java
+// og:locale for this URL. null (the 3-arg constructor) = whatever the host resolved — most plugin pages.
+new OgMeta(page.title(), page.excerpt(), page.imageUrl(), "de");
+
+// locale code → the path that page is written in that language, loc itself included.
+var group = Map.of("en", "/p/wiki/article", "de", "/p/wiki/artikel");
+new SitemapUrl("/p/wiki/article", updatedAt, group);
+new SitemapUrl("/p/wiki/changelog", updatedAt);                     // nothing translated, as before
+```
+
+**A map of paths, not a list of locale codes**, for two reasons. A list cannot say what language `loc`
+*itself* is in and the host will not guess — hence the required self-entry, which the constructor enforces.
+And translations do not always live at one path: `/p/wiki/artikel` and `/p/wiki/article` are one group, and
+a list of codes has no way to link them. Render one path per language? Map every locale to the same `loc`.
+
+**The host still owns URL shape.** Values are paths, never full URLs and never carrying `?lang=` yourself;
+the host adds the parameter, leaves the site default **bare**, points `x-default` there, makes the group
+reciprocal, and confines every alternate to your own `/p/<pluginId>/` namespace exactly as it does `loc`.
+And an alternate is a **claim about content** — list a language only if that page is really written in it.
+Serving your default language to a reader who asked for German is a kindness; telling a crawler a
+translation exists and handing it the original is not.
+
+`SitemapProviderHarness` is the test, because the host's answer to anything it will not accept is to
+*drop* it — the provider still returns, and the pages just never appear:
+
+```java
+var sitemap = new SitemapProviderHarness("wiki", new WikiSitemap(store)).collect();
+assertTrue(sitemap.problems().isEmpty());       // outside the namespace, hand-written ?lang=, split groups
+```
+
 ## Logging — `ctx.logger()` / `ctx.log()` (since 0.4.0)
 
 ```java
@@ -907,8 +945,10 @@ first refusal in front of a podcaster.
 
 **The extension-point harnesses** (Java): `SearchProviderHarness` calls a provider once per role including
 anonymous; `UserDataHandlerHarness.eraseTwice(userId)` proves erasure survives the host's retry;
-`PageRouteProviderHarness.check(...)` answers which subpaths 404, always probing the plugin root. All three
-are shown under
+`PageRouteProviderHarness.check(...)` answers which subpaths 404, always probing the plugin root;
+`SitemapProviderHarness.collect()` (since 0.12.0) reports what the host would silently drop from your
+sitemap entries — a `loc` or an `hreflang` alternate outside your namespace, a hand-written `?lang=`, or one
+translation group declared two different ways. All four are shown under
 [Optional extension points](#optional-extension-points--searchprovider-userdatahandler-pagerouteprovider).
 
 ## Contributing

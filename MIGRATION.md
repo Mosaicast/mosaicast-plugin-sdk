@@ -1,7 +1,111 @@
-# Migrating a plugin to `platformApi` 0.11.0
+# Migrating a plugin to `platformApi` 0.12.0
 
-Four migrations in one file. **On `0.10.x`?** Read the next section and stop. **On `0.9.x`?** Do
-[0.9.x → 0.10.0](#09x--0100-the-sites-languages-and-translation) first, then work upward.
+Five migrations in one file. **On `0.11.x`?** Read the next section and stop. **On `0.10.x`?** Do
+[0.10.x → 0.11.0](#010x--0110-declaring-what-external-services-you-use) first, then work upward.
+
+---
+
+# 0.11.x → 0.12.0: saying what language your pages are in
+
+**This one you must do.** `platformApi` matches on `major.minor`, so a plugin declaring `0.11.x` is
+rejected by a `0.12.0` host. Re-declare, rebuild, reinstall.
+
+```diff
+  // plugin.json
+- "platformApi": "0.11.0",
++ "platformApi": "0.12.0",
+```
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.11.0")
++ implementation("dev.mosaicast:plugin-api:0.12.0")
+- "@mosaicast/plugin-sdk": "^0.11.0"
++ "@mosaicast/plugin-sdk": "^0.12.0"
+```
+
+**That is the whole migration for most plugins.** `OgMeta` and `SitemapUrl` each gained a component, which
+breaks binary compatibility — so you must rebuild — but the old shapes survive as real constructors, so
+there is nothing to edit:
+
+```java
+new OgMeta(title, description, imageUrl);       // still compiles: "whatever language the host resolved"
+new SitemapUrl(loc, lastModified);              // still compiles: no translation group, as before
+```
+
+You only have a code change if you deconstruct these records in a pattern (`case OgMeta(var t, var d, var
+i)`) or call a canonical constructor reflectively.
+
+## What the release adds, and why you might want it
+
+A page can now be requested as `?lang=de`, and `sitemap.xml` emits `hreflang` alternates with `x-default`
+on the bare URL. Until 0.12.0 a plugin could not join in: the host **deliberately emits no alternates** for
+plugin entries rather than assuming the site's UI languages apply to content it cannot read.
+
+### `OgMeta.locale` — if your page is in one fixed language
+
+Leave it `null` if your pages are written in whatever language the shell is showing; the host's
+request-resolved locale is already right, and that is most plugin pages. Say it if your page's text is in
+one language whoever asks for it:
+
+```java
+public Optional<OgMeta> metaFor(String subpath) {
+    var page = pages.find(slugOf(subpath));
+    return page.map(p -> new OgMeta(p.title(), p.excerpt(), p.imageUrl(), p.locale()));
+}
+```
+
+**It is a claim about the text in that record.** If you fell back to your default language because you had
+no translation for the requested locale, the honest value is your default's code — not the code that was
+asked for.
+
+### `SitemapUrl.alternates` — locale code → path
+
+```java
+var group = Map.of("en", "/p/wiki/article", "de", "/p/wiki/artikel");
+return List.of(
+        new SitemapUrl("/p/wiki/article", updatedAt, group),
+        new SitemapUrl("/p/wiki/artikel", updatedAt, group),
+        new SitemapUrl("/p/wiki/changelog", updatedAt));            // nothing translated
+```
+
+Three rules, and the first is enforced at construction:
+
+1. **The map must contain an entry pointing at `loc` itself.** Not redundancy — it is you naming the
+   language your own page is written in, which the host has no way to know and will not guess. Leave it out
+   and the constructor throws.
+2. **Values are paths, not URLs, and never carry `?lang=` yourself.** The host adds the parameter, leaves
+   the site default on the *bare* URL, points `x-default` there, and makes the group reciprocal. It also
+   confines every alternate to your own `/p/<pluginId>/` namespace, exactly as it does `loc`.
+3. **List a language only if that page is really written in it.** Serving your default language to a reader
+   who asked for German is a kindness to a visitor; telling a crawler a translation exists and handing it
+   the original is not.
+
+If you render **one path per language**, map every locale to the same `loc` — a map with one distinct
+value:
+
+```java
+new SitemapUrl(loc, updatedAt, Map.of("en", loc, "de", loc));
+```
+
+### Check it with `SitemapProviderHarness`
+
+The failures here are silent: the host *drops* what it will not accept, so the pages simply never appear.
+
+```java
+var sitemap = new SitemapProviderHarness("wiki", new WikiSitemap(store)).collect();
+
+assertTrue(sitemap.problems().isEmpty());                       // nothing dropped or contradicted
+assertEquals(List.of("de", "en"), sitemap.locales("/p/wiki/article"));
+```
+
+It catches the one thing no single entry can see: two entries in **one** group declaring **different**
+groups, which is what a half-updated slug map looks like.
+
+## What did *not* change
+
+`ShareMetadataProvider` and `SitemapProvider` keep their signatures — same methods, same return types.
+Nothing on the TypeScript side changed at all; `@mosaicast/plugin-sdk` moves to `0.12.0` because the two
+packages share one version anchor.
 
 ---
 

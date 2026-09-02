@@ -7,7 +7,68 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.0] — unreleased
+## [0.12.0] — 2026-09-02
+
+Two records gain a component so a plugin can say **what language its pages are in**. A minor bump, because
+`platformApi` matches on `major.minor` — every plugin re-declares and rebuilds.
+
+Core just gained per-locale URLs: a page can be requested as `?lang=de`, and `sitemap.xml` emits reciprocal
+`hreflang` alternates with `x-default` on the bare URL (§6.6, §12.7). **A plugin could not participate.**
+`OgMeta` had no locale, so a plugin's German page was announced with the site's default `og:locale`;
+`SitemapUrl` had no alternates, so a plugin's translation group was invisible. Core deliberately emits *no*
+alternates for plugin entries rather than assuming the site's UI languages apply to content it cannot read
+— the honest answer, and the reason this was blocking rather than cosmetic.
+
+### Added
+
+- **`OgMeta.locale`** — the language *this* title and description are written in (`de`, `pt-br`; trimmed
+  and lower-cased), or `null` for "whatever the host resolved for this request". Nullable because most
+  plugin pages are in the site's language and should not have to say so; a page written in one fixed
+  language says which, and `og:locale` stops depending on who scraped the link.
+- **`SitemapUrl.alternates`** — `Map<String, String>`, locale code → the path that page is written in that
+  language. Empty means "no translation group", which is what the host already assumed.
+  - **A map of paths, not a list of locale codes.** The cheaper shape — "this page exists in `de` and `en`",
+    host appends `?lang=de` — cannot say what language `loc` *itself* is in, and the host will not guess it
+    (§6.6). So the map **must** contain an entry pointing at `loc`; that entry is the plugin naming its own
+    page's language, and the canonical constructor enforces it. The second reason is expressiveness: a wiki
+    whose German article lives at `/p/wiki/artikel` and English one at `/p/wiki/article` has two paths in
+    one group, and a list of codes has no way to link them. A plugin that renders one path per language maps
+    every locale to the same `loc` and pays nothing for the choice.
+  - **The host still owns URL shape.** Values are *paths*, the same shape as `loc` — never full URLs, never
+    carrying `?lang=` yourself. The host adds the parameter, leaves the site default on the **bare** URL,
+    points `x-default` there, makes the group reciprocal, and confines every alternate to the plugin's own
+    `/p/<pluginId>/` namespace exactly as it does `loc`. Naming paths buys expressiveness, not reach.
+- **`SitemapProviderHarness`** (test kit) — collects a provider's entries and reports what the host would
+  drop or contradict: a `loc` or an alternate outside the namespace, a hand-written `?lang=`, a duplicated
+  location, and the one no single entry can see — two entries in **one** translation group declaring
+  **different** groups, which is what a half-updated slug map looks like.
+
+### Changed
+
+- **`OgMeta` and `SitemapUrl` are 4- and 3-component records.** Source compatibility is preserved by real
+  constructors for the old shapes — `OgMeta(title, description, imageUrl)` and `SitemapUrl(loc,
+  lastModified)` — because "the host decides" and "nothing translated" are the honest answers for most
+  plugin pages. Binary compatibility still breaks (the canonical constructor's signature changed), so the
+  upgrade is a manifest bump and a **rebuild**, with no code edits for anyone with nothing to declare.
+- `SitemapUrl` rejects a translation group that never names `loc`'s own language, a blank locale code or
+  path, and a locale listed twice. An alternate is a claim about content: list a language only if the page
+  at that path is really written in it. A default-language fallback served to a reader who asked for German
+  is a kindness to a visitor and a lie to a crawler.
+
+### Migration
+
+Manifest bump and rebuild. No compile break unless you match on `OgMeta`/`SitemapUrl` as record patterns or
+call their canonical constructors reflectively. See `MIGRATION.md`.
+
+### Specs
+
+`docs/ARCHITECTURE.md` needs no amendment — §6.6 already says the host emits no alternates for a
+`SitemapProvider` entry "unless the plugin declared them", and that is now a thing a plugin can do.
+
+`docs/BRIEF.md` §"Content – Java" is updated to the new signatures (normally read-only here; changed on the
+maintainer's instruction, since it described this repo's own contract and nothing else could correct it).
+
+## [0.11.0] — 2026-08-30
 
 One manifest block, and a handle that now has **two** ways of being `null`. A minor bump, because
 `platformApi` matches on `major.minor` — every plugin re-declares and rebuilds.
@@ -833,6 +894,9 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.12.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.12.0
+[0.11.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.11.0
+[0.10.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.10.0
 [0.9.1]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.9.1
 [0.9.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.8.0
