@@ -15,8 +15,8 @@ Exactly the interfaces from ARCHITECTURE §7.4 as pure contracts, no implementat
 - `DocStore` (get/put/query, hard-scoped via `Scope`), `SchemaStore`, `PluginConfig`, `FeedAccess`.
 - Value types: `Scope(ScopeType, id)` with `ScopeType ∈ {SITE,FEED,SEASON,EPISODE}`, `Access`, `DisplaySnapshot`, `Role`.
 - A **`platformApi` version constant** (SemVer) — single source for manifest compatibility.
-- **`ShareMetadataProvider`** (optional extension point, ARCHITECTURE §6.4/§7.4): `metaFor(subpath) → Optional<OgMeta(title, description, imageUrl?)>` — lets a plugin provide share metadata for its deep links under `/p/<id>/…`.
-- **`SitemapProvider`** (optional extension point, ARCHITECTURE §6.6/§7.4): `urls() → List<SitemapUrl(loc, lastModified?)>` — lets a plugin contribute its pages to the site's `sitemap.xml`.
+- **`ShareMetadataProvider`** (optional extension point, ARCHITECTURE §6.4/§7.4): `metaFor(subpath) → Optional<OgMeta(title, description, imageUrl?, locale?)>` — lets a plugin provide share metadata for its deep links under `/p/<id>/…`. `locale` is the language *that page* is written in (`og:locale` per URL, §6.4); `null` means "whatever the host resolved for this request".
+- **`SitemapProvider`** (optional extension point, ARCHITECTURE §6.6/§7.4): `urls() → List<SitemapUrl(loc, lastModified?, alternates?)>` — lets a plugin contribute its pages to the site's `sitemap.xml`. `alternates` is locale code → path, including an entry for `loc` itself, and is the only way a plugin's pages join the site's `hreflang` groups: the host emits none for a plugin entry unless the plugin declared them (§6.6).
 - No Spring/PF4J-specific dependencies beyond the `ExtensionPoint` marker (PF4J API as `compileOnly`/`api`, document the choice).
 
 ## Content – TypeScript (`@mosaicast/plugin-sdk`)

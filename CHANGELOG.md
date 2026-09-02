@@ -60,18 +60,13 @@ alternates for plugin entries rather than assuming the site's UI languages apply
 Manifest bump and rebuild. No compile break unless you match on `OgMeta`/`SitemapUrl` as record patterns or
 call their canonical constructors reflectively. See `MIGRATION.md`.
 
-### Deviation flagged (not changed here)
+### Specs
 
-`docs/ARCHITECTURE.md` already anticipates this — §6.6 says the host emits no alternates for a
-`SitemapProvider` entry "unless the plugin declared them", and that is now a thing a plugin can do. Nothing
-to amend there.
+`docs/ARCHITECTURE.md` needs no amendment — §6.6 already says the host emits no alternates for a
+`SitemapProvider` entry "unless the plugin declared them", and that is now a thing a plugin can do.
 
-`docs/BRIEF.md` is read-only in this repo and its §"Content – Java" still lists the pre-0.12.0 signatures:
-
-> `metaFor(subpath) → Optional<OgMeta(title, description, imageUrl?)>` … `urls() → List<SitemapUrl(loc,
-> lastModified?)>`
-
-Proposed: `OgMeta(title, description, imageUrl?, locale?)` and `SitemapUrl(loc, lastModified?, alternates?)`.
+`docs/BRIEF.md` §"Content – Java" is updated to the new signatures (normally read-only here; changed on the
+maintainer's instruction, since it described this repo's own contract and nothing else could correct it).
 
 ## [0.11.0] — 2026-08-30
 
