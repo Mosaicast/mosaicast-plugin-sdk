@@ -12,6 +12,10 @@ import java.util.List;
  *
  * <p>A plugin MAY implement this in addition to {@link PluginBackend}; the wiki does in v1. The host
  * calls {@link #urls()} when generating the dynamic sitemap and merges the results with core URLs.
+ *
+ * <p>Every returned {@code loc} — and, since 0.12.0, every path in {@link SitemapUrl#alternates()} — is
+ * confined to this plugin's {@code /p/<pluginId>/} namespace by the host; anything outside it is dropped
+ * rather than trusted, so a plugin cannot list, or claim a translation of, a URL that is not its own.
  */
 public interface SitemapProvider extends ExtensionPoint {
 

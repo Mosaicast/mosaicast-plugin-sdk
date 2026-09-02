@@ -31,7 +31,7 @@ import { makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.11.0');
+    expect(PLATFORM_API_VERSION).toBe('0.12.0');
   });
 });
 

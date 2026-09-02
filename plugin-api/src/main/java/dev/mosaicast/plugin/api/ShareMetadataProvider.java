@@ -13,6 +13,11 @@ import java.util.Optional;
  * <p>A plugin MAY implement this in addition to {@link PluginBackend}; the wiki does in v1 as the
  * reference. When the host serves a {@code /p/<pluginId>/…} URL it calls {@link #metaFor(String)} with
  * the subpath so link scrapers get meaningful OpenGraph tags for plugin content (e.g. a wiki page).
+ *
+ * <p>The call happens per request, and the request may name a language ({@code ?lang=<code>}, §12.7). If
+ * your page is written in whatever language the shell is showing, ignore that and let
+ * {@link OgMeta#locale()} stay {@code null}; if it is written in one fixed language, say which (since
+ * 0.12.0) so {@code og:locale} stops depending on who scraped the link.
  */
 public interface ShareMetadataProvider extends ExtensionPoint {
 
