@@ -1,7 +1,137 @@
-# Migrating a plugin to `platformApi` 0.13.0
+# Migrating a plugin to `platformApi` 0.14.0
 
-Six migrations in one file. **On `0.12.x`?** Read the next section and stop. **On `0.11.x`?** Do
-[0.11.x → 0.12.0](#011x--0120-saying-what-language-your-pages-are-in) first, then work upward.
+Seven migrations in one file. **On `0.13.x`?** Read the next section and stop. **On `0.12.x`?** Do
+[0.12.x → 0.13.0](#012x--0130-rendering-the-people-behind-the-uuids) first, then work upward.
+
+---
+
+# 0.13.x → 0.14.0: telling a user something happened
+
+**This one you must do.** `platformApi` matches on `major.minor`, so a plugin declaring `0.13.x` is
+rejected by a `0.14.0` host. Re-declare, rebuild, reinstall.
+
+```diff
+  // plugin.json
+- "platformApi": "0.13.0",
++ "platformApi": "0.14.0",
+```
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.13.0")
++ implementation("dev.mosaicast:plugin-api:0.14.0")
+- "@mosaicast/plugin-sdk": "^0.13.0"
++ "@mosaicast/plugin-sdk": "^0.14.0"
+```
+
+**That is the whole migration.** Nothing was removed or changed shape; `PluginContext` gained a method,
+but plugins consume that interface rather than implement it, and `FakePluginContext` implements the new
+one for you.
+
+## What the release adds, and why you might want it
+
+A plugin that finishes a long-running thing a user took part in — a bingo resolving — could only hope they
+came back and looked. Now it can say so:
+
+```diff
+  // plugin.json
++ "notifications": { "sends": true, "perUserPerDay": 5 },
+```
+
+```java
+// The backend, where nearly all real use lives — the thing worth announcing finishes on a timer.
+ctx.onSchedule(Duration.ofMinutes(15), () -> {
+    var participants = ctx.store().queryAcrossUsers("mark:").stream().map(OwnedDocEntry::userId).toList();
+    try {
+        List<UUID> told = ctx.notifier().send(participants,
+                new NotifyMessage(Map.of(
+                        "en", "Bingo resolved for S02E04",
+                        "de", "Bingo für S02E04 aufgelöst")).withLink("board/42"));
+        if (told.size() < participants.size()) ctx.logger().info("notified {}/{}", told.size(), participants.size());
+    } catch (NotificationException e) {
+        if (e.retryable()) return;   // over the cap — hold it, the next tick will do
+        throw new IllegalStateException("bad notification", e);
+    }
+});
+```
+
+```ts
+const notify = ctx.notify;
+if (!notify) return;                   // no `notifications` block in this plugin's manifest
+const told = await notify.send(participants, {
+  text: notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' }),   // your createPluginI18n catalogs
+  link: `board/${id}`,
+});
+```
+
+`perUserPerDay` is what you *ask* for; what you get is the operator's cap over it, as `blobs` quotas work.
+
+### The four rules that will catch you
+
+**1. You may only notify users you already hold `user`-scope data for.** Host-enforced against the same
+partitions `queryAcrossUsers` reads. Bingo may write to its participants because participants have rows;
+no plugin can reach a user who never touched it. There is no way to ask for more.
+
+**2. `send` tells you who actually got it — read the return value.** An ineligible or erased recipient is
+left out rather than failing the call, so a partial send is the normal case and the resolved list is the
+only way to see one:
+
+```ts
+const told = await notify.send(participants, msg);
+if (told.length < participants.length) prune(participants, told);
+```
+
+A plugin that ignores this and works from a stale list notifies nobody while looking perfectly healthy.
+
+**3. Send every language at once, not one sentence.** `NotifyMessage.text` is a `locale → sentence` map,
+because a notification written on a timer is read days later in whatever language the shell is set to
+*then*. The map **must contain `en`** — §12.7 makes English the one language a site cannot switch off, so
+it is the only fallback a reader is guaranteed to get. Use `notifyText(catalogs, key, params)` to build
+the map from the catalogs you already hand `createPluginI18n`; filling it by hand is where a plugin
+quietly ships one locale short. Interpolate before sending — there are no parameters on the wire.
+
+The limitation to know about: the language set is fixed at **send** time, so a language your operator adds
+next month shows English on notifications already written. Retention (§17.2) keeps that window short.
+
+(If you were reading the §17.1 draft: it specifies a translation `key`. Nothing in core can resolve one —
+plugin catalogs live in the frontend bundle and the bell renders on pages where that bundle never loads.
+See the CHANGELOG for the full trace.)
+
+**4. The cap is a real branch.** Java throws a checked `NotificationException`
+(`Reason.RATE_LIMITED`, `retryable()` true); TypeScript rejects with `PluginApiError` 429. A scheduled
+sender should **hold the batch for the next tick**, not drop it. An invalid `link` — off-site, or outside
+your own `/p/<pluginId>/` subtree — is `INVALID_LINK` / 400 and will fail the same way next time.
+
+There is **no read side**: you cannot list, count or mark an inbox, or learn whether anyone opened what you
+sent. And nothing here reaches email.
+
+### Test it against the refusals
+
+```java
+var ctx = new FakePluginContext();
+ctx.store().asUser(ana).put(Scope.user(), "mark:s2e04:b3", true);   // this is what makes Ana notifiable
+ctx.withNotifier(new FakeNotifier(ctx.store()).withPerUserPerDay(2));
+```
+
+```ts
+const notify = makeMockNotify({ notifiable: ['u-1'], perUserPerDay: 2 });
+const ctx = makeMockCtx({ notify });
+```
+
+`FakeNotifier` reads eligibility from the doc store rather than a list you seed, so it cannot drift from
+the host's rule — give a user a row and they become notifiable, exactly as they became a participant. The
+cap is off until you arm it. `ctx.notify` / `ctx.notifier()` default to `null` in both, so a test that
+never passes one keeps checking that your plugin survives a manifest with no `notifications` block.
+
+### Three places this SDK deviates from ARCHITECTURE §17
+
+Flagged rather than silently taken, because §17 is a proposal core has not implemented yet:
+
+- **Per-locale `text` instead of a translation `key`**, because nothing in core can resolve a plugin key:
+  its catalogs ship in the frontend bundle and the bell renders on pages that never load it.
+- **`send` returns the notified ids**, where §17.1 writes `Promise<void>` — which cannot express a partial
+  send, and the eligibility rule guarantees partial sends.
+- **The Java accessor is `ctx.notifier()`**, where §7.4 writes `notify()` — which cannot compile, since
+  `Object.notify()` is `final`. The TypeScript half is `ctx.notify` exactly as specified.
 
 ---
 

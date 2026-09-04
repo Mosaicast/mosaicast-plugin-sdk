@@ -7,6 +7,98 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-09-04
+
+A plugin can put a message in a user's **inbox**. A minor bump, because `platformApi` matches on
+`major.minor` — every plugin re-declares and rebuilds.
+
+**Core must pin `mosaicastSdk = "0.14.0"`.** §17 landed in core as a proposal only (`22e046f`), with no
+host implementation yet, so this release defines the contract core implements against rather than
+following one.
+
+A plugin that finished a long-running thing a user took part in — a bingo resolving, the case §17 was
+written for — could only hope they came back and looked. This is the first plugin surface that **writes
+into another user's view of the site**, so it is bounded twice over: the host delivers only to users the
+plugin already holds `USER`-scope data for (the same partitions `queryAcrossUsers` reads), and the rate
+limits are the host's rather than the plugin's.
+
+### Added
+
+- **`ctx.notify` / `ctx.notifier()`** — `NotifyClient.send(userIds, msg)` (TS) and
+  `Notifier.send(Collection<UUID>, NotifyMessage)` (Java). **`null` unless the manifest declares
+  `notifications`**, the same shape and reasoning as `blobs`, `tags` and `identity`.
+  - **Partial sends are visible.** `send` answers **who was actually notified** rather than resolving
+    `void`. An ineligible or erased recipient is left out instead of failing the call — one stale
+    participant must not cost the other forty-nine their notification, given how ordinary an erased
+    account is (§12.8) — and a write whose partial failure is invisible degrades in silence: a plugin
+    working from a stale participant list notifies nobody and looks exactly like one working perfectly.
+  - **There is no read side.** A plugin cannot list, count or mark an inbox, or learn whether anyone
+    opened what it sent. And nothing here reaches email — in-app only, per §17.
+- **`NotifyMessage`** — `text: Record<locale, string>` plus an optional `link`: **every language the
+  plugin can say it, sent up front**. A notification written on a timer is read days later in whatever
+  language the shell is set to by then, so one rendered sentence would freeze the language at send time
+  and break §12.7 on the surface where it is most obviously wrong. The map must contain **`en`**, because
+  §12.7 makes English the one language a site can never switch off and therefore the only safe terminal
+  fallback — requiring the site's *default* instead would refuse a plugin that does not ship that
+  language. Codes are trimmed and lower-cased; `text` is defensively copied so a caller reusing its map
+  cannot rewrite a message already sent. Java adds `NotifyMessage(String english)` for a monolingual
+  plugin, `textFor(locale)` (the shell's own lookup, so a test need not re-implement it) and `withLink`.
+  `link` is host-validated and internal-only.
+- **`notifyText(catalogs, key, params)`** (TS) — builds that map from the same catalogs you pass to
+  {@link createPluginI18n}, interpolating each language's template. Assembling it by hand is where a
+  plugin quietly ships one locale short: the catalogs say German, the inbox does not, and nobody notices
+  because English is a valid fallback. A locale whose catalog lacks the key is **left out** rather than
+  filled with the key itself — a reader is better served by English they understand than by
+  `bingo.resolved` in their own language slot.
+- **`NotificationException`** (Java) — checked, for the reason `TranslationException` is: a send refused
+  by the operator's cap is a routine outcome, not a bug, and a plugin that has not decided what to do
+  about it has one. `Reason.RATE_LIMITED` is `retryable()`; `INVALID_LINK` and `INVALID_MESSAGE` are not.
+  On the TS side the same failures arrive as `PluginApiError` 429 / 400.
+- **`notifications` in the manifest type** — `{ sends: boolean; perUserPerDay?: number }`, the number being
+  what the plugin *asks* for and the operator's cap what it gets. Typed for an author's editor only; the
+  **host remains the sole validator**.
+- **Test-kit doubles** (§13.5) — `FakeNotifier` (Java, wired via `FakePluginContext.withNotifier(…)`) and
+  `makeMockNotify` (TS). Both model the partial send. `FakeNotifier` reads eligibility **from the
+  `InMemoryDocStore`'s user partitions** rather than a hand-seeded list, so the rule cannot drift from the
+  host's — the way to make a user notifiable is to give them a row, which is also how they became a
+  participant. The cap is off until a test arms it (`withPerUserPerDay` / `perUserPerDay`), and an
+  ineligible recipient never consumes one. `ctx.notify` defaults to `null` in `makeMockCtx`.
+
+### Changed
+
+- Nothing. This release is purely additive; the bump is `platformApi`'s exact `major.minor` match.
+
+### Deviations from ARCHITECTURE §17 (flagged, not silently taken)
+
+- **`NotifyMessage` carries per-locale text, not a translation key.** §17.1 writes
+  `{ key, params?, link? }`, resolved "against the plugin's own locale bundle" — **and nothing can do
+  that.** Verified against core `master` (`7e0e130`): `PluginLocales` implements `Locales` only (which
+  languages the site offers), `/api/i18n/catalog/{code}` is gated on `registry.isUiLocale` and serves the
+  shell's own catalogs, and core's `PluginManifest` has no field naming a plugin catalog. A plugin's
+  strings live inside its **frontend bundle** (§12.7) and load when its Web Component mounts, while the
+  bell is shell chrome that renders on pages where that never happens — so a key would reach a reader as
+  the literal `bingo.resolved`. Sending every language keeps the property the key was there for (the
+  reader's *current* language wins, not the sender's) with nothing new to build. Its honest cost: the set
+  of languages is fixed at **send** time, so a language the operator adds later shows English on messages
+  already written. §17.2 retention keeps that window short. A key remains the better design and wants a
+  plugin catalog surface first — larger than the notification work it would serve.
+- **`send` returns the notified ids, not `void`.** §17.1 writes `Promise<void>`, which cannot express a
+  partial send — and the host's eligibility rule guarantees partial sends. See above.
+- **The Java accessor is `notifier()`, not `notify()`.** §7.4 writes the latter and it **cannot compile**:
+  `Object.notify()` is `final`, so no Java interface may declare that name. `notifier()` matches the type
+  and this context's own `logger()` / `translation()` / `config()`, and avoids reading like a getter for a
+  list of notifications. The TypeScript half is `ctx.notify`, exactly as §7.5 specifies — the two differ
+  because one of them has to.
+- **§17 specifies no failure vocabulary.** One is defined here (`NotificationException.Reason`, and 429 /
+  400 on the browser side) because a cap that fails silently is one a scheduled sender can never back off
+  from.
+
+### Migration
+
+Manifest bump and rebuild. No compile break in either language — `PluginContext` gained a method, but
+plugins consume that interface rather than implement it, and `FakePluginContext` implements the new one
+for you.
+
 ## [0.13.0] — 2026-09-04
 
 A plugin can turn the user UUIDs it already holds into **people**. A minor bump, because `platformApi`
@@ -952,6 +1044,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.14.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.11.0

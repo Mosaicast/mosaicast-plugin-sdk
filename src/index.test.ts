@@ -14,6 +14,7 @@ import {
   iconMask,
   isPluginApiError,
   matchRoute,
+  notifyText,
   PLATFORM_API_VERSION,
   resolveArtwork,
   SELF_SCOPE_ID,
@@ -31,7 +32,7 @@ import { makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.13.0');
+    expect(PLATFORM_API_VERSION).toBe('0.14.0');
   });
 });
 
@@ -243,6 +244,40 @@ describe('createPluginI18n', () => {
   });
 });
 
+describe('notifyText', () => {
+  const catalogs = {
+    en: { 'bingo.resolved': 'Bingo resolved for {{episode}}' },
+    de: { 'bingo.resolved': 'Bingo für {{episode}} aufgelöst' },
+    nl: { unrelated: 'iets anders' },
+  };
+
+  it('renders every language that has the key, interpolated', () => {
+    expect(notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' })).toEqual({
+      en: 'Bingo resolved for S02E04',
+      de: 'Bingo für S02E04 aufgelöst',
+    });
+  });
+
+  it('leaves out a language whose catalog lacks the key', () => {
+    // A slot holding `bingo.resolved` is worse than no slot: the English fallback it displaces is a real
+    // sentence, and a reader is better served by one they understand than by a key in their own language.
+    expect(notifyText(catalogs, 'bingo.resolved')).not.toHaveProperty('nl');
+  });
+
+  it('always produces en, because NotifyMessage requires it', () => {
+    // Falling back to the key rather than throwing: a missing string is not worth failing a scheduled
+    // send over, and the host would refuse a message with no English at all.
+    expect(notifyText({ de: { greeting: 'Hallo' } }, 'greeting')).toEqual({
+      de: 'Hallo',
+      en: 'greeting',
+    });
+  });
+
+  it('normalises locale codes the way NotifyMessage does', () => {
+    expect(notifyText({ EN: { k: 'Hi' }, ' De ': { k: 'Hallo' } }, 'k')).toEqual({ en: 'Hi', de: 'Hallo' });
+  });
+});
+
 describe('isPluginApiError', () => {
   it('recognises the shape the host produces, structurally', () => {
     const error = Object.assign(new Error('403'), { status: 403, problem: { detail: 'backendOwned' } });
@@ -384,6 +419,7 @@ describe('defineManifest', () => {
       data: { writableBy: 'podcaster', readableBy: 'anonymous' },
       tags: { readsVocabulary: true, writesEpisodes: false },
       identity: { resolvesUsers: true },
+      notifications: { sends: true, perUserPerDay: 5 },
       blobs: { maxFileBytes: 1024, quotaBytes: 4096, mimeTypes: ['image/png'] },
       external: { kinds: ['translation'], usedBy: 'podcaster' },
     });
@@ -393,6 +429,7 @@ describe('defineManifest', () => {
     expect(manifest.slots?.[0]?.element).toBe(manifest.frontend?.elements[0]);
     expect(manifest.tags?.writesEpisodes).toBe(false);
     expect(manifest.identity?.resolvesUsers).toBe(true);
+    expect(manifest.notifications?.perUserPerDay).toBe(5);
     expect(manifest.external?.kinds).toEqual(['translation']);
   });
 

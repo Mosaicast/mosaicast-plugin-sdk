@@ -51,8 +51,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.13.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.13.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.14.0")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.14.0") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -419,6 +419,63 @@ List<UserRef> people = ctx.users().resolve(ids);   // null unless the manifest d
 Test with `makeMockUsers({ 'u-1': 'Ana' })` / `FakeUsers`, both of which leave an unknown id out of the
 result instead of returning a hole — and `forget(id)` / `withoutUser(id)` stage the erased author.
 
+## Notifications — `ctx.notify` / `ctx.notifier()` (since 0.14.0)
+
+A plugin that finishes a long-running thing a user took part in — a bingo resolving — could only hope they
+came back and looked. This is how it says so. **It is the one plugin surface that writes into another
+user's view of the site**, so it is bounded twice over by the host.
+
+```json
+"notifications": { "sends": true, "perUserPerDay": 5 }
+```
+
+```java
+// The backend is where nearly all real use lives: the thing worth announcing finishes on a timer.
+List<UUID> told = ctx.notifier().send(participants,
+        new NotifyMessage(Map.of(
+                "en", "Bingo resolved for S02E04",
+                "de", "Bingo für S02E04 aufgelöst")).withLink("board/42"));
+```
+
+```ts
+const notify = ctx.notify;
+if (!notify) return;                       // no `notifications` block in this plugin's manifest
+const told = await notify.send(participants, {
+  text: notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' }),  // your createPluginI18n catalogs
+  link: `board/${id}`,
+});
+if (told.length < participants.length) prune(participants, told);
+```
+
+- **Only users you already hold `user`-scope data for.** Host-enforced against the same partitions
+  `queryAcrossUsers` reads — participants have rows, and no plugin can reach a user who never touched it.
+- **`send` answers who actually got it.** An ineligible or erased recipient is left out rather than
+  failing the call, so partial sends are normal and the return value is the only way to see one. A plugin
+  that ignores it and works from a stale participant list notifies nobody while looking perfectly healthy.
+- **Every language at once, not one sentence.** `NotifyMessage.text` is a `locale → sentence` map, because
+  a notification written on a timer is read days later in whatever language the shell is set to *then*. It
+  must contain `en` — §12.7 makes English the one language a site cannot switch off, so it is the only
+  fallback a reader is guaranteed to get. `notifyText(catalogs, key, params)` builds the map from the
+  catalogs you already hand `createPluginI18n`. The language set is fixed at **send** time, so a language
+  added later shows English on old notifications; §17.2 retention keeps that window short.
+- **The cap is a real branch.** Java throws a checked `NotificationException` (`RATE_LIMITED` is
+  `retryable()`); TypeScript rejects with `PluginApiError` 429. Hold the batch for the next tick rather
+  than dropping it. `link` is host-validated and internal-only — off-site is refused, because a
+  notification is chrome the site is speaking through.
+- **The rate limits are the host's**, and `perUserPerDay` is what you *ask* for — the operator caps it.
+- **No read side, and no email.** You cannot list, count or mark an inbox, or learn whether anyone opened
+  what you sent.
+
+> The Java accessor is **`notifier()`**, not `notify()` — `Object.notify()` is `final`, so no Java
+> interface can declare that name. The TypeScript half is `ctx.notify`. §17.1 also specifies a translation
+> `key` rather than per-locale text; nothing in core can resolve one, since a plugin's catalogs ship in its
+> frontend bundle and the bell renders on pages that never load it. See CHANGELOG 0.14.0 for all three
+> deviations from ARCHITECTURE §17, which core has not implemented yet.
+
+Test with `makeMockNotify({ notifiable, perUserPerDay })` / `FakeNotifier`. `FakeNotifier` reads
+eligibility from the doc store rather than a seeded list, so it cannot drift from the host's rule: give a
+user a row and they become notifiable, exactly as they became a participant.
+
 ## Deep links & navigation — `ctx.route` (navigate since 0.7.0)
 
 A plugin declaring a `page` slot owns the URL subtree `/p/<pluginId>/*`. The host hands it the subpath
@@ -707,6 +764,7 @@ export default defineManifest({
   nav: [{ path: '', label: 'Sample', icon: 'star' }],
   data: { writableBy: 'podcaster', readableBy: 'anonymous' },
   identity: { resolvesUsers: true },
+  notifications: { sends: true, perUserPerDay: 5 },
   external: { kinds: ['translation'], usedBy: 'podcaster' },
 });
 ```
@@ -993,8 +1051,11 @@ const ctx = makeMockCtx({ apiResponses: { 'get data/site/main/stats': apiError(4
 `{ writesEpisodes: true }`, and its `untagEpisode` leaves a `withFeedTag` assignment alone. `makeMockBlobs`
 enforces the ceilings and the allow-list. `makeMockUsers` / `FakeUsers` (since 0.13.0) leave an unresolvable
 id *out* of the result rather than returning a hole, so a component that reads the result positionally
-fails here instead of rendering `undefined` the first time somebody deletes their account. A component that
-has only ever met a permissive double meets its first refusal in front of a podcaster.
+fails here instead of rendering `undefined` the first time somebody deletes their account.
+`makeMockNotify` / `FakeNotifier` (since 0.14.0) notify nobody by default and refuse over the cap, and
+`FakeNotifier` takes eligibility from the doc store rather than a seeded list so it cannot be more
+permissive than the host. A component that has only ever met a permissive double meets its first refusal
+in front of a podcaster.
 
 **The extension-point harnesses** (Java): `SearchProviderHarness` calls a provider once per role including
 anonymous; `UserDataHandlerHarness.eraseTwice(userId)` proves erasure survives the host's retry;
