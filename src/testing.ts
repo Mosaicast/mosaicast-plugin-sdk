@@ -27,6 +27,8 @@ import type {
   PluginApiError,
   PluginContext,
   PluginRoute,
+  NotifyClient,
+  NotifyMessage,
   ProblemDetail,
   Role,
   SchemaClient,
@@ -765,6 +767,89 @@ export function makeMockUsers(
   };
 }
 
+/** One notification a {@link MockNotifyClient} delivered. @since 0.14.0 */
+export interface DeliveryRecord {
+  /** Who received it. */
+  userId: string;
+  /** What they were told. */
+  msg: NotifyMessage;
+}
+
+/** A {@link NotifyClient} double over a seeded set of notifiable users. @since 0.14.0 */
+export interface MockNotifyClient extends NotifyClient {
+  /** Every delivery, in send order — the assertion surface. */
+  readonly delivered: DeliveryRecord[];
+  /** What one recipient was told, in order. */
+  messagesFor(userId: string): NotifyMessage[];
+}
+
+/**
+ * A {@link NotifyClient} double that **models the partial send**.
+ *
+ * The host only delivers to users the plugin already holds `user`-scope data for, so a recipient outside
+ * `notifiable` is left out of the resolved array rather than failing the call. That is the behaviour a
+ * permissive double would hide, and hiding it means a plugin working from a stale participant list
+ * notifies nobody and looks exactly like one working perfectly.
+ *
+ * The send cap is off unless you pass `perUserPerDay`, so the branch where the host refuses gets
+ * exercised on purpose rather than never — it rejects with the same 429 the host answers, which a
+ * scheduled sender is supposed to hold its batch on.
+ *
+ * ```ts
+ * const notify = makeMockNotify({ notifiable: ['u-1'] });
+ * const ctx = makeMockCtx({ notify });
+ *
+ * const told = await notify.send(['u-1', 'u-stranger'], { key: 'bingo.resolved' });
+ * // told === ['u-1'] — the stranger has no rows, so the host would not have reached them either
+ * ```
+ *
+ * @param opts `notifiable` lists the users this plugin holds data for (nobody by default, which is the
+ *             case a component has to survive); `perUserPerDay` arms the cap
+ * @returns a recording notify double
+ * @since 0.14.0
+ */
+export function makeMockNotify(
+  opts: { notifiable?: string[]; perUserPerDay?: number } = {},
+): MockNotifyClient {
+  const eligible = new Set(opts.notifiable ?? []);
+  const delivered: DeliveryRecord[] = [];
+  const sentPerUser = new Map<string, number>();
+  const cap = opts.perUserPerDay;
+
+  return {
+    delivered,
+    messagesFor: (userId) => delivered.filter((d) => d.userId === userId).map((d) => d.msg),
+    send: (userIds, msg) => {
+      if (msg.key.trim() === '') {
+        // The host refuses it; a double that accepted it would let a component ship an empty inbox row.
+        return Promise.reject(toApiError(apiError(400, { detail: 'key must not be blank' }), 'post', 'notify'));
+      }
+      // Deduplicated, like the host: naming the same participant twice sends one notification, and must
+      // not count twice against their cap either.
+      const recipients = [...new Set(userIds)];
+      if (cap != null) {
+        for (const id of recipients) {
+          // Only an eligible recipient consumes a send — checking before filtering would refuse a call
+          // the host would have let through.
+          if (eligible.has(id) && (sentPerUser.get(id) ?? 0) >= cap) {
+            return Promise.reject(
+              toApiError(apiError(429, { detail: `over the cap of ${cap} for ${id}` }), 'post', 'notify'),
+            );
+          }
+        }
+      }
+      const told: string[] = [];
+      for (const id of recipients) {
+        if (!eligible.has(id)) continue;
+        delivered.push({ userId: id, msg });
+        sentPerUser.set(id, (sentPerUser.get(id) ?? 0) + 1);
+        told.push(id);
+      }
+      return Promise.resolve(told);
+    },
+  };
+}
+
 /** A {@link DocClient} storing in memory, keyed by resolved partition path. @since 0.9.0 */
 export interface MockDocClient extends DocClient {
   /** What is currently stored, keyed `"<partition>/<key>"` — e.g. `"data/user/me/marks"`. */
@@ -1100,12 +1185,12 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api' | 'r
  * `docs` and `feeds` are real doubles ({@link makeMockDocs}, {@link makeMockFeeds}), because every plugin
  * has both — the empty ones give a component nothing to render, which is the case worth defaulting to.
  *
- * `episodeLabels` is deliberately **absent** by default, and `schema`, `blobs`, `tags` and `users` are
- * **`null`**. All five are optional on the real context — the host supplies labels partially, and gives a
- * plugin no schema, no blob store, no tag surface and no user directory unless its manifest declares them
- * — so a component that needs any of them has to survive its absence. The mock makes you face that unless
- * you pass one in ({@link makeMockSchema}, {@link makeMockBlobs}, {@link makeMockTags},
- * {@link makeMockUsers}).
+ * `episodeLabels` is deliberately **absent** by default, and `schema`, `blobs`, `tags`, `users` and
+ * `notify` are **`null`**. All six are optional on the real context — the host supplies labels partially,
+ * and gives a plugin no schema, no blob store, no tag surface, no user directory and no notifier unless
+ * its manifest declares them — so a component that needs any of them has to survive its absence. The mock
+ * makes you face that unless you pass one in ({@link makeMockSchema}, {@link makeMockBlobs},
+ * {@link makeMockTags}, {@link makeMockUsers}, {@link makeMockNotify}).
  *
  * **`route` is the one override that merges** rather than replacing: `route: { path: 'kraken' }` pins the
  * subpath and keeps the recording `navigate`. Everything else is all-or-nothing, because everything else
@@ -1139,6 +1224,10 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     // declares `identity`, and the default keeps an existing test exercising the undeclared case. Pass
     // {@link makeMockUsers} when the test is about rendering people.
     users: null,
+    // Null, and the sharpest edge of the five: `ctx.notify` writes into somebody else's site, so a
+    // component written against a notifier that is always there both breaks on every plugin that
+    // declares no `notifications` block and hides the one surface an operator is most likely to withhold.
+    notify: null,
     // Null, not a client: a plugin only has one if its manifest declares `storage.schema`, and a
     // component written against a schema that is always there never handles the doc-store case.
     schema: null,

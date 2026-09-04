@@ -7,6 +7,76 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-09-04
+
+A plugin can put a message in a user's **inbox**. A minor bump, because `platformApi` matches on
+`major.minor` — every plugin re-declares and rebuilds.
+
+**Core must pin `mosaicastSdk = "0.14.0"`.** §17 landed in core as a proposal only (`22e046f`), with no
+host implementation yet, so this release defines the contract core implements against rather than
+following one.
+
+A plugin that finished a long-running thing a user took part in — a bingo resolving, the case §17 was
+written for — could only hope they came back and looked. This is the first plugin surface that **writes
+into another user's view of the site**, so it is bounded twice over: the host delivers only to users the
+plugin already holds `USER`-scope data for (the same partitions `queryAcrossUsers` reads), and the rate
+limits are the host's rather than the plugin's.
+
+### Added
+
+- **`ctx.notify` / `ctx.notifier()`** — `NotifyClient.send(userIds, msg)` (TS) and
+  `Notifier.send(Collection<UUID>, NotifyMessage)` (Java). **`null` unless the manifest declares
+  `notifications`**, the same shape and reasoning as `blobs`, `tags` and `identity`.
+  - **Partial sends are visible.** `send` answers **who was actually notified** rather than resolving
+    `void`. An ineligible or erased recipient is left out instead of failing the call — one stale
+    participant must not cost the other forty-nine their notification, given how ordinary an erased
+    account is (§12.8) — and a write whose partial failure is invisible degrades in silence: a plugin
+    working from a stale participant list notifies nobody and looks exactly like one working perfectly.
+  - **There is no read side.** A plugin cannot list, count or mark an inbox, or learn whether anyone
+    opened what it sent. And nothing here reaches email — in-app only, per §17.
+- **`NotifyMessage`** — a translation `key`, optional `params`, optional `link`. **Never a rendered
+  string**: a notification written on a timer is read days later in whatever language the shell is set to,
+  so a rendered sentence fixes the language at send time and breaks §12.7 on the surface where it is most
+  obviously wrong. Java gets convenience constructors (`NotifyMessage(key)`,
+  `NotifyMessage(key, params)`) and `withLink`; `params` are defensively copied so a caller reusing its
+  map cannot rewrite a message already sent. `link` is host-validated and internal-only.
+- **`NotificationException`** (Java) — checked, for the reason `TranslationException` is: a send refused
+  by the operator's cap is a routine outcome, not a bug, and a plugin that has not decided what to do
+  about it has one. `Reason.RATE_LIMITED` is `retryable()`; `INVALID_LINK` and `INVALID_MESSAGE` are not.
+  On the TS side the same failures arrive as `PluginApiError` 429 / 400.
+- **`notifications` in the manifest type** — `{ sends: boolean; perUserPerDay?: number }`, the number being
+  what the plugin *asks* for and the operator's cap what it gets. Typed for an author's editor only; the
+  **host remains the sole validator**.
+- **Test-kit doubles** (§13.5) — `FakeNotifier` (Java, wired via `FakePluginContext.withNotifier(…)`) and
+  `makeMockNotify` (TS). Both model the partial send. `FakeNotifier` reads eligibility **from the
+  `InMemoryDocStore`'s user partitions** rather than a hand-seeded list, so the rule cannot drift from the
+  host's — the way to make a user notifiable is to give them a row, which is also how they became a
+  participant. The cap is off until a test arms it (`withPerUserPerDay` / `perUserPerDay`), and an
+  ineligible recipient never consumes one. `ctx.notify` defaults to `null` in `makeMockCtx`.
+
+### Changed
+
+- Nothing. This release is purely additive; the bump is `platformApi`'s exact `major.minor` match.
+
+### Deviations from ARCHITECTURE §17 (flagged, not silently taken)
+
+- **`send` returns the notified ids, not `void`.** §17.1 writes `Promise<void>`, which cannot express a
+  partial send — and the host's eligibility rule guarantees partial sends. See above.
+- **The Java accessor is `notifier()`, not `notify()`.** §7.4 writes the latter and it **cannot compile**:
+  `Object.notify()` is `final`, so no Java interface may declare that name. `notifier()` matches the type
+  and this context's own `logger()` / `translation()` / `config()`, and avoids reading like a getter for a
+  list of notifications. The TypeScript half is `ctx.notify`, exactly as §7.5 specifies — the two differ
+  because one of them has to.
+- **§17 specifies no failure vocabulary.** One is defined here (`NotificationException.Reason`, and 429 /
+  400 on the browser side) because a cap that fails silently is one a scheduled sender can never back off
+  from.
+
+### Migration
+
+Manifest bump and rebuild. No compile break in either language — `PluginContext` gained a method, but
+plugins consume that interface rather than implement it, and `FakePluginContext` implements the new one
+for you.
+
 ## [0.13.0] — 2026-09-04
 
 A plugin can turn the user UUIDs it already holds into **people**. A minor bump, because `platformApi`
@@ -952,6 +1022,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.14.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.11.0

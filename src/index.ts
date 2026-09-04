@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.13.0' as const;
+export const PLATFORM_API_VERSION = '0.14.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -1436,6 +1436,115 @@ export interface UserDirectory {
 }
 
 /**
+ * What a notification says, as a translation key rather than a sentence (ARCHITECTURE §17.1).
+ *
+ * **A key and parameters, never a rendered string.** You do not know which language the recipient reads
+ * in — a notification is usually written on a backend timer, and the person may open the site three days
+ * later with the shell in German. A rendered string fixes the language at send time, which is how a site
+ * that carefully translates everything ends up with an inbox that is English. Send `bingo.resolved` and
+ * the shell resolves it against your own locale bundle when it draws the inbox.
+ *
+ * The consequence worth stating plainly: **a key with no entry in your bundle has nothing to fall back
+ * to.** Ship the key in every locale you ship a UI for.
+ *
+ * @since 0.14.0
+ */
+export interface NotifyMessage {
+  /** The translation key, resolved against this plugin's locale bundle. Must not be blank. */
+  key: string;
+  /**
+   * Values substituted into the resolved string.
+   *
+   * *Values*, not sentences — a slug, a count, an episode title — and **not translated**, because the
+   * host has no way to know which of them are prose. Keep personal data out: a notification is stored
+   * until it is read and then until retention expires (ARCHITECTURE §17.2).
+   */
+  params?: Record<string, string>;
+  /**
+   * Where the notification points when clicked, or omitted for one that goes nowhere.
+   *
+   * **Internal targets only**, host-validated: a path of the shape {@link PluginLinks} produces
+   * (`/episodes/kraken`), or a subpath of your own `/p/<pluginId>/` subtree, bare (`article/kraken`) or
+   * fully qualified. An off-site link is refused — a notification is chrome the site is speaking
+   * through, and a plugin that can aim it anywhere can phish the site's own users in the site's own
+   * voice.
+   */
+  link?: string;
+}
+
+/**
+ * Puts a message in a user's inbox — the frontend half of the Java `Notifier` (ARCHITECTURE §17).
+ *
+ * `ctx.notify` is **`null`** unless the manifest declares a `notifications` block, mirroring `ctx.users`,
+ * `ctx.tags`, `ctx.schema` and `ctx.blobs`:
+ *
+ * ```json
+ * "notifications": { "sends": true, "perUserPerDay": 5 }
+ * ```
+ *
+ * `perUserPerDay` is what you *ask* for; what you get is the operator's cap over it, exactly as `blobs`
+ * quotas work.
+ *
+ * **Most real use is on the backend**, where `ctx.notifier()` is the twin of this — the thing worth
+ * announcing usually finishes on a timer rather than in somebody's browser. Reach for this one when a
+ * visitor's own action is what the other participants need to hear about.
+ *
+ * ## The one surface that writes into somebody else's site
+ *
+ * Everything else a plugin touches is its own scope or the current visitor's. This puts text in front of
+ * a person who did not ask for it, so the host draws two lines you cannot move:
+ *
+ * - **You may only notify users you already hold `user`-scope data for.** Enforced against the same
+ *   partitions the backend's `queryAcrossUsers` reads: bingo may write to its participants because
+ *   participants have rows, and no plugin can reach a user who never touched it.
+ * - **The rate limits are the host's** — per recipient per window, plus a ceiling across all recipients.
+ *   A limit a plugin enforces is a limit a plugin can drop, so there is no counter here to read.
+ *
+ * There is **no read side**: you cannot list, count or mark an inbox, and cannot learn whether anyone
+ * opened what you sent. And nothing here reaches email — this is in-app only.
+ *
+ * ```ts
+ * const notify = ctx.notify;
+ * if (!notify) return;                        // no `notifications` block in this plugin's manifest
+ *
+ * const told = await notify.send(participants, {
+ *   key: 'bingo.resolved',
+ *   params: { episode: 'S02E04' },
+ *   link: `board/${boardId}`,                 // your own subtree; the host validates it
+ * });
+ * if (told.length < participants.length) prunePartnerList(participants, told);
+ * ```
+ *
+ * @since 0.14.0
+ */
+export interface NotifyClient {
+  /**
+   * Sends one notification to each of the given users, and resolves with who actually got it.
+   *
+   * **Ineligible recipients are left out, not rejected.** An id you hold no `user`-scope data for, or one
+   * belonging to an account erased or pseudonymised since you stored it (ARCHITECTURE §12.8), is simply
+   * absent from the resolved array — one stale participant does not cost the other forty-nine their
+   * notification, which is what an all-or-nothing call would do given how ordinary an erased account is.
+   *
+   * **So the return value is the point.** This is a write, and a write whose partial failure is invisible
+   * degrades in silence: a plugin working from a stale participant list notifies nobody and looks exactly
+   * like one working perfectly. Compare what came back against what you asked for when the difference
+   * means something.
+   *
+   * Duplicate ids are notified once; an empty array sends nothing and resolves empty rather than
+   * rejecting.
+   *
+   * @param userIds the users to notify
+   * @param msg     what to tell them — a key and parameters, never a rendered sentence
+   * @returns the ids actually notified, in no guaranteed order and with ineligible ones left out
+   * @throws PluginApiError 429 when the send cap is exhausted — hold the batch and try on a later tick
+   *         rather than dropping it; 400 when the message or its `link` is one the host will not draw,
+   *         which is a bug in your code and will fail the same way next time
+   */
+  send(userIds: string[], msg: NotifyMessage): Promise<string[]>;
+}
+
+/**
  * The consent gate for anything that stores data on the visitor's device or talks to a third party
  * (ARCHITECTURE §12.5).
  *
@@ -1743,6 +1852,38 @@ export interface PluginIdentityDeclaration {
 }
 
 /**
+ * The shape of your manifest's `notifications` block — whether this plugin may put messages in users'
+ * inboxes, and how many it is asking for (ARCHITECTURE §17).
+ *
+ * **Documentation for your editor, not enforcement**, on the same terms as {@link PluginDataDeclaration}:
+ * the host reads your `plugin.json` and is the sole validator. Typed because this is the block an
+ * operator most needs to read before installing — it is the one plugin surface that writes into another
+ * user's view of the site.
+ *
+ * ```ts
+ * const notifications: PluginNotificationsDeclaration = { sends: true, perUserPerDay: 5 };
+ * ```
+ *
+ * @since 0.14.0
+ */
+export interface PluginNotificationsDeclaration {
+  /**
+   * Whether this plugin sends notifications at all.
+   *
+   * Declaring the block is what makes `ctx.notify` non-`null`; without it the handle is `null` and the
+   * endpoint 404s.
+   */
+  sends: boolean;
+  /**
+   * How many notifications per user per day this plugin is **asking** for.
+   *
+   * What it gets is the operator's cap over that number, exactly as `blobs` quotas work — so ask for what
+   * the plugin actually needs and expect less. Omit it to take whatever the install's default is.
+   */
+  perUserPerDay?: number;
+}
+
+/**
  * One entry of `slots[]`: which component the host mounts, where, and for whom (ARCHITECTURE §7.3).
  *
  * @since 0.9.0
@@ -1935,6 +2076,8 @@ export interface PluginManifest {
   tags?: PluginTagsDeclaration;
   /** Opt-in resolution of user ids to people. Absent means `ctx.users` is `null`. */
   identity?: PluginIdentityDeclaration;
+  /** Opt-in sending of notifications. Absent means `ctx.notify` is `null`. */
+  notifications?: PluginNotificationsDeclaration;
   /** Opt-in use of admin-configured third-party services. Absent means `ctx.translation` is `null`. */
   external?: PluginExternalDeclaration;
   /** Config fields core renders as an admin form; plugins never build their own config UI. */
@@ -2142,6 +2285,26 @@ export interface PluginContext {
    * @since 0.13.0
    */
   users: UserDirectory | null;
+  /**
+   * Puts a message in a user's inbox, or **`null`** when the manifest declares no `notifications` block
+   * (ARCHITECTURE §17).
+   *
+   * The frontend half of the Java `ctx.notifier()`, `null` for the same reason `users`, `tags`, `schema`
+   * and `blobs` are. **Most real use is on the backend** — the thing worth announcing usually finishes on
+   * a timer, not in somebody's browser — so reach for this one when a visitor's own action is what the
+   * other participants need to hear about.
+   *
+   * This is the one plugin surface that writes into another user's view of the site, and it is bounded
+   * twice over: only users you already hold `user`-scope data for, and rate limits that are the host's
+   * rather than yours. See {@link NotifyClient}.
+   *
+   * **The Java accessor is `ctx.notifier()`, not `ctx.notify()`** — `Object.notify()` is `final`, so no
+   * Java interface can declare that name. The two halves differ here because one of them has to; this
+   * side is `ctx.notify` as ARCHITECTURE §7.5 specifies.
+   *
+   * @since 0.14.0
+   */
+  notify: NotifyClient | null;
   /**
    * Read access to this plugin's provisioned relational tables, or **`null`** when the manifest declares
    * no `storage.schema` (ARCHITECTURE §7.6).

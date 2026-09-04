@@ -13,6 +13,7 @@ import {
   makeMockFeeds,
   makeMockSchema,
   makeMockTags,
+  makeMockNotify,
   makeMockTranslation,
   makeMockUsers,
 } from './testing.js';
@@ -610,6 +611,82 @@ describe('makeMockUsers', () => {
     // exercising it.
     expect(makeMockCtx().users).toBeNull();
     expect(makeMockCtx({ users: makeMockUsers() }).users).not.toBeNull();
+  });
+});
+
+describe('makeMockNotify', () => {
+  it('notifies a participant and records what they were told', async () => {
+    const notify = makeMockNotify({ notifiable: ['u-1'] });
+    const msg = { key: 'bingo.resolved', params: { episode: 'S02E04' } };
+
+    const told = await notify.send(['u-1'], msg);
+
+    expect(told).toEqual(['u-1']);
+    expect(notify.messagesFor('u-1')).toEqual([msg]);
+    expect(notify.delivered).toEqual([{ userId: 'u-1', msg }]);
+  });
+
+  it('leaves out somebody the plugin holds no data for', async () => {
+    const notify = makeMockNotify({ notifiable: ['u-1'] });
+
+    const told = await notify.send(['u-1', 'u-stranger'], { key: 'bingo.resolved' });
+
+    // The partial send: one stale participant does not cost the other their notification, and the
+    // resolved array is the only way a component can tell.
+    expect(told).toEqual(['u-1']);
+    expect(notify.messagesFor('u-stranger')).toEqual([]);
+  });
+
+  it('notifies nobody by default, which is the case a component must survive', async () => {
+    await expect(makeMockNotify().send(['u-1'], { key: 'x' })).resolves.toEqual([]);
+  });
+
+  it('notifies each recipient once', async () => {
+    const notify = makeMockNotify({ notifiable: ['u-1'] });
+
+    const told = await notify.send(['u-1', 'u-1', 'u-1'], { key: 'bingo.resolved' });
+
+    expect(told).toEqual(['u-1']);
+    expect(notify.messagesFor('u-1')).toHaveLength(1);
+  });
+
+  it('rejects with 429 over the per-user cap', async () => {
+    const notify = makeMockNotify({ notifiable: ['u-1'], perUserPerDay: 2 });
+    await notify.send(['u-1'], { key: 'one' });
+    await notify.send(['u-1'], { key: 'two' });
+
+    const err = await notify.send(['u-1'], { key: 'three' }).catch((e: unknown) => e);
+
+    expect(isPluginApiError(err) && err.status).toBe(429);
+    expect(notify.messagesFor('u-1')).toHaveLength(2);
+  });
+
+  it('does not let an ineligible recipient consume the cap', async () => {
+    const notify = makeMockNotify({ notifiable: ['u-1'], perUserPerDay: 1 });
+
+    // Never delivered to, so they cannot use up a send the host would not have made.
+    await notify.send(['u-stranger'], { key: 'one' });
+    await notify.send(['u-stranger'], { key: 'two' });
+
+    await expect(notify.send(['u-1'], { key: 'three' })).resolves.toEqual(['u-1']);
+  });
+
+  it('rejects a blank key with the host\'s 400', async () => {
+    const err = await makeMockNotify({ notifiable: ['u-1'] })
+      .send(['u-1'], { key: '  ' })
+      .catch((e: unknown) => e);
+
+    expect(isPluginApiError(err) && err.status).toBe(400);
+  });
+
+  it('resolves an empty send to an empty array rather than rejecting', async () => {
+    await expect(makeMockNotify({ notifiable: ['u-1'] }).send([], { key: 'x' })).resolves.toEqual([]);
+  });
+
+  it('is null on the context unless a test supplies one', () => {
+    // The undeclared-manifest case — and `notify` is the surface an operator is most likely to withhold.
+    expect(makeMockCtx().notify).toBeNull();
+    expect(makeMockCtx({ notify: makeMockNotify() }).notify).not.toBeNull();
   });
 });
 

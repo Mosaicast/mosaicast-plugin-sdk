@@ -6,6 +6,7 @@ package dev.mosaicast.plugin.testkit;
 import dev.mosaicast.plugin.api.DocStore;
 import dev.mosaicast.plugin.api.FeedAccess;
 import dev.mosaicast.plugin.api.Locales;
+import dev.mosaicast.plugin.api.Notifier;
 import dev.mosaicast.plugin.api.PluginBlobs;
 import dev.mosaicast.plugin.api.PluginConfig;
 import dev.mosaicast.plugin.api.PluginContext;
@@ -40,6 +41,7 @@ public final class FakePluginContext implements PluginContext {
     private final RecordingLogger logger = new RecordingLogger(LOGGER_NAME);
     private Tags tags;
     private Users users;
+    private Notifier notifier;
     private Locales locales = FakeLocales.englishOnly();
     private Translation translation;
     private int scheduledCount;
@@ -172,6 +174,43 @@ public final class FakePluginContext implements PluginContext {
     @Override
     public Users users() {
         return users;
+    }
+
+    /**
+     * Wires a {@link Notifier} into this context, standing in for a manifest that declares a
+     * {@code notifications} block.
+     *
+     * <p>A chaining mutator, for the reason {@link #withTags(Tags)} spells out. The default is
+     * {@code null} — what a plugin that never declared {@code notifications} sees from the host.
+     *
+     * <p>{@link FakeNotifier} decides who may be notified by reading a doc store's user partitions, as
+     * the host does, so hand it <strong>this context's own</strong> store or it will answer about
+     * partitions the plugin under test never wrote:
+     *
+     * <pre>{@code
+     * var ctx = new FakePluginContext();
+     * ctx.withNotifier(new FakeNotifier(ctx.store()));
+     * }</pre>
+     *
+     * @param notifier the notification surface, or {@code null} to go back to a plugin that declares none
+     * @return this instance, for chaining
+     * @since 0.14.0
+     */
+    public FakePluginContext withNotifier(Notifier notifier) {
+        this.notifier = notifier;
+        return this;
+    }
+
+    /**
+     * The notification surface this context is wired to, or {@code null} when none was supplied — the
+     * same {@code null} a plugin that declares no {@code notifications} block sees from the host.
+     *
+     * @return the notifier, or {@code null}
+     * @since 0.14.0
+     */
+    @Override
+    public Notifier notifier() {
+        return notifier;
     }
 
     /**

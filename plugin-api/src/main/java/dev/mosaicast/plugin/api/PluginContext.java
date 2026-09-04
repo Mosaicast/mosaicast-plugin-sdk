@@ -176,6 +176,35 @@ public interface PluginContext {
     Users users();
 
     /**
+     * Puts a message in a user's inbox, for plugins that declare a {@code notifications} block in their
+     * manifest (ARCHITECTURE §17).
+     *
+     * <p>{@code null} without the declaration, exactly as with {@link #schema()}, {@link #blobs()},
+     * {@link #tags()} and {@link #users()}. Declare it when your plugin finishes something a user took
+     * part in and has no way to tell them — a bingo resolving, the case §17 was written for.
+     *
+     * <p>This is the <strong>one surface that writes into another user's experience</strong>; everything
+     * else a plugin touches is its own scope or the current visitor's. So it is bounded twice over: the
+     * host will only deliver to users this plugin already holds {@link ScopeType#USER}-scope data for, and
+     * the rate limits are the host's rather than the plugin's. See {@link Notifier}.
+     *
+     * <p>Expect to call it from {@link #onSchedule(Duration, Runnable)} — the thing worth announcing
+     * usually finishes on a timer, not in somebody's browser.
+     *
+     * <p><strong>Named {@code notifier()}, not {@code notify()}.</strong> ARCHITECTURE §7.4 writes the
+     * latter, and it cannot exist: {@code Object.notify()} is {@code final}, so no Java interface can
+     * declare that name. The type name is what the rest of this context uses anyway
+     * ({@link #logger()}, {@link #translation()}, {@link #config()}), and it avoids reading like a getter
+     * for a list of notifications — there is no read side (§17.1). The <em>TypeScript</em> half is
+     * {@code ctx.notify}, as specified; the languages differ here because one of them has to.
+     *
+     * @return the notifier, or {@code null} when the manifest declares no {@code notifications} block
+     *         (most plugins)
+     * @since 0.14.0
+     */
+    Notifier notifier();
+
+    /**
      * Which languages this site has, and which content may be authored in (ARCHITECTURE §12.7).
      *
      * <p>Always present — a site always has at least English. Read it when you need it: an admin edits these
