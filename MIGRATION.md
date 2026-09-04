@@ -43,7 +43,9 @@ ctx.onSchedule(Duration.ofMinutes(15), () -> {
     var participants = ctx.store().queryAcrossUsers("mark:").stream().map(OwnedDocEntry::userId).toList();
     try {
         List<UUID> told = ctx.notifier().send(participants,
-                new NotifyMessage("bingo.resolved", Map.of("episode", "S02E04")).withLink("board/42"));
+                new NotifyMessage(Map.of(
+                        "en", "Bingo resolved for S02E04",
+                        "de", "Bingo für S02E04 aufgelöst")).withLink("board/42"));
         if (told.size() < participants.size()) ctx.logger().info("notified {}/{}", told.size(), participants.size());
     } catch (NotificationException e) {
         if (e.retryable()) return;   // over the cap — hold it, the next tick will do
@@ -55,7 +57,10 @@ ctx.onSchedule(Duration.ofMinutes(15), () -> {
 ```ts
 const notify = ctx.notify;
 if (!notify) return;                   // no `notifications` block in this plugin's manifest
-const told = await notify.send(participants, { key: 'bingo.resolved', link: `board/${id}` });
+const told = await notify.send(participants, {
+  text: notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' }),   // your createPluginI18n catalogs
+  link: `board/${id}`,
+});
 ```
 
 `perUserPerDay` is what you *ask* for; what you get is the operator's cap over it, as `blobs` quotas work.
@@ -77,11 +82,19 @@ if (told.length < participants.length) prune(participants, told);
 
 A plugin that ignores this and works from a stale list notifies nobody while looking perfectly healthy.
 
-**3. Send a key, never a sentence.** `NotifyMessage` carries a translation key and parameters, resolved
-against *your* locale bundle when the inbox is drawn — because a notification written on a timer is read
-days later in whatever language the shell is set to. **A key with no entry in your bundle has nothing to
-fall back to**, so ship it in every locale you ship a UI for. Parameters are values (a slug, a count), are
-not translated, and should carry no personal data.
+**3. Send every language at once, not one sentence.** `NotifyMessage.text` is a `locale → sentence` map,
+because a notification written on a timer is read days later in whatever language the shell is set to
+*then*. The map **must contain `en`** — §12.7 makes English the one language a site cannot switch off, so
+it is the only fallback a reader is guaranteed to get. Use `notifyText(catalogs, key, params)` to build
+the map from the catalogs you already hand `createPluginI18n`; filling it by hand is where a plugin
+quietly ships one locale short. Interpolate before sending — there are no parameters on the wire.
+
+The limitation to know about: the language set is fixed at **send** time, so a language your operator adds
+next month shows English on notifications already written. Retention (§17.2) keeps that window short.
+
+(If you were reading the §17.1 draft: it specifies a translation `key`. Nothing in core can resolve one —
+plugin catalogs live in the frontend bundle and the bell renders on pages where that bundle never loads.
+See the CHANGELOG for the full trace.)
 
 **4. The cap is a real branch.** Java throws a checked `NotificationException`
 (`Reason.RATE_LIMITED`, `retryable()` true); TypeScript rejects with `PluginApiError` 429. A scheduled
@@ -109,10 +122,12 @@ the host's rule — give a user a row and they become notifiable, exactly as the
 cap is off until you arm it. `ctx.notify` / `ctx.notifier()` default to `null` in both, so a test that
 never passes one keeps checking that your plugin survives a manifest with no `notifications` block.
 
-### Two places this SDK deviates from ARCHITECTURE §17
+### Three places this SDK deviates from ARCHITECTURE §17
 
 Flagged rather than silently taken, because §17 is a proposal core has not implemented yet:
 
+- **Per-locale `text` instead of a translation `key`**, because nothing in core can resolve a plugin key:
+  its catalogs ship in the frontend bundle and the bell renders on pages that never load it.
 - **`send` returns the notified ids**, where §17.1 writes `Promise<void>` — which cannot express a partial
   send, and the eligibility rule guarantees partial sends.
 - **The Java accessor is `ctx.notifier()`**, where §7.4 writes `notify()` — which cannot compile, since

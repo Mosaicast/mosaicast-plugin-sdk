@@ -38,7 +38,8 @@ class FakeNotifierTest {
     void notifiesAParticipant() throws Exception {
         InMemoryDocStore store = storeWithAna();
         FakeNotifier notifier = new FakeNotifier(store);
-        NotifyMessage msg = new NotifyMessage("bingo.resolved", Map.of("episode", "S02E04"));
+        NotifyMessage msg = new NotifyMessage(
+                Map.of("en", "Bingo resolved for S02E04", "de", "Bingo für S02E04 aufgelöst"));
 
         List<UUID> told = notifier.send(List.of(ANA), msg);
 
@@ -51,7 +52,7 @@ class FakeNotifierTest {
     void leavesOutSomebodyThePluginHoldsNoDataFor() throws Exception {
         FakeNotifier notifier = new FakeNotifier(storeWithAna());
 
-        List<UUID> told = notifier.send(List.of(ANA, STRANGER), new NotifyMessage("bingo.resolved"));
+        List<UUID> told = notifier.send(List.of(ANA, STRANGER), new NotifyMessage("Bingo resolved"));
 
         // The partial send: one stale participant does not cost the other their notification, and the
         // return value is the only way a plugin can tell.
@@ -69,14 +70,14 @@ class FakeNotifierTest {
         store.asUser(STRANGER).put(Scope.user(), "mark:s2e04:b4", true);
 
         assertEquals(Set.of(ANA, STRANGER), notifier.notifiable());
-        assertEquals(List.of(ANA, STRANGER), notifier.send(List.of(ANA, STRANGER), new NotifyMessage("x")));
+        assertEquals(List.of(ANA, STRANGER), notifier.send(List.of(ANA, STRANGER), new NotifyMessage("Resolved")));
     }
 
     @Test
     void notifiesEachRecipientOnce() throws Exception {
         FakeNotifier notifier = new FakeNotifier(storeWithAna());
 
-        List<UUID> told = notifier.send(List.of(ANA, ANA, ANA), new NotifyMessage("bingo.resolved"));
+        List<UUID> told = notifier.send(List.of(ANA, ANA, ANA), new NotifyMessage("Bingo resolved"));
 
         assertEquals(List.of(ANA), told);
         assertEquals(1, notifier.messagesFor(ANA).size());
@@ -85,11 +86,11 @@ class FakeNotifierTest {
     @Test
     void refusesTheSendOverThePerUserCap() throws Exception {
         FakeNotifier notifier = new FakeNotifier(storeWithAna()).withPerUserPerDay(2);
-        notifier.send(List.of(ANA), new NotifyMessage("one"));
-        notifier.send(List.of(ANA), new NotifyMessage("two"));
+        notifier.send(List.of(ANA), new NotifyMessage("First"));
+        notifier.send(List.of(ANA), new NotifyMessage("Second"));
 
         NotificationException thrown = assertThrows(NotificationException.class,
-                () -> notifier.send(List.of(ANA), new NotifyMessage("three")));
+                () -> notifier.send(List.of(ANA), new NotifyMessage("Third")));
 
         assertEquals(NotificationException.Reason.RATE_LIMITED, thrown.reason());
         // Retryable, which is what tells a scheduled sender to hold the batch rather than drop it.
@@ -102,10 +103,10 @@ class FakeNotifierTest {
         FakeNotifier notifier = new FakeNotifier(storeWithAna()).withPerUserPerDay(1);
 
         // The stranger is never delivered to, so they cannot use up a send the host would not have made.
-        notifier.send(List.of(STRANGER), new NotifyMessage("one"));
-        notifier.send(List.of(STRANGER), new NotifyMessage("two"));
+        notifier.send(List.of(STRANGER), new NotifyMessage("First"));
+        notifier.send(List.of(STRANGER), new NotifyMessage("Second"));
 
-        assertEquals(List.of(ANA), notifier.send(List.of(ANA), new NotifyMessage("three")));
+        assertEquals(List.of(ANA), notifier.send(List.of(ANA), new NotifyMessage("Third")));
     }
 
     @Test
@@ -113,7 +114,7 @@ class FakeNotifierTest {
         FakeNotifier notifier = new FakeNotifier(storeWithAna());
 
         for (int i = 0; i < 50; i++) {
-            notifier.send(List.of(ANA), new NotifyMessage("spam"));
+            notifier.send(List.of(ANA), new NotifyMessage("Again"));
         }
 
         assertEquals(50, notifier.messagesFor(ANA).size());
@@ -124,7 +125,7 @@ class FakeNotifierTest {
     void anEmptySendDeliversNothingRatherThanFailing() throws Exception {
         FakeNotifier notifier = new FakeNotifier(storeWithAna());
 
-        assertEquals(List.of(), notifier.send(List.of(), new NotifyMessage("bingo.resolved")));
+        assertEquals(List.of(), notifier.send(List.of(), new NotifyMessage("Bingo resolved")));
         assertEquals(List.of(), notifier.delivered());
     }
 
@@ -134,9 +135,9 @@ class FakeNotifierTest {
         List<UUID> withNull = new ArrayList<>();
         withNull.add(null);
 
-        assertThrows(NullPointerException.class, () -> notifier.send(null, new NotifyMessage("x")));
+        assertThrows(NullPointerException.class, () -> notifier.send(null, new NotifyMessage("Resolved")));
         assertThrows(NullPointerException.class, () -> notifier.send(List.of(ANA), null));
-        assertThrows(NullPointerException.class, () -> notifier.send(withNull, new NotifyMessage("x")));
+        assertThrows(NullPointerException.class, () -> notifier.send(withNull, new NotifyMessage("Resolved")));
     }
 
     @Test
@@ -149,7 +150,7 @@ class FakeNotifierTest {
         ctx.store().asUser(ANA).put(Scope.user(), "mark:s2e04:b3", true);
         ctx.withNotifier(new FakeNotifier(ctx.store()));
 
-        assertEquals(List.of(ANA), ctx.notifier().send(List.of(ANA, STRANGER), new NotifyMessage("x")));
+        assertEquals(List.of(ANA), ctx.notifier().send(List.of(ANA, STRANGER), new NotifyMessage("Resolved")));
         assertNull(ctx.withNotifier(null).notifier());
     }
 }

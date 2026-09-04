@@ -34,12 +34,22 @@ limits are the host's rather than the plugin's.
     working from a stale participant list notifies nobody and looks exactly like one working perfectly.
   - **There is no read side.** A plugin cannot list, count or mark an inbox, or learn whether anyone
     opened what it sent. And nothing here reaches email — in-app only, per §17.
-- **`NotifyMessage`** — a translation `key`, optional `params`, optional `link`. **Never a rendered
-  string**: a notification written on a timer is read days later in whatever language the shell is set to,
-  so a rendered sentence fixes the language at send time and breaks §12.7 on the surface where it is most
-  obviously wrong. Java gets convenience constructors (`NotifyMessage(key)`,
-  `NotifyMessage(key, params)`) and `withLink`; `params` are defensively copied so a caller reusing its
-  map cannot rewrite a message already sent. `link` is host-validated and internal-only.
+- **`NotifyMessage`** — `text: Record<locale, string>` plus an optional `link`: **every language the
+  plugin can say it, sent up front**. A notification written on a timer is read days later in whatever
+  language the shell is set to by then, so one rendered sentence would freeze the language at send time
+  and break §12.7 on the surface where it is most obviously wrong. The map must contain **`en`**, because
+  §12.7 makes English the one language a site can never switch off and therefore the only safe terminal
+  fallback — requiring the site's *default* instead would refuse a plugin that does not ship that
+  language. Codes are trimmed and lower-cased; `text` is defensively copied so a caller reusing its map
+  cannot rewrite a message already sent. Java adds `NotifyMessage(String english)` for a monolingual
+  plugin, `textFor(locale)` (the shell's own lookup, so a test need not re-implement it) and `withLink`.
+  `link` is host-validated and internal-only.
+- **`notifyText(catalogs, key, params)`** (TS) — builds that map from the same catalogs you pass to
+  {@link createPluginI18n}, interpolating each language's template. Assembling it by hand is where a
+  plugin quietly ships one locale short: the catalogs say German, the inbox does not, and nobody notices
+  because English is a valid fallback. A locale whose catalog lacks the key is **left out** rather than
+  filled with the key itself — a reader is better served by English they understand than by
+  `bingo.resolved` in their own language slot.
 - **`NotificationException`** (Java) — checked, for the reason `TranslationException` is: a send refused
   by the operator's cap is a routine outcome, not a bug, and a plugin that has not decided what to do
   about it has one. `Reason.RATE_LIMITED` is `retryable()`; `INVALID_LINK` and `INVALID_MESSAGE` are not.
@@ -60,6 +70,18 @@ limits are the host's rather than the plugin's.
 
 ### Deviations from ARCHITECTURE §17 (flagged, not silently taken)
 
+- **`NotifyMessage` carries per-locale text, not a translation key.** §17.1 writes
+  `{ key, params?, link? }`, resolved "against the plugin's own locale bundle" — **and nothing can do
+  that.** Verified against core `master` (`7e0e130`): `PluginLocales` implements `Locales` only (which
+  languages the site offers), `/api/i18n/catalog/{code}` is gated on `registry.isUiLocale` and serves the
+  shell's own catalogs, and core's `PluginManifest` has no field naming a plugin catalog. A plugin's
+  strings live inside its **frontend bundle** (§12.7) and load when its Web Component mounts, while the
+  bell is shell chrome that renders on pages where that never happens — so a key would reach a reader as
+  the literal `bingo.resolved`. Sending every language keeps the property the key was there for (the
+  reader's *current* language wins, not the sender's) with nothing new to build. Its honest cost: the set
+  of languages is fixed at **send** time, so a language the operator adds later shows English on messages
+  already written. §17.2 retention keeps that window short. A key remains the better design and wants a
+  plugin catalog surface first — larger than the notification work it would serve.
 - **`send` returns the notified ids, not `void`.** §17.1 writes `Promise<void>`, which cannot express a
   partial send — and the host's eligibility rule guarantees partial sends. See above.
 - **The Java accessor is `notifier()`, not `notify()`.** §7.4 writes the latter and it **cannot compile**:

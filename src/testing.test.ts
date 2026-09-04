@@ -12,8 +12,8 @@ import {
   makeMockDocs,
   makeMockFeeds,
   makeMockSchema,
-  makeMockTags,
   makeMockNotify,
+  makeMockTags,
   makeMockTranslation,
   makeMockUsers,
 } from './testing.js';
@@ -617,7 +617,7 @@ describe('makeMockUsers', () => {
 describe('makeMockNotify', () => {
   it('notifies a participant and records what they were told', async () => {
     const notify = makeMockNotify({ notifiable: ['u-1'] });
-    const msg = { key: 'bingo.resolved', params: { episode: 'S02E04' } };
+    const msg = { text: { en: 'Bingo resolved', de: 'Bingo aufgelöst' } };
 
     const told = await notify.send(['u-1'], msg);
 
@@ -629,7 +629,7 @@ describe('makeMockNotify', () => {
   it('leaves out somebody the plugin holds no data for', async () => {
     const notify = makeMockNotify({ notifiable: ['u-1'] });
 
-    const told = await notify.send(['u-1', 'u-stranger'], { key: 'bingo.resolved' });
+    const told = await notify.send(['u-1', 'u-stranger'], { text: { en: 'Bingo resolved' } });
 
     // The partial send: one stale participant does not cost the other their notification, and the
     // resolved array is the only way a component can tell.
@@ -638,13 +638,13 @@ describe('makeMockNotify', () => {
   });
 
   it('notifies nobody by default, which is the case a component must survive', async () => {
-    await expect(makeMockNotify().send(['u-1'], { key: 'x' })).resolves.toEqual([]);
+    await expect(makeMockNotify().send(['u-1'], { text: { en: 'Resolved' } })).resolves.toEqual([]);
   });
 
   it('notifies each recipient once', async () => {
     const notify = makeMockNotify({ notifiable: ['u-1'] });
 
-    const told = await notify.send(['u-1', 'u-1', 'u-1'], { key: 'bingo.resolved' });
+    const told = await notify.send(['u-1', 'u-1', 'u-1'], { text: { en: 'Bingo resolved' } });
 
     expect(told).toEqual(['u-1']);
     expect(notify.messagesFor('u-1')).toHaveLength(1);
@@ -652,10 +652,10 @@ describe('makeMockNotify', () => {
 
   it('rejects with 429 over the per-user cap', async () => {
     const notify = makeMockNotify({ notifiable: ['u-1'], perUserPerDay: 2 });
-    await notify.send(['u-1'], { key: 'one' });
-    await notify.send(['u-1'], { key: 'two' });
+    await notify.send(['u-1'], { text: { en: 'First' } });
+    await notify.send(['u-1'], { text: { en: 'Second' } });
 
-    const err = await notify.send(['u-1'], { key: 'three' }).catch((e: unknown) => e);
+    const err = await notify.send(['u-1'], { text: { en: 'Third' } }).catch((e: unknown) => e);
 
     expect(isPluginApiError(err) && err.status).toBe(429);
     expect(notify.messagesFor('u-1')).toHaveLength(2);
@@ -665,22 +665,22 @@ describe('makeMockNotify', () => {
     const notify = makeMockNotify({ notifiable: ['u-1'], perUserPerDay: 1 });
 
     // Never delivered to, so they cannot use up a send the host would not have made.
-    await notify.send(['u-stranger'], { key: 'one' });
-    await notify.send(['u-stranger'], { key: 'two' });
+    await notify.send(['u-stranger'], { text: { en: 'First' } });
+    await notify.send(['u-stranger'], { text: { en: 'Second' } });
 
-    await expect(notify.send(['u-1'], { key: 'three' })).resolves.toEqual(['u-1']);
+    await expect(notify.send(['u-1'], { text: { en: 'Third' } })).resolves.toEqual(['u-1']);
   });
 
-  it('rejects a blank key with the host\'s 400', async () => {
+  it('rejects a message with no English, which is the only guaranteed fallback', async () => {
     const err = await makeMockNotify({ notifiable: ['u-1'] })
-      .send(['u-1'], { key: '  ' })
+      .send(['u-1'], { text: { de: 'Nur Deutsch' } })
       .catch((e: unknown) => e);
 
     expect(isPluginApiError(err) && err.status).toBe(400);
   });
 
   it('resolves an empty send to an empty array rather than rejecting', async () => {
-    await expect(makeMockNotify({ notifiable: ['u-1'] }).send([], { key: 'x' })).resolves.toEqual([]);
+    await expect(makeMockNotify({ notifiable: ['u-1'] }).send([], { text: { en: 'Resolved' } })).resolves.toEqual([]);
   });
 
   it('is null on the context unless a test supplies one', () => {

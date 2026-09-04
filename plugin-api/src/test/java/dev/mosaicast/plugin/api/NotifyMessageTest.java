@@ -6,61 +6,97 @@ package dev.mosaicast.plugin.api;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-/** Tests {@link NotifyMessage} — the validation, and the copy that keeps a sent message from mutating. */
+/**
+ * Tests {@link NotifyMessage} — the English requirement, the reader's-language lookup, and the copy that
+ * keeps a sent message from mutating under the host.
+ */
 class NotifyMessageTest {
 
-    @Test
-    void theShortFormsFillInTheRest() {
-        NotifyMessage bare = new NotifyMessage("bingo.resolved");
-        assertEquals(Map.of(), bare.params());
-        assertNull(bare.link());
+    private static final Map<String, String> BILINGUAL =
+            Map.of("en", "Bingo resolved", "de", "Bingo aufgelöst");
 
-        NotifyMessage withParams = new NotifyMessage("bingo.resolved", Map.of("episode", "S02E04"));
-        assertEquals(Map.of("episode", "S02E04"), withParams.params());
-        assertNull(withParams.link());
+    @Test
+    void carriesEveryLanguageItWasGiven() {
+        NotifyMessage msg = new NotifyMessage(BILINGUAL);
+
+        assertEquals(BILINGUAL, msg.text());
+        assertNull(msg.link());
     }
 
     @Test
-    void nullParamsBecomeAnEmptyMap() {
-        // So a caller never has to null-check what it reads back, and the host never has to either.
-        assertEquals(Map.of(), new NotifyMessage("k", null, null).params());
+    void picksTheReadersLanguageAndFallsBackToEnglish() {
+        NotifyMessage msg = new NotifyMessage(BILINGUAL);
+
+        assertEquals("Bingo aufgelöst", msg.textFor("de"));
+        assertEquals("Bingo resolved", msg.textFor("en"));
+        // The whole point of shipping every locale: a reader in a language the plugin does not have still
+        // gets a sentence rather than a blank row.
+        assertEquals("Bingo resolved", msg.textFor("nl"));
+        assertEquals("Bingo resolved", msg.textFor(null));
+        assertEquals("Bingo resolved", msg.textFor("  "));
     }
 
     @Test
-    void copiesTheParamsItWasHandedIn() {
+    void normalisesLocaleCodesTheWayTheRestOfTheContractDoes() {
+        NotifyMessage msg = new NotifyMessage(Map.of("EN", "Resolved", " De ", "Aufgelöst"));
+
+        assertEquals(Map.of("en", "Resolved", "de", "Aufgelöst"), msg.text());
+        assertEquals("Aufgelöst", msg.textFor("DE"));
+    }
+
+    @Test
+    void theEnglishOnlyFormIsTheHonestShapeForAMonolingualPlugin() {
+        NotifyMessage msg = new NotifyMessage("Bingo resolved");
+
+        assertEquals(Map.of("en", "Bingo resolved"), msg.text());
+        assertEquals("Bingo resolved", msg.textFor("de"));
+    }
+
+    @Test
+    void insistsOnEnglish() {
+        // §12.7: English is the one language a site cannot switch off, so it is the only fallback a
+        // reader is guaranteed to understand. A German-only message renders blank for everyone else.
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+                () -> new NotifyMessage(Map.of("de", "Bingo aufgelöst")));
+
+        assertTrue(thrown.getMessage().contains("en"), thrown.getMessage());
+    }
+
+    @Test
+    void refusesAnEmptyOrBlankMessage() {
+        assertThrows(IllegalArgumentException.class, () -> new NotifyMessage(Map.of()));
+        assertThrows(IllegalArgumentException.class, () -> new NotifyMessage(""));
+        assertThrows(IllegalArgumentException.class, () -> new NotifyMessage(Map.of("en", "   ")));
+        assertThrows(IllegalArgumentException.class, () -> new NotifyMessage(Map.of("", "Resolved")));
+    }
+
+    @Test
+    void copiesTheTextItWasHandedIn() {
         Map<String, String> mutable = new HashMap<>();
-        mutable.put("episode", "S02E04");
-        NotifyMessage msg = new NotifyMessage("bingo.resolved", mutable);
+        mutable.put("en", "Bingo resolved");
+        NotifyMessage msg = new NotifyMessage(mutable);
 
         // A caller reusing its map for the next recipient must not rewrite one already sent.
-        mutable.put("episode", "S02E05");
+        mutable.put("en", "Something else");
 
-        assertEquals("S02E04", msg.params().get("episode"));
-        assertThrows(UnsupportedOperationException.class, () -> msg.params().put("x", "y"));
-    }
-
-    @Test
-    void refusesABlankKey() {
-        // Blank is not a message, and the host would refuse it — better here, where the stack trace names
-        // the plugin's own line.
-        assertThrows(IllegalArgumentException.class, () -> new NotifyMessage(""));
-        assertThrows(IllegalArgumentException.class, () -> new NotifyMessage("   "));
-        assertThrows(NullPointerException.class, () -> new NotifyMessage(null));
+        assertEquals("Bingo resolved", msg.textFor("en"));
+        assertThrows(UnsupportedOperationException.class, () -> msg.text().put("nl", "x"));
     }
 
     @Test
     void withLinkLeavesTheOriginalAlone() {
-        NotifyMessage bare = new NotifyMessage("bingo.resolved", Map.of("episode", "S02E04"));
+        NotifyMessage bare = new NotifyMessage(BILINGUAL);
 
         NotifyMessage linked = bare.withLink("board/42");
 
         assertEquals("board/42", linked.link());
-        assertEquals(bare.params(), linked.params());
+        assertEquals(bare.text(), linked.text());
         assertNull(bare.link());
         assertNull(linked.withLink(null).link());
     }

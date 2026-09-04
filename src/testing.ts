@@ -820,9 +820,14 @@ export function makeMockNotify(
     delivered,
     messagesFor: (userId) => delivered.filter((d) => d.userId === userId).map((d) => d.msg),
     send: (userIds, msg) => {
-      if (msg.key.trim() === '') {
-        // The host refuses it; a double that accepted it would let a component ship an empty inbox row.
-        return Promise.reject(toApiError(apiError(400, { detail: 'key must not be blank' }), 'post', 'notify'));
+      // The host refuses a message with no English, because `en` is the one language a site cannot switch
+      // off and therefore the only fallback a reader is guaranteed to get. A double that accepted it would
+      // let a plugin ship notifications that render blank for anyone outside its own languages.
+      const english = msg.text?.en;
+      if (typeof english !== 'string' || english.trim() === '') {
+        return Promise.reject(
+          toApiError(apiError(400, { detail: 'notification text must contain `en`' }), 'post', 'notify'),
+        );
       }
       // Deduplicated, like the host: naming the same participant twice sends one notification, and must
       // not count twice against their cap either.

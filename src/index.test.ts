@@ -14,6 +14,7 @@ import {
   iconMask,
   isPluginApiError,
   matchRoute,
+  notifyText,
   PLATFORM_API_VERSION,
   resolveArtwork,
   SELF_SCOPE_ID,
@@ -240,6 +241,40 @@ describe('createPluginI18n', () => {
     change('de');
     // A disposed translator stops tracking rather than following a locale it no longer belongs to.
     expect(i18n.locale).toBe('en');
+  });
+});
+
+describe('notifyText', () => {
+  const catalogs = {
+    en: { 'bingo.resolved': 'Bingo resolved for {{episode}}' },
+    de: { 'bingo.resolved': 'Bingo für {{episode}} aufgelöst' },
+    nl: { unrelated: 'iets anders' },
+  };
+
+  it('renders every language that has the key, interpolated', () => {
+    expect(notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' })).toEqual({
+      en: 'Bingo resolved for S02E04',
+      de: 'Bingo für S02E04 aufgelöst',
+    });
+  });
+
+  it('leaves out a language whose catalog lacks the key', () => {
+    // A slot holding `bingo.resolved` is worse than no slot: the English fallback it displaces is a real
+    // sentence, and a reader is better served by one they understand than by a key in their own language.
+    expect(notifyText(catalogs, 'bingo.resolved')).not.toHaveProperty('nl');
+  });
+
+  it('always produces en, because NotifyMessage requires it', () => {
+    // Falling back to the key rather than throwing: a missing string is not worth failing a scheduled
+    // send over, and the host would refuse a message with no English at all.
+    expect(notifyText({ de: { greeting: 'Hallo' } }, 'greeting')).toEqual({
+      de: 'Hallo',
+      en: 'greeting',
+    });
+  });
+
+  it('normalises locale codes the way NotifyMessage does', () => {
+    expect(notifyText({ EN: { k: 'Hi' }, ' De ': { k: 'Hallo' } }, 'k')).toEqual({ en: 'Hi', de: 'Hallo' });
   });
 });
 

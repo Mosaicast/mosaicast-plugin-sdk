@@ -77,7 +77,8 @@ public interface Notifier {
      * than failing.
      *
      * @param userIds the users to notify; never {@code null}, and must not contain {@code null}
-     * @param message what to tell them — a translation key and parameters, never a rendered sentence
+     * @param message what to tell them, in every language the plugin can say it — see
+     *                {@link NotifyMessage} for why all of them travel together
      * @return the users actually notified, in no guaranteed order and with ineligible ids left out;
      *         never {@code null}
      * @throws NotificationException if the call as a whole was refused — the send cap is exhausted

@@ -1436,30 +1436,59 @@ export interface UserDirectory {
 }
 
 /**
- * What a notification says, as a translation key rather than a sentence (ARCHITECTURE §17.1).
+ * What a notification says, in every language your plugin can say it (ARCHITECTURE §17.1).
  *
- * **A key and parameters, never a rendered string.** You do not know which language the recipient reads
- * in — a notification is usually written on a backend timer, and the person may open the site three days
- * later with the shell in German. A rendered string fixes the language at send time, which is how a site
- * that carefully translates everything ends up with an inbox that is English. Send `bingo.resolved` and
- * the shell resolves it against your own locale bundle when it draws the inbox.
+ * **Every locale up front, because the reader's language is not known yet.** A notification is usually
+ * written on a backend timer and read days later, by someone whose shell may be in a different language
+ * than it was when you sent it. A single rendered sentence freezes the language at send time, which is
+ * how a site that carefully translates everything ends up with an inbox that is English. Hand over all of
+ * them and let the shell choose when it draws the bell.
  *
- * The consequence worth stating plainly: **a key with no entry in your bundle has nothing to fall back
- * to.** Ship the key in every locale you ship a UI for.
+ * ```ts
+ * await notify.send(ids, {
+ *   text: { en: 'Bingo resolved for S02E04', de: 'Bingo für S02E04 aufgelöst' },
+ *   link: 'board/42',
+ * });
+ * ```
+ *
+ * {@link notifyText} builds this map out of the catalogs you already pass to {@link createPluginI18n},
+ * which is the least error-prone way to fill it.
+ *
+ * ## Why not a translation key
+ *
+ * Because nothing can resolve one. A plugin's catalogs ship inside its *frontend bundle* (ARCHITECTURE
+ * §12.7) and load when its Web Component mounts; the bell is shell chrome and renders on pages where that
+ * never happens. There is no plugin-scoped catalog endpoint and no manifest field naming one, so a key
+ * would reach a reader as the literal string `bingo.resolved`. A key is the better design and may yet
+ * arrive — it needs a plugin catalog surface first, which is a larger piece of work than the notification
+ * it would serve.
+ *
+ * **Interpolate before you send.** There are no parameters here: you hold the values and your own
+ * catalogs, so you produce finished sentences.
+ *
+ * ## The honest limitation
+ *
+ * The set of languages is fixed when the notification is **sent**. A language the operator adds next month
+ * cannot appear in a message already written, and those readers see the English. Retention (§17.2) keeps
+ * that window short, and `en` is always there to fall back to — but it is a real edge, and it is the price
+ * of not having plugin catalogs yet.
  *
  * @since 0.14.0
  */
 export interface NotifyMessage {
-  /** The translation key, resolved against this plugin's locale bundle. Must not be blank. */
-  key: string;
   /**
-   * Values substituted into the resolved string.
+   * Locale code → the finished sentence in that language.
    *
-   * *Values*, not sentences — a slug, a count, an episode title — and **not translated**, because the
-   * host has no way to know which of them are prose. Keep personal data out: a notification is stored
-   * until it is read and then until retention expires (ARCHITECTURE §17.2).
+   * Codes are trimmed and lower-cased, and the map **must contain `en`**. English is required because
+   * §12.7 makes it the one language a site can never switch off, which makes it the only safe terminal
+   * fallback — requiring the site's *default* instead would refuse a perfectly good plugin that does not
+   * happen to ship that language.
+   *
+   * **Rendered as text, never HTML**: the host escapes what it draws, so markup arrives as the characters
+   * you typed. Keep personal data out — a notification is stored until it is read and then until
+   * retention expires (§17.2).
    */
-  params?: Record<string, string>;
+  text: Record<string, string>;
   /**
    * Where the notification points when clicked, or omitted for one that goes nowhere.
    *
@@ -1508,8 +1537,7 @@ export interface NotifyMessage {
  * if (!notify) return;                        // no `notifications` block in this plugin's manifest
  *
  * const told = await notify.send(participants, {
- *   key: 'bingo.resolved',
- *   params: { episode: 'S02E04' },
+ *   text: notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' }),
  *   link: `board/${boardId}`,                 // your own subtree; the host validates it
  * });
  * if (told.length < participants.length) prunePartnerList(participants, told);
@@ -1535,7 +1563,7 @@ export interface NotifyClient {
    * rejecting.
    *
    * @param userIds the users to notify
-   * @param msg     what to tell them — a key and parameters, never a rendered sentence
+   * @param msg     what to tell them, in every language you can say it — see {@link NotifyMessage}
    * @returns the ids actually notified, in no guaranteed order and with ineligible ones left out
    * @throws PluginApiError 429 when the send cap is exhausted — hold the batch and try on a later tick
    *         rather than dropping it; 400 when the message or its `link` is one the host will not draw,
@@ -2786,4 +2814,57 @@ export function createPluginI18n(
       }
     },
   };
+}
+
+/**
+ * Builds a {@link NotifyMessage.text} map out of the catalogs you already have.
+ *
+ * A notification carries every language up front (see {@link NotifyMessage} for why), and assembling that
+ * map by hand is the step where a plugin quietly ships one locale short — the catalogs say German, the
+ * inbox does not, and nobody notices because English is a valid fallback. This walks the same
+ * `catalogs` you pass to {@link createPluginI18n} and interpolates each language's template, so the
+ * message covers exactly what your UI covers.
+ *
+ * ```ts
+ * const catalogs = {
+ *   en: { 'bingo.resolved': 'Bingo resolved for {{episode}}' },
+ *   de: { 'bingo.resolved': 'Bingo für {{episode}} aufgelöst' },
+ * };
+ *
+ * await ctx.notify?.send(ids, {
+ *   text: notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' }),
+ *   link: `board/${boardId}`,
+ * });
+ * ```
+ *
+ * A locale whose catalog lacks the key is **left out** rather than filled with the key itself — a reader
+ * is better served by English they understand than by `bingo.resolved` in their own language slot. If
+ * that leaves nothing at all, the English entry falls back to the key, because a message must carry `en`
+ * and throwing here would take down a scheduled sender over a missing string.
+ *
+ * @param catalogs catalogs keyed by locale code — the same object {@link createPluginI18n} takes
+ * @param key      the message key to render in every language that has it
+ * @param params   values interpolated into each language's template (`{{name}}`)
+ * @returns a map fit for {@link NotifyMessage.text}, always containing `en`
+ * @since 0.14.0
+ */
+export function notifyText(
+  catalogs: I18nCatalogs,
+  key: string,
+  params?: Record<string, string | number>,
+): Record<string, string> {
+  const text: Record<string, string> = {};
+  for (const [locale, catalog] of Object.entries(catalogs)) {
+    const template = catalog?.[key];
+    // Skipped, not filled with the key: a slot holding `bingo.resolved` is worse than no slot at all,
+    // because the fallback that would have replaced it is a real sentence.
+    if (typeof template === 'string' && template !== '') {
+      text[locale.trim().toLowerCase()] = interpolate(template, params);
+    }
+  }
+  if (text[SOURCE_LOCALE] === undefined) {
+    // `en` is required by NotifyMessage, and a missing string is not worth failing a scheduled send over.
+    text[SOURCE_LOCALE] = interpolate(catalogs[SOURCE_LOCALE]?.[key] ?? key, params);
+  }
+  return text;
 }

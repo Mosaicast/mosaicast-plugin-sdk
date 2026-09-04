@@ -432,13 +432,18 @@ user's view of the site**, so it is bounded twice over by the host.
 ```java
 // The backend is where nearly all real use lives: the thing worth announcing finishes on a timer.
 List<UUID> told = ctx.notifier().send(participants,
-        new NotifyMessage("bingo.resolved", Map.of("episode", "S02E04")).withLink("board/42"));
+        new NotifyMessage(Map.of(
+                "en", "Bingo resolved for S02E04",
+                "de", "Bingo für S02E04 aufgelöst")).withLink("board/42"));
 ```
 
 ```ts
 const notify = ctx.notify;
 if (!notify) return;                       // no `notifications` block in this plugin's manifest
-const told = await notify.send(participants, { key: 'bingo.resolved', link: `board/${id}` });
+const told = await notify.send(participants, {
+  text: notifyText(catalogs, 'bingo.resolved', { episode: 'S02E04' }),  // your createPluginI18n catalogs
+  link: `board/${id}`,
+});
 if (told.length < participants.length) prune(participants, told);
 ```
 
@@ -447,9 +452,12 @@ if (told.length < participants.length) prune(participants, told);
 - **`send` answers who actually got it.** An ineligible or erased recipient is left out rather than
   failing the call, so partial sends are normal and the return value is the only way to see one. A plugin
   that ignores it and works from a stale participant list notifies nobody while looking perfectly healthy.
-- **A key, never a sentence.** `NotifyMessage` carries a translation key and parameters, resolved against
-  *your* locale bundle when the inbox is drawn — a notification written on a timer is read days later in
-  whatever language the shell is set to. A key missing from your bundle has nothing to fall back to.
+- **Every language at once, not one sentence.** `NotifyMessage.text` is a `locale → sentence` map, because
+  a notification written on a timer is read days later in whatever language the shell is set to *then*. It
+  must contain `en` — §12.7 makes English the one language a site cannot switch off, so it is the only
+  fallback a reader is guaranteed to get. `notifyText(catalogs, key, params)` builds the map from the
+  catalogs you already hand `createPluginI18n`. The language set is fixed at **send** time, so a language
+  added later shows English on old notifications; §17.2 retention keeps that window short.
 - **The cap is a real branch.** Java throws a checked `NotificationException` (`RATE_LIMITED` is
   `retryable()`); TypeScript rejects with `PluginApiError` 429. Hold the batch for the next tick rather
   than dropping it. `link` is host-validated and internal-only — off-site is refused, because a
@@ -459,8 +467,10 @@ if (told.length < participants.length) prune(participants, told);
   what you sent.
 
 > The Java accessor is **`notifier()`**, not `notify()` — `Object.notify()` is `final`, so no Java
-> interface can declare that name. The TypeScript half is `ctx.notify`. See CHANGELOG 0.14.0 for the two
-> places this surface deviates from ARCHITECTURE §17, which core has not implemented yet.
+> interface can declare that name. The TypeScript half is `ctx.notify`. §17.1 also specifies a translation
+> `key` rather than per-locale text; nothing in core can resolve one, since a plugin's catalogs ship in its
+> frontend bundle and the bell renders on pages that never load it. See CHANGELOG 0.14.0 for all three
+> deviations from ARCHITECTURE §17, which core has not implemented yet.
 
 Test with `makeMockNotify({ notifiable, perUserPerDay })` / `FakeNotifier`. `FakeNotifier` reads
 eligibility from the doc store rather than a seeded list, so it cannot drift from the host's rule: give a
