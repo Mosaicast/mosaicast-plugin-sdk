@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.12.0' as const;
+export const PLATFORM_API_VERSION = '0.13.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -1346,6 +1346,96 @@ export interface TagsClient {
 }
 
 /**
+ * Who a user id belongs to, in the only terms a plugin is given (ARCHITECTURE §8.8).
+ *
+ * **Never email, provider or external id.** Those stay server-side — the stable login key is
+ * `(provider, external_id)` and publishing it is exactly what social login was meant to avoid. This is
+ * the whole of what a plugin may learn about somebody else.
+ *
+ * @since 0.13.0
+ */
+export interface UserRef {
+  /** The user's stable UUID — the only part safe to persist. */
+  id: string;
+  /**
+   * What a reader sees.
+   *
+   * **Presentation, never identity and never a key.** The user may change it, and
+   * {@link UserDirectory} exists so you never have to keep a copy.
+   */
+  displayName: string;
+  /**
+   * The host's own avatar path, always `/api/users/{id}/avatar` (ARCHITECTURE §8.7).
+   *
+   * **Always populated, always host-relative.** Every user has an avatar — the host generates one from
+   * the UUID when there is no provider picture — so there is no null case, no empty string and no
+   * fallback for a plugin to implement. Put it in an `src` and stop thinking about it. It is never a
+   * provider URL: the host proxies the bytes rather than redirecting, so a Discord snowflake never
+   * reaches the page.
+   */
+  avatarUrl: string;
+  /** The user's role (ARCHITECTURE §8.5). */
+  role: Role;
+}
+
+/**
+ * Turns user UUIDs a plugin already holds into something it can render (ARCHITECTURE §8.8).
+ *
+ * A plugin that aggregates across people — a bingo leaderboard, the case this was written for — reads
+ * `OwnedDocEntry(userId, …)` on the backend and gets UUIDs and nothing else. The gap is filled with a
+ * **lookup, not a wider `ctx.user`**: the host still resolves access, and what you may learn about
+ * somebody else stays exactly {@link UserRef}.
+ *
+ * `ctx.users` is **`null`** unless the manifest declares an `identity` block, mirroring `ctx.tags`,
+ * `ctx.schema` and `ctx.blobs`. Declared, never derived, even though the plugin already *has* the ids:
+ * the capability being granted is not access to the UUIDs but the turning of them into people, and that
+ * is the part an operator should be able to read off a manifest before installing.
+ *
+ * ```ts
+ * const dir = ctx.users;
+ * if (!dir) return;                                   // no `identity` block in this plugin's manifest
+ *
+ * // The backend aggregated every user's marks into one document; the rows carry UUIDs, not names.
+ * const board = await ctx.docs.get<{ userId: string; score: number }[]>('site', 'agg:leaderboard');
+ * const people = await dir.resolve((board ?? []).map((row) => row.userId));
+ * const byId = new Map(people.map((u) => [u.id, u]));               // match on id, never on position
+ *
+ * for (const row of board ?? []) {
+ *   const who = byId.get(row.userId);
+ *   render(who?.displayName ?? 'Former listener', who?.avatarUrl);  // the row outlives its author
+ * }
+ * ```
+ *
+ * ## Two rules, and the second one is on you
+ *
+ * - **It resolves, it does not enumerate.** There is no list call and there will not be one. You may ask
+ *   only about ids you already hold, and the only way you come by them is your own scope.
+ * - **Store UUIDs, resolve at render — never persist a display name.** A name copied into your store
+ *   outlives the rename meant to shed it and the erasure meant to end it, and core cannot reach inside a
+ *   plugin's own storage to fix either. The host cannot enforce this one. This paragraph is the
+ *   enforcement.
+ *
+ * @since 0.13.0
+ */
+export interface UserDirectory {
+  /**
+   * Resolves user ids to who they are.
+   *
+   * **Absent, not redacted.** An id that is unknown, erased or pseudonymised (ARCHITECTURE §12.8) is
+   * simply *missing* from the returned array — there is no `null` element and no tombstone entry. So the
+   * result is **not index-aligned** with `ids` and may be shorter than it: build a `Map` keyed on
+   * {@link UserRef.id} and look rows up by id, never by position. That is what lets a leaderboard row
+   * outlive its author — the aggregate stays, the person becomes whatever placeholder you render.
+   *
+   * Duplicate ids resolve once; an empty array resolves to an empty array rather than rejecting.
+   *
+   * @param ids the user ids to resolve
+   * @returns the users that could be resolved, in no guaranteed order and with unresolvable ids left out
+   */
+  resolve(ids: string[]): Promise<UserRef[]>;
+}
+
+/**
  * The consent gate for anything that stores data on the visitor's device or talks to a third party
  * (ARCHITECTURE §12.5).
  *
@@ -1630,6 +1720,29 @@ export interface PluginTagsDeclaration {
 }
 
 /**
+ * The shape of your manifest's `identity` block — whether this plugin may turn the user UUIDs it holds
+ * into names and pictures (ARCHITECTURE §8.8).
+ *
+ * **Documentation for your editor, not enforcement**, on the same terms as {@link PluginDataDeclaration}:
+ * the host reads your `plugin.json` and is the sole validator. This type exists so a typo in the block
+ * that decides whether `ctx.users` is `null` is caught while you type it rather than at load.
+ *
+ * Declaring it is what makes `ctx.users` non-`null`; absent, the frontend handle is `null` and the
+ * endpoint 404s. Declared rather than derived even though your plugin already *has* the ids — the
+ * capability is turning them into people, and that is what an operator reads off a manifest.
+ *
+ * ```ts
+ * const identity: PluginIdentityDeclaration = { resolvesUsers: true };
+ * ```
+ *
+ * @since 0.13.0
+ */
+export interface PluginIdentityDeclaration {
+  /** Whether this plugin may resolve user ids to a display name and an avatar. */
+  resolvesUsers: boolean;
+}
+
+/**
  * One entry of `slots[]`: which component the host mounts, where, and for whom (ARCHITECTURE §7.3).
  *
  * @since 0.9.0
@@ -1820,6 +1933,8 @@ export interface PluginManifest {
   blobs?: PluginBlobsDeclaration;
   /** Opt-in tag surface. Absent means `ctx.tags` is `null`. */
   tags?: PluginTagsDeclaration;
+  /** Opt-in resolution of user ids to people. Absent means `ctx.users` is `null`. */
+  identity?: PluginIdentityDeclaration;
   /** Opt-in use of admin-configured third-party services. Absent means `ctx.translation` is `null`. */
   external?: PluginExternalDeclaration;
   /** Config fields core renders as an admin form; plugins never build their own config UI. */
@@ -1964,8 +2079,18 @@ export interface PluginContext {
   episodeLabels?: Record<string, string>;
   /** Present on the `episode` scope: lifecycle status of the current episode. */
   episode?: { status: 'PLANNED' | 'PUBLISHED' | 'WITHDRAWN' };
-  /** The signed-in user, or `null` for anonymous visitors. */
-  user: { id: string; role: Role } | null;
+  /**
+   * The signed-in user, or `null` for anonymous visitors.
+   *
+   * `displayName` and `avatarUrl` are the same two fields {@link UserRef} carries, for the same reason
+   * and under the same rule: they are presentation, `id` is identity, and a component that greets
+   * somebody by name should read this at render rather than keep a copy. `avatarUrl` is always
+   * populated — see {@link UserRef.avatarUrl}.
+   *
+   * This says nothing about anyone *else*: resolving other people's ids takes {@link users} and a
+   * manifest declaration.
+   */
+  user: { id: string; role: Role; displayName: string; avatarUrl: string } | null;
   /**
    * Authenticated client for this plugin's host-provided data endpoints — **not** for plugin-authored
    * routes, which do not exist in v1. It reads and writes the same hard-scoped doc store the backend
@@ -2002,6 +2127,21 @@ export interface PluginContext {
    * @since 0.9.0
    */
   tags: TagsClient | null;
+  /**
+   * Who the user ids this plugin holds belong to, or **`null`** when the manifest declares no `identity`
+   * block (ARCHITECTURE §8.8).
+   *
+   * The frontend half of the Java `ctx.users()`, `null` for the same reason `tags`, `schema` and `blobs`
+   * are: what a plugin may touch is decided in the manifest and nowhere else. Check it before use —
+   * TypeScript will make you.
+   *
+   * This is what turns a leaderboard of UUIDs into a leaderboard of people. See {@link UserDirectory} —
+   * and note its two rules: it resolves rather than enumerates, and an id it cannot resolve is **absent
+   * from the result**, not `null` in it.
+   *
+   * @since 0.13.0
+   */
+  users: UserDirectory | null;
   /**
    * Read access to this plugin's provisioned relational tables, or **`null`** when the manifest declares
    * no `storage.schema` (ARCHITECTURE §7.6).

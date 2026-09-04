@@ -28,6 +28,7 @@ import type {
   PluginContext,
   PluginRoute,
   ProblemDetail,
+  Role,
   SchemaClient,
   SchemaPage,
   SchemaPredicate,
@@ -38,6 +39,8 @@ import type {
   TranslationClient,
   TranslationRequest,
   TranslationResult,
+  UserDirectory,
+  UserRef,
 } from './index.js';
 import { DISPLAY_BATCH_LIMIT, DOC_KEY_PATTERN, declaredTypeFor } from './index.js';
 
@@ -684,6 +687,84 @@ export function makeMockTags(
   return client;
 }
 
+/** A {@link UserDirectory} double over a seeded set of people. @since 0.13.0 */
+export interface MockUserDirectory extends UserDirectory {
+  /** Every id passed to {@link UserDirectory.resolve}, in call order and including duplicates. */
+  readonly resolved: string[];
+  /**
+   * Forgets a user, standing in for an account erased or pseudonymised after the plugin stored its id.
+   *
+   * The interesting case: the row survives, its author does not.
+   */
+  forget(id: string): void;
+}
+
+/**
+ * A {@link UserDirectory} double that **models absence the way the host models it**.
+ *
+ * An id with no seeded entry is simply *missing* from the resolved array — not `undefined` in it, not a
+ * placeholder. That is the one behaviour a permissive double would hide, and hiding it means a
+ * leaderboard passes its tests and then renders `undefined` the first time somebody deletes their
+ * account. Seed the people you know about, resolve a stranger too, and the branch that has to survive an
+ * erased author gets exercised.
+ *
+ * `avatarUrl` is built the way the host builds it (`/api/users/{id}/avatar`), so an assertion on a
+ * rendered `src` pins the string production actually produces. Every seeded user has one — there is no
+ * unset case.
+ *
+ * Passing it stands in for a plugin whose manifest declares `identity`. Leaving `ctx.users` at its
+ * `null` default is the other test, and the one more plugins get wrong.
+ *
+ * ```ts
+ * const users = makeMockUsers({ 'u-1': 'Ana', 'u-2': { displayName: 'Bo', role: 'podcaster' } });
+ * const ctx = makeMockCtx({ users });
+ *
+ * const found = await users.resolve(['u-1', 'u-gone']);   // length 1 — not index-aligned with the ask
+ * ```
+ *
+ * @param seed the people this directory knows: a display name, or `{ displayName, role }` when the role
+ *             matters. Keys are the user ids
+ * @returns a recording user-directory double
+ * @since 0.13.0
+ */
+export function makeMockUsers(
+  seed: Record<string, string | { displayName: string; role?: Role }> = {},
+): MockUserDirectory {
+  const known = new Map<string, UserRef>();
+  const resolved: string[] = [];
+
+  for (const [id, entry] of Object.entries(seed)) {
+    const spec = typeof entry === 'string' ? { displayName: entry } : entry;
+    known.set(id, {
+      id,
+      displayName: spec.displayName,
+      // Derived, not accepted: the host always answers this path, so letting a test invent one would let
+      // it assert a shape production never produces.
+      avatarUrl: `/api/users/${encodeURIComponent(id)}/avatar`,
+      // `fan` by default — the role a listener on a leaderboard actually has.
+      role: spec.role ?? 'fan',
+    });
+  }
+
+  return {
+    resolved,
+    forget: (id) => {
+      known.delete(id);
+    },
+    resolve: (ids) => {
+      resolved.push(...ids);
+      const found: UserRef[] = [];
+      // Deduplicated, like the host: a board naming the same author twice resolves them once.
+      for (const id of new Set(ids)) {
+        const ref = known.get(id);
+        // Absent, not redacted: an unknown id contributes nothing rather than an entry to skip.
+        if (ref) found.push(ref);
+      }
+      return Promise.resolve(found);
+    },
+  };
+}
+
 /** A {@link DocClient} storing in memory, keyed by resolved partition path. @since 0.9.0 */
 export interface MockDocClient extends DocClient {
   /** What is currently stored, keyed `"<partition>/<key>"` — e.g. `"data/user/me/marks"`. */
@@ -1019,11 +1100,12 @@ export interface MockCtxOverrides extends Partial<Omit<PluginContext, 'api' | 'r
  * `docs` and `feeds` are real doubles ({@link makeMockDocs}, {@link makeMockFeeds}), because every plugin
  * has both — the empty ones give a component nothing to render, which is the case worth defaulting to.
  *
- * `episodeLabels` is deliberately **absent** by default, and `schema`, `blobs` and `tags` are **`null`**.
- * All four are optional on the real context — the host supplies labels partially, and gives a plugin no
- * schema, no blob store and no tag surface unless its manifest declares them — so a component that needs
- * any of them has to survive its absence. The mock makes you face that unless you pass one in
- * ({@link makeMockSchema}, {@link makeMockBlobs}, {@link makeMockTags}).
+ * `episodeLabels` is deliberately **absent** by default, and `schema`, `blobs`, `tags` and `users` are
+ * **`null`**. All five are optional on the real context — the host supplies labels partially, and gives a
+ * plugin no schema, no blob store, no tag surface and no user directory unless its manifest declares them
+ * — so a component that needs any of them has to survive its absence. The mock makes you face that unless
+ * you pass one in ({@link makeMockSchema}, {@link makeMockBlobs}, {@link makeMockTags},
+ * {@link makeMockUsers}).
  *
  * **`route` is the one override that merges** rather than replacing: `route: { path: 'kraken' }` pins the
  * subpath and keeps the recording `navigate`. Everything else is all-or-nothing, because everything else
@@ -1053,6 +1135,10 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     // block, and a component written against a context that always has one breaks on every plugin that
     // does not.
     tags: null,
+    // Null, for the same reason and with a sharper edge: a plugin only resolves people if its manifest
+    // declares `identity`, and the default keeps an existing test exercising the undeclared case. Pass
+    // {@link makeMockUsers} when the test is about rendering people.
+    users: null,
     // Null, not a client: a plugin only has one if its manifest declares `storage.schema`, and a
     // component written against a schema that is always there never handles the doc-store case.
     schema: null,

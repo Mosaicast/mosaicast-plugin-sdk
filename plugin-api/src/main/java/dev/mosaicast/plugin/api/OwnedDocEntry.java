@@ -17,9 +17,11 @@ import tools.jackson.databind.JsonNode;
  * {@link ScopeType#USER} scope: an id a plugin reads here cannot have been forged by the browser that
  * wrote the document.
  *
- * <p>{@code userId} is an identifier, not a display name, and this contract offers no way to turn it into
- * one — resolving names is the host's business. Show it only where an opaque id is acceptable, or key
- * your own display data by it.
+ * <p>{@code userId} is an identifier, not a display name. To render a person, hand it to
+ * {@link Users#resolve(java.util.Collection)} — reachable through {@link PluginContext#users()}, and only
+ * for a plugin whose manifest declares an {@code identity} block (§8.8). Resolve at render and keep the
+ * UUID in your documents: a display name copied into a plugin's own store outlives the rename meant to
+ * shed it and the erasure meant to end it.
  *
  * @param userId the host's id for the user whose partition the document lives in; never {@code null}
  * @param key    the document's key within that partition; never {@code null}, and matching

@@ -1,7 +1,121 @@
-# Migrating a plugin to `platformApi` 0.12.0
+# Migrating a plugin to `platformApi` 0.13.0
 
-Five migrations in one file. **On `0.11.x`?** Read the next section and stop. **On `0.10.x`?** Do
-[0.10.x → 0.11.0](#010x--0110-declaring-what-external-services-you-use) first, then work upward.
+Six migrations in one file. **On `0.12.x`?** Read the next section and stop. **On `0.11.x`?** Do
+[0.11.x → 0.12.0](#011x--0120-saying-what-language-your-pages-are-in) first, then work upward.
+
+---
+
+# 0.12.x → 0.13.0: rendering the people behind the UUIDs
+
+**This one you must do.** `platformApi` matches on `major.minor`, so a plugin declaring `0.12.x` is
+rejected by a `0.13.0` host. Re-declare, rebuild, reinstall.
+
+```diff
+  // plugin.json
+- "platformApi": "0.12.0",
++ "platformApi": "0.13.0",
+```
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.12.0")
++ implementation("dev.mosaicast:plugin-api:0.13.0")
+- "@mosaicast/plugin-sdk": "^0.12.0"
++ "@mosaicast/plugin-sdk": "^0.13.0"
+```
+
+**Java plugins have nothing else to do.** `PluginContext` gained a method, but plugins consume that
+interface rather than implement it, and `FakePluginContext` implements the new one for you.
+
+## The one compile break: a hand-built `ctx` in a TypeScript test
+
+`ctx.user` gained `displayName` and `avatarUrl`. A test that spells the user out fails to type-check:
+
+```diff
+  const ctx = makeMockCtx({
+-   user: { id: 'u1', role: 'podcaster' },
++   user: { id: 'u1', role: 'podcaster', displayName: 'Ana', avatarUrl: '/api/users/u1/avatar' },
+  });
+```
+
+Anonymous is still `user: null`, and that is still the default — nothing to change there.
+
+## What the release adds, and why you might want it
+
+A backend that calls `queryAcrossUsers` gets `OwnedDocEntry(userId, …)`: UUIDs and a document. Until
+0.13.0 a leaderboard built from that had ids and no way to draw a person, and the two workarounds were
+both bad — show raw UUIDs, or copy display names into the plugin's own store.
+
+`ctx.users` is the fix, and it is a **lookup rather than a wider `ctx.user`**:
+
+```ts
+const dir = ctx.users;
+if (!dir) return;                      // no `identity` block in this plugin's manifest
+
+const board = await ctx.docs.get<{ userId: string; score: number }[]>('site', 'agg:leaderboard');
+const people = await dir.resolve((board ?? []).map((row) => row.userId));
+const byId = new Map(people.map((u) => [u.id, u]));
+```
+
+```java
+List<UserRef> people = ctx.users().resolve(ids);   // null unless the manifest declares `identity`
+```
+
+Declare it, or the handle is `null` and the endpoint 404s:
+
+```diff
+  // plugin.json
++ "identity": { "resolvesUsers": true },
+```
+
+Declared and never derived even though your plugin already *has* the ids: what is being granted is not
+access to the UUIDs but the turning of them into people, and that is what an operator reads off your
+manifest before installing.
+
+### The three rules that will catch you
+
+**1. Absent, not redacted — and therefore not index-aligned.** An id that is unknown, erased or
+pseudonymised is simply missing from the result. There is no `null` element to skip and no tombstone to
+recognise, so the array may be shorter than what you asked for:
+
+```ts
+const found = await dir.resolve(['u-1', 'u-gone']);
+found[1];                              // undefined — do NOT read positionally
+byId.get(row.userId)?.displayName ?? 'Former listener';   // do this
+```
+
+That is what lets a leaderboard row outlive its author: the aggregate stays, the person becomes whatever
+placeholder you render.
+
+**2. Store UUIDs, resolve at render. Never persist a display name.** A copied name survives the rename
+meant to shed it and the erasure meant to end it, and core cannot reach inside your storage to fix either
+— it provisioned your tables without ever learning which column holds a person. **The host cannot enforce
+this one.** Keep the id in your documents and resolve at the point you draw the row.
+
+**3. `avatarUrl` is finished.** Always `/api/users/{id}/avatar`, always host-relative, always populated —
+every user has an avatar, generated from their UUID when there is no provider picture. There is no null
+case, no empty string and no fallback to write. Put it in an `src`.
+
+It also **resolves rather than enumerates**: there is no list call and there will not be one. You may ask
+only about ids you already hold, which you only come by through your own scope.
+
+### Test it against the absent case
+
+Both test kits model absence rather than hiding it, which is the point:
+
+```ts
+const users = makeMockUsers({ 'u-1': 'Ana' });
+const ctx = makeMockCtx({ users });
+users.forget('u-1');                   // the erased-author case
+```
+
+```java
+FakeUsers users = new FakeUsers().withUser(ana, "Ana", Role.FAN);
+FakePluginContext ctx = new FakePluginContext().withUsers(users);
+users.withoutUser(ana);
+```
+
+`ctx.users` defaults to `null` in both, so a test that never passes one keeps checking that your component
+survives a manifest with no `identity` block.
 
 ---
 

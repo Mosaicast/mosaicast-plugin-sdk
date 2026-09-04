@@ -7,6 +7,64 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-09-04
+
+A plugin can turn the user UUIDs it already holds into **people**. A minor bump, because `platformApi`
+matches on `major.minor` — every plugin re-declares and rebuilds.
+
+**Core must pin `mosaicastSdk = "0.13.0"`.** Its `gradle/libs.versions.toml` reads `0.10.0` on master; the
+host side of §8.8 does not compile against anything older.
+
+A backend calling `queryAcrossUsers` gets `OwnedDocEntry(userId, …)` — UUIDs and nothing else. A bingo
+leaderboard therefore had ids and no way to render a person, and the only workarounds were to copy display
+names into the plugin's own store (which outlives the rename meant to shed them and the erasure meant to
+end them) or to show raw UUIDs. §8.8 fills the gap with a **lookup rather than a wider `ctx.user`**: §10
+still holds, the host still resolves access, and what a plugin learns about somebody else stays exactly a
+name, an avatar path and a role.
+
+### Added
+
+- **`ctx.users` / `ctx.users()`** — `UserDirectory.resolve(ids)` (TS) and `Users.resolve(Collection<UUID>)`
+  (Java), returning `UserRef { id, displayName, avatarUrl, role }`. **`null` unless the manifest declares
+  `identity`**, the same shape and reasoning as `blobs` and `tags`.
+  - **Absent, not redacted.** An id that is unknown, erased or pseudonymised (§12.8) is *missing* from the
+    result — no `null` element, no tombstone. The result is therefore **not index-aligned** with the input
+    and may be shorter: match on `id`, never on position. That is what lets a leaderboard row outlive its
+    author as §13 requires — the aggregate stays, the person becomes a placeholder the plugin renders.
+  - **It resolves, it does not enumerate.** There is no list call, by design: a plugin may ask only about
+    ids it already holds, and the only way it comes by them is its own scope.
+  - **`avatarUrl` is always host-relative and always populated** — `/api/users/{id}/avatar` (§8.7). Every
+    user has an avatar (generated from the UUID when there is no provider picture), so there is no null
+    case and no fallback to implement. Never a provider URL: the host proxies the bytes rather than
+    redirecting, so a Discord snowflake never reaches the page source.
+  - **Store UUIDs, resolve at render — never persist a display name.** The host cannot enforce this: core
+    provisioned a plugin's tables without ever learning which column holds a person, so §12.8 cannot reach
+    inside them. The doc comment on `Users` / `UserDirectory` is the enforcement.
+- **`identity` in the manifest type** — `{ resolvesUsers: boolean }`. Declared, never derived, even though
+  the plugin already *has* the ids: the capability is turning them into people, and that is what an
+  operator should read off a manifest before installing. Typed for an author's editor only; the **host
+  remains the sole validator**.
+- **Test-kit doubles that model absence** (§13.5) — `FakeUsers` (Java, wired via
+  `FakePluginContext.withUsers(…)`) and `makeMockUsers` (TS). An id with no entry is missing from the
+  result rather than `null` in it, and `withoutUser` / `forget` stage the erased-author case. Both derive
+  `avatarUrl` the way the host does rather than accepting one, so an assertion pins the string production
+  produces. `ctx.users` defaults to `null` in `makeMockCtx`, so an existing test keeps exercising the
+  undeclared-manifest case.
+
+### Changed
+
+- **`ctx.user` gains `displayName` and `avatarUrl`** (TS). Same fields as `UserRef`, same rule: `id` is
+  identity, these two are presentation — read them at render, do not keep a copy.
+- `OwnedDocEntry`'s Javadoc no longer says a `userId` cannot be turned into a name; it points at
+  `ctx.users()`.
+
+### Migration
+
+Manifest bump and rebuild. The one compile break is a **hand-built `ctx` in a TypeScript test**: a literal
+`user: { id, role }` now needs `displayName` and `avatarUrl`. Java plugins have nothing to edit —
+`PluginContext` gained a method, but plugins consume the interface rather than implement it, and
+`FakePluginContext` implements the new one for you.
+
 ## [0.12.0] — 2026-09-02
 
 Two records gain a component so a plugin can say **what language its pages are in**. A minor bump, because
@@ -894,6 +952,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.13.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.10.0

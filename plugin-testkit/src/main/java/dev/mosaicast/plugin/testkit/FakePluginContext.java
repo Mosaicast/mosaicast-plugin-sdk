@@ -12,6 +12,7 @@ import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.SchemaStore;
 import dev.mosaicast.plugin.api.Tags;
 import dev.mosaicast.plugin.api.Translation;
+import dev.mosaicast.plugin.api.Users;
 import java.time.Duration;
 import java.util.Objects;
 
@@ -38,6 +39,7 @@ public final class FakePluginContext implements PluginContext {
     private final FeedAccess feeds;
     private final RecordingLogger logger = new RecordingLogger(LOGGER_NAME);
     private Tags tags;
+    private Users users;
     private Locales locales = FakeLocales.englishOnly();
     private Translation translation;
     private int scheduledCount;
@@ -141,6 +143,35 @@ public final class FakePluginContext implements PluginContext {
     @Override
     public Tags tags() {
         return tags;
+    }
+
+    /**
+     * Wires a {@link Users} into this context, standing in for a manifest that declares an
+     * {@code identity} block.
+     *
+     * <p>A chaining mutator, for the reason {@link #withTags(Tags)} spells out. The default is
+     * {@code null}, which is what a plugin that never declared {@code identity} sees from the host — so a
+     * backend written against a directory that is always there fails here before it fails in production.
+     *
+     * @param users the user directory, or {@code null} to go back to a plugin that declares none
+     * @return this instance, for chaining
+     * @since 0.13.0
+     */
+    public FakePluginContext withUsers(Users users) {
+        this.users = users;
+        return this;
+    }
+
+    /**
+     * The user directory this context is wired to, or {@code null} when none was supplied — the same
+     * {@code null} a plugin that declares no {@code identity} block sees from the host.
+     *
+     * @return the user directory, or {@code null}
+     * @since 0.13.0
+     */
+    @Override
+    public Users users() {
+        return users;
     }
 
     /**
