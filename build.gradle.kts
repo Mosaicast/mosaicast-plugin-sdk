@@ -18,7 +18,7 @@ subprojects {
     apply(plugin = "maven-publish")
 
     group = "dev.mosaicast"
-    version = "0.12.0"
+    version = "0.13.0"
 
     repositories {
         mavenCentral()

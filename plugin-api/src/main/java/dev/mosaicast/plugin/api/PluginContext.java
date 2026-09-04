@@ -153,6 +153,29 @@ public interface PluginContext {
     Tags tags();
 
     /**
+     * Who the user ids this plugin holds belong to, for plugins that declare an {@code identity} block in
+     * their manifest (ARCHITECTURE §8.8).
+     *
+     * <p>{@code null} without the declaration, exactly as with {@link #schema()}, {@link #blobs()} and
+     * {@link #tags()}. Declare it when your plugin aggregates across people and has to draw them: a
+     * leaderboard built from {@link DocStore#queryAcrossUsers(String)} holds {@link OwnedDocEntry} — UUIDs
+     * and documents — and without this has no way to turn a row into a person.
+     *
+     * <p>Declared rather than derived even though the plugin already <em>has</em> the ids, because the
+     * capability is not access to the UUIDs but the turning of them into people, and that is what an
+     * operator should be able to read off a manifest before installing.
+     *
+     * <p>It resolves, it does not enumerate — there is no list call. And what comes back is
+     * {@link UserRef}: store the id, resolve at render, never persist the display name. See
+     * {@link Users}.
+     *
+     * @return the user directory, or {@code null} when the manifest declares no {@code identity} block
+     *         (most plugins)
+     * @since 0.13.0
+     */
+    Users users();
+
+    /**
      * Which languages this site has, and which content may be authored in (ARCHITECTURE §12.7).
      *
      * <p>Always present — a site always has at least English. Read it when you need it: an admin edits these

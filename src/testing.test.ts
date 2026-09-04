@@ -14,6 +14,7 @@ import {
   makeMockSchema,
   makeMockTags,
   makeMockTranslation,
+  makeMockUsers,
 } from './testing.js';
 import { isPluginApiError } from './index.js';
 
@@ -33,10 +34,12 @@ describe('makeMockCtx', () => {
   it('applies overrides', () => {
     const ctx = makeMockCtx({
       scope: { type: 'episode', id: 'ep-9' },
-      user: { id: 'u1', role: 'podcaster' },
+      user: { id: 'u1', role: 'podcaster', displayName: 'Ana', avatarUrl: '/api/users/u1/avatar' },
     });
     expect(ctx.scope.id).toBe('ep-9');
     expect(ctx.user?.role).toBe('podcaster');
+    // Since 0.13.0 the signed-in user carries what it takes to draw them, not just an id and a role.
+    expect(ctx.user?.displayName).toBe('Ana');
   });
 
   it('records api calls and returns canned responses', async () => {
@@ -548,6 +551,65 @@ describe('makeMockTags', () => {
   it('is null on the context unless a test supplies one', () => {
     expect(makeMockCtx().tags).toBeNull();
     expect(makeMockCtx({ tags: makeMockTags() }).tags).not.toBeNull();
+  });
+});
+
+describe('makeMockUsers', () => {
+  it('resolves a seeded user with the host\'s own avatar path', async () => {
+    const users = makeMockUsers({ 'u-1': 'Ana' });
+
+    const [ana] = await users.resolve(['u-1']);
+
+    expect(ana).toEqual({
+      id: 'u-1',
+      displayName: 'Ana',
+      // Never a provider URL: the host proxies the bytes, so this is what a rendered `src` must be.
+      avatarUrl: '/api/users/u-1/avatar',
+      role: 'fan',
+    });
+  });
+
+  it('leaves an unknown id out rather than returning null in its place', async () => {
+    const users = makeMockUsers({ 'u-1': 'Ana' });
+
+    const found = await users.resolve(['u-1', 'u-gone']);
+
+    // Shorter than the ask, and no hole: a component reading found[1] for the second id it asked about
+    // is already wrong, and this is where it finds out.
+    expect(found).toHaveLength(1);
+    expect(found[0]?.id).toBe('u-1');
+    expect(found.every((u) => u != null)).toBe(true);
+  });
+
+  it('makes an erased author absent while the row survives', async () => {
+    const users = makeMockUsers({ 'u-1': 'Ana' });
+    expect(await users.resolve(['u-1'])).toHaveLength(1);
+
+    users.forget('u-1'); // the §12.8 case
+
+    expect(await users.resolve(['u-1'])).toEqual([]);
+  });
+
+  it('resolves each id once but records the raw ask', async () => {
+    const users = makeMockUsers({ 'u-1': { displayName: 'Ana', role: 'admin' } });
+
+    const found = await users.resolve(['u-1', 'u-1', 'u-1']);
+
+    expect(found).toHaveLength(1);
+    expect(found[0]?.role).toBe('admin');
+    // So a test can pin that a component batched its lookups instead of resolving per row.
+    expect(users.resolved).toEqual(['u-1', 'u-1', 'u-1']);
+  });
+
+  it('resolves an empty ask to an empty array rather than rejecting', async () => {
+    await expect(makeMockUsers().resolve([])).resolves.toEqual([]);
+  });
+
+  it('is null on the context unless a test supplies one', () => {
+    // The undeclared-manifest case, which is most plugins — and the default, so an existing test keeps
+    // exercising it.
+    expect(makeMockCtx().users).toBeNull();
+    expect(makeMockCtx({ users: makeMockUsers() }).users).not.toBeNull();
   });
 });
 

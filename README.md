@@ -51,8 +51,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
   - Released: from **GitHub Packages** (see below).
   ```kotlin
   dependencies {
-      compileOnly("dev.mosaicast:plugin-api:0.11.0")           // contract, provided by the host
-      testImplementation("dev.mosaicast:plugin-testkit:0.11.0") // test doubles only
+      compileOnly("dev.mosaicast:plugin-api:0.13.0")           // contract, provided by the host
+      testImplementation("dev.mosaicast:plugin-testkit:0.13.0") // test doubles only
   }
   ```
   Sources + Javadoc JARs give IDE hover docs automatically.
@@ -369,6 +369,56 @@ key a `SearchProvider` hit resolves to, so a tag and a search result name one ob
 
 Test with `makeMockTags({ writesEpisodes })` / `FakeTags`, both of which refuse what the host refuses.
 
+## Who the UUIDs are — `ctx.users` / `ctx.users()` (since 0.13.0)
+
+A backend calling `queryAcrossUsers` gets `OwnedDocEntry(userId, …)` — UUIDs and a document. A leaderboard
+built from that had ids and no way to draw a person, and both workarounds were bad: show raw UUIDs, or copy
+display names into the plugin's own store. This is the lookup that fixes it. It is deliberately a lookup
+rather than a wider `ctx.user`: the host still resolves access, and what you learn about somebody else stays
+a name, an avatar path and a role.
+
+Opt in from the manifest, or the handle is `null` and the endpoint 404s:
+
+```json
+"identity": { "resolvesUsers": true }
+```
+
+```ts
+const dir = ctx.users;
+if (!dir) return;                                 // no `identity` block in this plugin's manifest
+
+const board = await ctx.docs.get<{ userId: string; score: number }[]>('site', 'agg:leaderboard');
+const people = await dir.resolve((board ?? []).map((r) => r.userId));
+const byId = new Map(people.map((u) => [u.id, u]));
+
+for (const row of board ?? []) {
+  const who = byId.get(row.userId);
+  render(who?.displayName ?? 'Former listener', who?.avatarUrl);   // the row outlives its author
+}
+```
+
+```java
+List<UserRef> people = ctx.users().resolve(ids);   // null unless the manifest declares `identity`
+```
+
+- **Absent, not redacted.** An id that is unknown, erased or pseudonymised is *missing* from the result —
+  no `null` element, no tombstone. So the result is **not index-aligned** with what you asked for and may
+  be shorter: key a `Map` on `id` and never read positionally. That is what lets a leaderboard row survive
+  its author being deleted.
+- **Store UUIDs, resolve at render. Never persist a display name.** A copy outlives the rename meant to
+  shed it and the erasure meant to end it, and core cannot reach inside your storage to fix either. **The
+  host cannot enforce this** — it is your side of the contract.
+- **`avatarUrl` is finished**: always `/api/users/{id}/avatar`, always host-relative, always populated.
+  Every user has an avatar (generated from the UUID when there is no provider picture), so there is no null
+  case and no fallback to write. Never a provider URL — the host proxies the bytes rather than redirecting.
+- **It resolves, it does not enumerate.** No list call, by design: you may ask only about ids you already
+  hold, and you only come by them through your own scope.
+- `ctx.user` carries the same two fields for the *signed-in* visitor. Reading them says nothing about
+  anyone else.
+
+Test with `makeMockUsers({ 'u-1': 'Ana' })` / `FakeUsers`, both of which leave an unknown id out of the
+result instead of returning a hole — and `forget(id)` / `withoutUser(id)` stage the erased author.
+
 ## Deep links & navigation — `ctx.route` (navigate since 0.7.0)
 
 A plugin declaring a `page` slot owns the URL subtree `/p/<pluginId>/*`. The host hands it the subpath
@@ -656,6 +706,7 @@ export default defineManifest({
   slots: [{ scope: 'episode', element: 'sample-card', placement: 'main', visibleTo: 'anonymous' }],
   nav: [{ path: '', label: 'Sample', icon: 'star' }],
   data: { writableBy: 'podcaster', readableBy: 'anonymous' },
+  identity: { resolvesUsers: true },
   external: { kinds: ['translation'], usedBy: 'podcaster' },
 });
 ```
@@ -940,8 +991,10 @@ const ctx = makeMockCtx({ apiResponses: { 'get data/site/main/stats': apiError(4
 
 **The doubles refuse what the host refuses.** `makeMockTags()` throws on `tagEpisode` unless you pass
 `{ writesEpisodes: true }`, and its `untagEpisode` leaves a `withFeedTag` assignment alone. `makeMockBlobs`
-enforces the ceilings and the allow-list. A component that has only ever met a permissive double meets its
-first refusal in front of a podcaster.
+enforces the ceilings and the allow-list. `makeMockUsers` / `FakeUsers` (since 0.13.0) leave an unresolvable
+id *out* of the result rather than returning a hole, so a component that reads the result positionally
+fails here instead of rendering `undefined` the first time somebody deletes their account. A component that
+has only ever met a permissive double meets its first refusal in front of a podcaster.
 
 **The extension-point harnesses** (Java): `SearchProviderHarness` calls a provider once per role including
 anonymous; `UserDataHandlerHarness.eraseTwice(userId)` proves erasure survives the host's retry;

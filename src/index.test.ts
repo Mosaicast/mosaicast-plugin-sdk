@@ -31,7 +31,7 @@ import { makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.12.0');
+    expect(PLATFORM_API_VERSION).toBe('0.13.0');
   });
 });
 
@@ -383,6 +383,7 @@ describe('defineManifest', () => {
       nav: [{ path: '', label: 'Sample', icon: 'star' }],
       data: { writableBy: 'podcaster', readableBy: 'anonymous' },
       tags: { readsVocabulary: true, writesEpisodes: false },
+      identity: { resolvesUsers: true },
       blobs: { maxFileBytes: 1024, quotaBytes: 4096, mimeTypes: ['image/png'] },
       external: { kinds: ['translation'], usedBy: 'podcaster' },
     });
@@ -391,6 +392,7 @@ describe('defineManifest', () => {
     expect(manifest.id).toBe('sample');
     expect(manifest.slots?.[0]?.element).toBe(manifest.frontend?.elements[0]);
     expect(manifest.tags?.writesEpisodes).toBe(false);
+    expect(manifest.identity?.resolvesUsers).toBe(true);
     expect(manifest.external?.kinds).toEqual(['translation']);
   });
 
