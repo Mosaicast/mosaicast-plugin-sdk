@@ -1,7 +1,118 @@
-# Migrating a plugin to `platformApi` 0.14.0
+# Migrating a plugin to `platformApi` 0.15.0
 
-Seven migrations in one file. **On `0.13.x`?** Read the next section and stop. **On `0.12.x`?** Do
-[0.12.x → 0.13.0](#012x--0130-rendering-the-people-behind-the-uuids) first, then work upward.
+Eight migrations in one file. **On `0.14.x`?** Read the next section and stop. **On `0.13.x`?** Do
+[0.13.x → 0.14.0](#013x--0140-telling-a-user-something-happened) first, then work upward.
+
+---
+
+# 0.14.x → 0.15.0: a schedule that follows config, and a component that survives a new `ctx`
+
+**This one you must do.** `platformApi` matches on `major.minor`, so a plugin declaring `0.14.x` is
+rejected by a `0.15.0` host. Re-declare, rebuild, reinstall.
+
+```diff
+  // plugin.json
+- "platformApi": "0.14.0",
++ "platformApi": "0.15.0",
+```
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.14.0")
++ implementation("dev.mosaicast:plugin-api:0.15.0")
+- "@mosaicast/plugin-sdk": "^0.14.0"
++ "@mosaicast/plugin-sdk": "^0.15.0"
+```
+
+**That is the whole *required* migration.** Nothing was removed or changed shape: `onSchedule` gained an
+overload, a render may return more than it could before, and both old forms mean exactly what they meant.
+Two of the three things this release adds, though, fix bugs your plugin currently has.
+
+## Fix 1: your configurable interval is lying (do this)
+
+If your tick rate comes from `ctx.config()`, you have this bug. The period was captured during
+`register()` and held for the life of the process, so an operator saves a new value, the form says it
+worked, and the plugin goes on running at the old cadence until the host restarts.
+
+```diff
+- ctx.onSchedule(
+-         Duration.ofSeconds(ctx.config().get("ingestIntervalSeconds", Integer.class, 60)),
+-         this::ingest);
++ ctx.onSchedule(
++         () -> Duration.ofSeconds(ctx.config().get("ingestIntervalSeconds", Integer.class, 60)),
++         this::ingest);
+```
+
+One character of real change — the value becomes a lambda — and the host re-reads it before every tick,
+rescheduling when it differs. Keep the `Duration` overload wherever the cadence is genuinely a constant;
+it is not deprecated.
+
+The supplier runs on a scheduler thread before each fire: read config or a field, nothing more. If it
+returns `null`, returns a non-positive `Duration`, or throws, the task stays on the last period that was
+valid and the host logs it — a failing config read must not cost you your schedule.
+
+In tests, `FakePluginContext.scheduledPeriods()` re-reads every supplier on demand, which is the assertion
+that catches the bug:
+
+```java
+var config = new MapPluginConfig(Map.of("ingestIntervalSeconds", 60));
+var ctx = new FakePluginContext(new InMemoryDocStore(), config, new FakeFeedAccess(Map.of()), null);
+plugin.register(ctx);
+
+config.with("ingestIntervalSeconds", 10);
+assertEquals(List.of(Duration.ofSeconds(10)), ctx.scheduledPeriods());   // fails if you captured a Duration
+```
+
+## Fix 2: your component is being destroyed several times a second (do this if it holds state)
+
+Until now every `ctx` assignment ran your cleanup, cleared `root` and called `render` again. That reads as
+rare — a consent choice, a language switch — and is not: a host that rebuilds its context object on each of
+its own renders reassigns it roughly four times a second while audio plays. Every remount loses component
+state, in-flight requests, scroll position and open dialogs, and re-runs every effect behind them.
+
+Return a handle instead of a cleanup callback and you decide what a changed `ctx` means:
+
+```diff
+  defineMosaicastElement({
+    tag: 'bingo-card',
+    render: ({ ctx, root }) => {
+      const app = mountMyFramework(root, ctx);
+-     return () => app.unmount();
++     return { update: (next) => app.setCtx(next), destroy: () => app.unmount() };
+    },
+  });
+```
+
+With an `update`, the SDK refreshes the `--mc-*` theme variables, calls it with the new context, and leaves
+`root` alone; `destroy` then runs only on an actual disconnect. Returning a cleanup callback still behaves
+exactly as it always did, so a static card needs no change at all.
+
+Two things you no longer have to build yourself: an **identical** context object is ignored either way (no
+`update`, no re-render), and an element **moved** in the DOM is rendered again instead of staying dead. If
+you wrote a module-level cache to survive the remount storm, this is the release where you can delete it —
+measure first.
+
+## Also new: your config fields can say what they are
+
+Optional, and typing only — the host has always been the sole validator. `label` and `description` take a
+locale map or a plain string, and `options` declares a closed set:
+
+```diff
+  config: {
+    ingestIntervalSeconds: {
+      type: 'number', default: 60, editableBy: 'podcaster',
++     label: { en: 'Ingest interval', de: 'Abrufintervall' },
++     description: { en: 'Seconds between two ingest runs.', de: 'Sekunden zwischen zwei Läufen.' },
+    },
++   matchMode: {
++     type: 'string', default: 'fuzzy',
++     options: [{ value: 'fuzzy', label: 'Fuzzy' }, { value: 'exact', label: 'Exact' }],
++   },
+  },
+```
+
+Plugins may not build their own config UI, so the generic admin form is the only thing an operator sees —
+without a label it shows them `ingestIntervalSeconds` and nothing else. The key stays visible beside the
+label, since the key is what your own docs name.
 
 ---
 

@@ -15,15 +15,19 @@ import dev.mosaicast.plugin.api.Tags;
 import dev.mosaicast.plugin.api.Translation;
 import dev.mosaicast.plugin.api.Users;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * A fully in-memory {@link PluginContext} for testing a plugin backend without core or a database
  * (ARCHITECTURE §13.5).
  *
  * <p>Typical flow: build the fake context, call {@code plugin.register(ctx)}, then assert against the
- * doc store. {@link #onSchedule(Duration, Runnable)} runs the task <strong>synchronously</strong> and
- * immediately, so scheduled work is exercised deterministically within the test.
+ * doc store. {@code onSchedule} runs the task <strong>synchronously</strong> and immediately, so
+ * scheduled work is exercised deterministically within the test; {@link #runScheduled()} ticks it again
+ * and {@link #scheduledPeriods()} re-reads what period each task would run at now.
  *
  * <p>By default {@link #schema()} returns {@code null} (no schema declared, like most plugins); pass a
  * {@link SchemaStore} to the full constructor to test a schema-declaring plugin. Not thread-safe.
@@ -44,7 +48,7 @@ public final class FakePluginContext implements PluginContext {
     private Notifier notifier;
     private Locales locales = FakeLocales.englishOnly();
     private Translation translation;
-    private int scheduledCount;
+    private final List<ScheduledTask> scheduled = new ArrayList<>();
 
     /** Creates a context with an empty doc store, empty config, empty feeds, no schema and no blobs. */
     public FakePluginContext() {
@@ -296,29 +300,70 @@ public final class FakePluginContext implements PluginContext {
 
     /**
      * Runs the task synchronously and immediately (no real scheduling), so tests observe its effects
-     * without waiting.
+     * without waiting, and keeps it for {@link #runScheduled()}.
      *
-     * @param every ignored beyond a positivity check; the task is run once, now
+     * <p>The period supplier is kept, never consumed for timing: {@link #scheduledPeriods()} calls it
+     * again on demand, which is how a test asserts that a configurable interval actually follows config.
+     *
+     * @param every supplies the period; called once here and validated as positive, as the host does at
+     *              registration
      * @param task  the task to run; never {@code null}
+     * @throws NullPointerException     if {@code every} or {@code task} is {@code null}, or the supplier
+     *                                  returns {@code null}
+     * @throws IllegalArgumentException if the supplied period is not positive
+     * @since 0.15.0
      */
     @Override
-    public void onSchedule(Duration every, Runnable task) {
+    public void onSchedule(Supplier<Duration> every, Runnable task) {
         Objects.requireNonNull(every, "every");
         Objects.requireNonNull(task, "task");
-        if (every.isNegative() || every.isZero()) {
-            throw new IllegalArgumentException("schedule interval must be positive: " + every);
+        Duration first = Objects.requireNonNull(every.get(), "every.get()");
+        if (first.isNegative() || first.isZero()) {
+            throw new IllegalArgumentException("schedule interval must be positive: " + first);
         }
-        scheduledCount++;
+        scheduled.add(new ScheduledTask(every, task));
         task.run();
     }
 
     /**
-     * The number of times {@link #onSchedule(Duration, Runnable)} has been called — handy for asserting
-     * a plugin registered its scheduled work.
+     * The number of times {@code onSchedule} has been called — handy for asserting a plugin registered
+     * its scheduled work.
      *
      * @return the count of scheduled tasks
      */
     public int scheduledCount() {
-        return scheduledCount;
+        return scheduled.size();
     }
+
+    /**
+     * The period each registered task would run at <strong>right now</strong>, in registration order —
+     * every supplier is called again on each invocation.
+     *
+     * <p>This is the assertion a configurable interval needs: change the value in {@link MapPluginConfig},
+     * call this, and the new period must be visible. A plugin that captured its interval in a
+     * {@link Duration} at {@code register()} time will keep reporting the old one, which is exactly the
+     * bug this method exists to catch.
+     *
+     * @return the current periods; never {@code null}
+     * @since 0.15.0
+     */
+    public List<Duration> scheduledPeriods() {
+        return scheduled.stream().map(t -> t.every().get()).toList();
+    }
+
+    /**
+     * Runs every registered task once more, in registration order — a second "tick" without waiting.
+     *
+     * <p>{@code onSchedule} already runs a task once, so this is for the cases where the first tick is
+     * not the interesting one: work that only does something on a later pass, or a task run after test
+     * setup has changed the store or the config.
+     *
+     * @since 0.15.0
+     */
+    public void runScheduled() {
+        scheduled.forEach(t -> t.task().run());
+    }
+
+    /** One registered task and the supplier the host would re-read before each of its ticks. */
+    private record ScheduledTask(Supplier<Duration> every, Runnable task) {}
 }

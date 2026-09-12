@@ -28,11 +28,11 @@ import {
   type SchemaQuery,
   type Scope,
 } from './index.js';
-import { makeMockCtx, makeMockSchema } from './testing.js';
+import { DEFAULT_THEME, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.14.0');
+    expect(PLATFORM_API_VERSION).toBe('0.15.0');
   });
 });
 
@@ -180,6 +180,131 @@ describe('defineMosaicastElement', () => {
     const tag = 'mc-test-twice';
     defineMosaicastElement({ tag, render: () => {} });
     expect(() => defineMosaicastElement({ tag, render: () => {} })).not.toThrow();
+  });
+
+  it('hands a new ctx to a handle that can update, without destroying the render', () => {
+    const tag = 'mc-test-update';
+    const seen: string[] = [];
+    let renders = 0;
+    let destroys = 0;
+    defineMosaicastElement({
+      tag,
+      render: ({ ctx, root }) => {
+        renders += 1;
+        const live = document.createElement('p');
+        live.textContent = ctx.scope.id;
+        root.append(live);
+        return {
+          update: (next) => {
+            seen.push(next.scope.id);
+            live.textContent = next.scope.id;
+          },
+          destroy: () => {
+            destroys += 1;
+          },
+        };
+      },
+    });
+
+    const el = document.createElement(tag) as HTMLElement & { ctx: PluginContext };
+    el.ctx = makeMockCtx({ scope: { type: 'feed', id: 'a' } });
+    document.body.appendChild(el);
+    const live = el.shadowRoot!.querySelector('p')!;
+
+    el.ctx = makeMockCtx({ scope: { type: 'feed', id: 'b' }, theme: { ...DEFAULT_THEME, bg: '#101010' } });
+    // Theme tokens are still refreshed for an update — they are the SDK's job, not the plugin's.
+    expect(el.shadowRoot!.querySelector('style')!.textContent).toContain('--mc-bg: #101010');
+
+    el.ctx = makeMockCtx({ scope: { type: 'feed', id: 'c' } });
+
+    expect(seen).toEqual(['b', 'c']);
+    expect(renders).toBe(1);
+    expect(destroys).toBe(0);
+    // The same node, still in place: state, scroll position and open dialogs survive with it.
+    expect(el.shadowRoot!.querySelector('p')).toBe(live);
+    expect(live.textContent).toBe('c');
+    expect(el.shadowRoot!.querySelector('style')!.textContent).toContain('--mc-bg: #ffffff');
+  });
+
+  it('ignores a re-assigned identical ctx object', () => {
+    const tag = 'mc-test-identity';
+    let renders = 0;
+    let updates = 0;
+    defineMosaicastElement({
+      tag,
+      render: ({ root }) => {
+        renders += 1;
+        root.textContent = 'x';
+        return { update: () => { updates += 1; } };
+      },
+    });
+
+    const el = document.createElement(tag) as HTMLElement & { ctx: PluginContext };
+    const ctx = makeMockCtx({ scope: { type: 'feed', id: 'a' } });
+    el.ctx = ctx;
+    document.body.appendChild(el);
+
+    // What a host does several times a second during playback when its context object is stable.
+    el.ctx = ctx;
+    el.ctx = ctx;
+
+    expect(renders).toBe(1);
+    expect(updates).toBe(0);
+    expect(el.ctx).toBe(ctx);
+  });
+
+  it('destroys on disconnect and re-renders when the element is moved back into the DOM', () => {
+    const tag = 'mc-test-remount';
+    let renders = 0;
+    let destroys = 0;
+    defineMosaicastElement({
+      tag,
+      render: ({ ctx, root }) => {
+        renders += 1;
+        root.textContent = ctx.scope.id;
+        return { update: () => {}, destroy: () => { destroys += 1; } };
+      },
+    });
+
+    const el = document.createElement(tag) as HTMLElement & { ctx: PluginContext };
+    el.ctx = makeMockCtx({ scope: { type: 'feed', id: 'a' } });
+    document.body.appendChild(el);
+    expect(renders).toBe(1);
+
+    // A DOM move is a disconnect plus a connect; the render must come back rather than stay dead.
+    el.remove();
+    expect(destroys).toBe(1);
+    document.body.appendChild(el);
+
+    expect(renders).toBe(2);
+    expect(el.shadowRoot!.querySelector('div')!.textContent).toBe('a');
+  });
+
+  it('still destroys and rebuilds for a render that returns a bare cleanup callback', () => {
+    const tag = 'mc-test-legacy';
+    let renders = 0;
+    let cleanups = 0;
+    defineMosaicastElement({
+      tag,
+      render: ({ root }) => {
+        renders += 1;
+        root.append(document.createElement('span'));
+        return () => {
+          cleanups += 1;
+        };
+      },
+    });
+
+    const el = document.createElement(tag) as HTMLElement & { ctx: PluginContext };
+    el.ctx = makeMockCtx({ scope: { type: 'feed', id: 'a' } });
+    document.body.appendChild(el);
+    const first = el.shadowRoot!.querySelector('span');
+
+    el.ctx = makeMockCtx({ scope: { type: 'feed', id: 'b' } });
+
+    expect(renders).toBe(2);
+    expect(cleanups).toBe(1);
+    expect(el.shadowRoot!.querySelector('span')).not.toBe(first);
   });
 });
 
@@ -444,6 +569,41 @@ describe('defineManifest', () => {
 
     // Absent, not defaulted — the SDK fills nothing in. The host applies the `podcaster` floor.
     expect(manifest.external?.usedBy).toBeUndefined();
+  });
+
+  it('types a config field with a localized label, description and a closed option set', () => {
+    const manifest = defineManifest({
+      id: 'sample',
+      version: '1.0.0',
+      platformApi: PLATFORM_API_VERSION,
+      name: 'Sample',
+      config: {
+        ingestIntervalSeconds: {
+          type: 'number',
+          default: 60,
+          editableBy: 'podcaster',
+          label: { en: 'Ingest interval', de: 'Abrufintervall' },
+          description: { en: 'Seconds between two ingest runs.', de: 'Sekunden zwischen zwei Läufen.' },
+        },
+        matchMode: {
+          type: 'string',
+          default: 'fuzzy',
+          // A plain string is still one language, for both halves.
+          label: 'Match mode',
+          options: [
+            { value: 'fuzzy', label: { en: 'Fuzzy', de: 'Unscharf' } },
+            { value: 'exact', label: 'Exact' },
+            { value: 'off' },
+          ],
+        },
+      },
+    });
+
+    expect(manifest.config?.ingestIntervalSeconds?.label).toEqual({
+      en: 'Ingest interval',
+      de: 'Abrufintervall',
+    });
+    expect(manifest.config?.matchMode?.options?.[2]?.label).toBeUndefined();
   });
 });
 

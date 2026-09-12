@@ -4,6 +4,8 @@
 package dev.mosaicast.plugin.api;
 
 import java.time.Duration;
+import java.util.Objects;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 
 /**
@@ -289,14 +291,62 @@ public interface PluginContext {
     Logger logger();
 
     /**
-     * Registers a periodic background task.
+     * Registers a periodic background task at a <strong>fixed</strong> period.
      *
      * <p>The host wraps execution in <a href="https://github.com/lukas-krecan/ShedLock">ShedLock</a> so
      * the task runs at most once across all instances (ARCHITECTURE §5.4/§7.4).
      *
+     * <p>The period is captured here and never re-read. If your tick rate comes from
+     * {@link #config() config} — anything an operator can edit in the admin form — use
+     * {@link #onSchedule(Supplier, Runnable)} instead: this overload keeps running at the value config
+     * had during {@code register()}, and the saved setting silently does nothing until the host restarts.
+     *
      * @param every how often the task should run; must be positive
      * @param task  the work to run on each tick; exceptions it throws are isolated by the host and must
      *              not take the site down
+     * @throws NullPointerException if {@code every} or {@code task} is {@code null}
      */
-    void onSchedule(Duration every, Runnable task);
+    default void onSchedule(Duration every, Runnable task) {
+        Objects.requireNonNull(every, "every");
+        onSchedule(() -> every, task);
+    }
+
+    /**
+     * Registers a periodic background task whose period the host <strong>re-reads before every tick</strong>
+     * (ARCHITECTURE §7.4).
+     *
+     * <p>This exists because {@link #onSchedule(Duration, Runnable)} takes its period once, during
+     * {@code register()}, and the host holds it for the life of the process. A plugin whose tick rate is
+     * configurable — which the manifest actively invites — therefore accepted a new value, stored it,
+     * reported success, and went on running at the old cadence. Nothing in the admin form said so.
+     *
+     * <p>So hand over the <em>reading</em> of the period rather than a value:
+     *
+     * <pre>{@code
+     * ctx.onSchedule(
+     *     () -> Duration.ofSeconds(ctx.config().getInt("ingestIntervalSeconds", 60)),
+     *     this::ingest);
+     * }</pre>
+     *
+     * <p><strong>What the host guarantees.</strong> It calls the supplier once at registration and again
+     * before each fire; when the answer differs from the period currently in force it reschedules, so the
+     * next tick lands on the new cadence. A change therefore takes effect within one old period — not at
+     * the next restart. The host may clamp very short periods to a floor it owns; treat the supplied value
+     * as a request, the same way the manifest's other numbers are.
+     *
+     * <p><strong>The supplier must be cheap and total.</strong> It runs on a scheduler thread before each
+     * tick, so read config or a field — do not query, block, or do work with side effects in it. A supplier
+     * that returns {@code null} or a non-positive {@link Duration}, or that throws, leaves the task running
+     * at the last period that was valid; the host logs it and the task is never silently dropped. Only the
+     * value at registration is strict: it must be positive, or the host rejects the registration.
+     *
+     * @param every supplies the current period, consulted before each tick; must return a positive
+     *              {@link Duration}
+     * @param task  the work to run on each tick; exceptions it throws are isolated by the host and must
+     *              not take the site down
+     * @throws NullPointerException     if {@code every} or {@code task} is {@code null}
+     * @throws IllegalArgumentException if the period supplied at registration is not positive
+     * @since 0.15.0
+     */
+    void onSchedule(Supplier<Duration> every, Runnable task);
 }
