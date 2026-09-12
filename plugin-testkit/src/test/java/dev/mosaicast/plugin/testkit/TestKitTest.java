@@ -242,6 +242,58 @@ class TestKitTest {
         FakePluginContext ctx = new FakePluginContext();
         assertThrows(IllegalArgumentException.class,
                 () -> ctx.onSchedule(Duration.ZERO, () -> { }));
+        assertThrows(IllegalArgumentException.class,
+                () -> ctx.onSchedule(() -> Duration.ofSeconds(-1), () -> { }));
+    }
+
+    @Test
+    void scheduledPeriodFollowsConfigWhenSupplied() {
+        MapPluginConfig config = new MapPluginConfig(Map.of("ingestIntervalSeconds", 60));
+        FakePluginContext ctx = new FakePluginContext(
+                new InMemoryDocStore(), config, new FakeFeedAccess(Map.of()), null);
+        PluginBackend plugin = c -> c.onSchedule(
+                () -> Duration.ofSeconds(c.config().get("ingestIntervalSeconds", Integer.class, 30)),
+                () -> c.store().put(Scope.site(), "ticks",
+                        c.store().get(Scope.site(), "ticks", Integer.class).orElse(0) + 1));
+
+        plugin.register(ctx);
+        assertEquals(List.of(Duration.ofSeconds(60)), ctx.scheduledPeriods());
+
+        // An operator saves a new interval; the plugin must run at it, not at the one it registered with.
+        config.with("ingestIntervalSeconds", 10);
+        assertEquals(List.of(Duration.ofSeconds(10)), ctx.scheduledPeriods());
+    }
+
+    @Test
+    void scheduledPeriodIsFrozenWhenTheDurationOverloadIsUsed() {
+        MapPluginConfig config = new MapPluginConfig(Map.of("ingestIntervalSeconds", 60));
+        FakePluginContext ctx = new FakePluginContext(
+                new InMemoryDocStore(), config, new FakeFeedAccess(Map.of()), null);
+        PluginBackend plugin = c -> c.onSchedule(
+                Duration.ofSeconds(c.config().get("ingestIntervalSeconds", Integer.class, 30)), () -> { });
+
+        plugin.register(ctx);
+        config.with("ingestIntervalSeconds", 10);
+
+        // The fixed overload captured the value at register(); that is the contract, not a bug in the fake.
+        assertEquals(List.of(Duration.ofSeconds(60)), ctx.scheduledPeriods());
+    }
+
+    @Test
+    void runScheduledTicksEveryRegisteredTaskAgain() {
+        FakePluginContext ctx = new FakePluginContext();
+        PluginBackend plugin = c -> c.onSchedule(Duration.ofMinutes(15), () ->
+                c.store().put(Scope.site(), "ticks",
+                        c.store().get(Scope.site(), "ticks", Integer.class).orElse(0) + 1));
+
+        plugin.register(ctx);
+        assertEquals(Optional.of(1), ctx.store().get(Scope.site(), "ticks", Integer.class));
+
+        ctx.runScheduled();
+        ctx.runScheduled();
+
+        assertEquals(Optional.of(3), ctx.store().get(Scope.site(), "ticks", Integer.class));
+        assertEquals(1, ctx.scheduledCount());
     }
 
     @Test

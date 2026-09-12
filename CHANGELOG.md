@@ -7,6 +7,69 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] — 2026-09-12
+
+Two contract fixes found in the same sweep, deliberately shipped as **one** bump: a plugin can finally
+follow a configurable schedule, and a plugin component can survive a new `ctx` instead of being destroyed
+for it. `platformApi` matches on `major.minor`, so every installed plugin must re-declare and rebuild —
+bundling both means paying that once rather than twice.
+
+Fixes [core#143](https://github.com/Mosaicast/mosaicast-core/issues/143) and the contract half of
+[core#144](https://github.com/Mosaicast/mosaicast-core/issues/144); types for
+[core#145](https://github.com/Mosaicast/mosaicast-core/issues/145) ride along. **Core must pin
+`mosaicastSdk = "0.15.0"`**, implement `onSchedule(Supplier<Duration>, Runnable)` in
+`PluginContextImpl`/`PluginScheduler`, and hand a new `ctx` to a mounted element rather than remounting it.
+The core-side half of #144 — memoising the player context value so `ctx` stops changing 4×/s — is
+independent of this release and can land before it.
+
+### Added
+
+- **`PluginContext.onSchedule(Supplier<Duration>, Runnable)`** — the host calls the supplier once at
+  registration and again **before every tick**, rescheduling when the answer differs. A configurable
+  interval now takes effect within one old period instead of at the next restart.
+  - The old `onSchedule(Duration, Runnable)` is unchanged, and is now a `default` method delegating to the
+    supplier form — a fixed cadence is still a legitimate thing to want, and plugins consume this interface
+    rather than implement it. What it must stop being is the *only* option: it captured the period during
+    `register()`, so a plugin reading `ctx.config()` there accepted a new value, stored it, reported
+    success, and went on running at the old cadence with nothing in the admin form saying so.
+  - **The supplier is consulted, not trusted.** It runs on a scheduler thread before each fire, so it must
+    be cheap and side-effect free. `null`, a non-positive `Duration`, or a throw leaves the task on the
+    last period that was valid and is logged — a plugin whose config read starts failing must not lose its
+    schedule. Only registration is strict: a non-positive period there is rejected outright. The host may
+    clamp very short periods to a floor it owns, the same way the manifest's other numbers are requests.
+- **`MosaicastHandle`** (TS) — a render may now return `{ update?, destroy? }` instead of a bare cleanup
+  callback. With an `update`, a new `ctx` no longer tears the render down: the SDK refreshes the `--mc-*`
+  theme variables, calls `update(next)`, and leaves `root` and everything in it alone.
+  - The contract said re-assigning `ctx` re-renders "after running any cleanup", which reads as rare until
+    you count: a host that rebuilds its context object on every one of its own renders reassigns it several
+    times a second during playback. Every plugin element was destroyed and rebuilt at that rate, losing
+    component state, in-flight requests, scroll position and open dialogs, and re-running every effect
+    behind them — one measured feed page fetched the same document eight times, and the plugin's
+    module-level cache written to compensate turned that into 19 requests. **What a changed `ctx` means is
+    now the plugin's decision**, which is the only place that knowledge exists.
+  - **Returning a cleanup function still means exactly what it did**, so no existing plugin changes
+    behaviour by upgrading.
+  - **An identical context object is ignored** whichever shape you return — no `update`, no re-render. A
+    plugin should not have to diff contexts to protect itself from a churning host.
+  - **A DOM move no longer kills the element.** Disconnect tears the render down as before, but a
+    reconnect renders it again instead of leaving a dead element waiting for a context object that differs.
+- **`FakePluginContext.scheduledPeriods()` / `runScheduled()`** (§13.5) — the first re-reads every
+  registered supplier on demand, so a test changes `MapPluginConfig` and asserts the new period; a plugin
+  that captured a `Duration` at `register()` keeps reporting the old one and fails. The second ticks every
+  registered task again, for work whose first pass is not the interesting one. `scheduledCount()` is
+  unchanged.
+- **`PluginConfigField.label`, localized `description`, and `options`** (TS manifest types) — `label` and
+  `description` take a locale map (`{ en, de }`) or a plain string, and `options` declares a closed set.
+  Purely additive typing for an author's editor: the manifest stays core-owned and the **host remains the
+  sole validator**. `options` has been enforced by core since it shipped there; the SDK type was simply
+  behind. New export: `LocalizedText`, `PluginConfigOption`.
+
+### Changed
+
+- `onSchedule(Duration, Runnable)` is now a `default` method on `PluginContext`. Host implementations
+  implement the `Supplier` overload; a host that only implements the old one no longer compiles, which is
+  the intended signal.
+
 ## [0.14.0] — 2026-09-04
 
 A plugin can put a message in a user's **inbox**. A minor bump, because `platformApi` matches on
@@ -1044,6 +1107,7 @@ Plugins that only *consume* the store are affected solely by the `query` return 
 - Initial release: the Java `plugin-api` contract (`dev.mosaicast.plugin.api.*`) + `plugin-testkit` test
   doubles, and the `@mosaicast/plugin-sdk` TypeScript package with the `/testing` subpath.
 
+[0.15.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.15.0
 [0.14.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.13.0
 [0.12.0]: https://github.com/Mosaicast/mosaicast-plugin-sdk/releases/tag/v0.12.0

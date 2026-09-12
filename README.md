@@ -766,8 +766,25 @@ export default defineManifest({
   identity: { resolvesUsers: true },
   notifications: { sends: true, perUserPerDay: 5 },
   external: { kinds: ['translation'], usedBy: 'podcaster' },
+  config: {
+    ingestIntervalSeconds: {
+      type: 'number', default: 60, editableBy: 'podcaster',
+      label: { en: 'Ingest interval', de: 'Abrufintervall' },      // locale map or a plain string
+      description: { en: 'Seconds between two ingest runs.' },
+    },
+    matchMode: {
+      type: 'string', default: 'fuzzy',
+      options: [{ value: 'fuzzy', label: 'Fuzzy' }, { value: 'exact', label: 'Exact' }],
+    },
+  },
 });
 ```
+
+**Config fields say what they are (since 0.15.0).** Plugins may not build their own config UI (§7.2), so
+the generic admin form is the only thing an operator ever sees — and without `label` and `description` it
+shows them `ingestIntervalSeconds` and nothing else, with no room to say what a sane value is or what unit
+it is in. Both take a locale map or a plain string; the key stays visible beside the label, because the key
+is what your own docs name. `options` declares a closed set, rendered as a select and refused outside it.
 
 **Documentation, not enforcement** — the same caveat `PluginDataDeclaration` and
 `ConsentServiceDeclaration` have carried since 0.4.0. The manifest is owned and validated by the **host**;
@@ -883,6 +900,58 @@ translation exists and handing it the original is not.
 var sitemap = new SitemapProviderHarness("wiki", new WikiSitemap(store)).collect();
 assertTrue(sitemap.problems().isEmpty());       // outside the namespace, hand-written ?lang=, split groups
 ```
+
+## Scheduled work — `ctx.onSchedule(...)` (a live period since 0.15.0)
+
+```java
+// Fixed forever — fine for work whose cadence is a constant.
+ctx.onSchedule(Duration.ofMinutes(15), this::ingest);
+
+// Re-read before every tick — use this whenever the period comes from config.
+ctx.onSchedule(() -> Duration.ofSeconds(ctx.config().get("ingestIntervalSeconds", Integer.class, 60)),
+               this::ingest);
+```
+
+The `Duration` overload takes its period **once**, during `register()`, and the host holds it for the life
+of the process. So a plugin whose tick rate is configurable — which the manifest actively invites —
+accepted a new value, stored it, reported success, and went on running at the old cadence until a restart.
+Nothing in the admin form said so.
+
+Hand over the *reading* of the period instead and the host consults your supplier before each fire,
+rescheduling when the answer changes: a saved setting takes effect within one old period. The supplier runs
+on a scheduler thread, so read config or a field and nothing more. Returning `null`, returning a
+non-positive `Duration`, or throwing leaves the task on the last period that was valid — logged, never
+silently dropped. Only the value at registration is strict: it must be positive. The host may clamp very
+short periods to a floor it owns.
+
+`FakePluginContext` makes the difference assertable: `scheduledPeriods()` re-reads every registered
+supplier on demand, so a test changes `MapPluginConfig` and sees the new period — a plugin that captured a
+`Duration` at `register()` keeps reporting the old one and fails the assertion.
+
+## Surviving a new `ctx` — `MosaicastHandle` (since 0.15.0)
+
+```ts
+defineMosaicastElement({
+  tag: 'bingo-card',
+  render: ({ ctx, root }) => {
+    const app = mountMyFramework(root, ctx);
+    return { update: (next) => app.setCtx(next), destroy: () => app.unmount() };
+  },
+});
+```
+
+Returning a cleanup callback (or nothing) keeps the original behaviour: every `ctx` assignment runs cleanup,
+clears `root` and calls `render` again. That is right for a static card and expensive for anything else,
+because `ctx` changes far more often than "a consent choice or a language switch" — a host that rebuilds
+its context object on each of its own renders can reassign it several times a second during playback, and
+each rebuild loses component state, in-flight requests, scroll position and open dialogs, then re-runs
+every effect behind them.
+
+Return a `MosaicastHandle` with an `update` and the SDK stops tearing down: it refreshes the `--mc-*` theme
+variables, calls `update(next)` and leaves `root` alone. `destroy` then runs only when the element actually
+disconnects — and if the element is moved in the DOM (a disconnect plus a connect), the SDK renders it
+again rather than leaving it dead. Re-assigning the **same** context object is ignored either way, so a
+churning host costs you nothing without your having to compare contexts yourself.
 
 ## Logging — `ctx.logger()` / `ctx.log()` (since 0.4.0)
 
@@ -1016,6 +1085,10 @@ var ctx = new FakePluginContext();               // in-memory store, config, fee
 myPlugin.register(ctx);                            // exercise the backend
 assertEquals(Optional.of("world"),
         ctx.store().get(Scope.site(), "hello", String.class));
+
+ctx.runScheduled();                                // tick again (since 0.15.0)
+config.with("ingestIntervalSeconds", 10);          // and prove the period follows config
+assertEquals(List.of(Duration.ofSeconds(10)), ctx.scheduledPeriods());
 ```
 
 **TypeScript** (`@mosaicast/plugin-sdk/testing`, jsdom):

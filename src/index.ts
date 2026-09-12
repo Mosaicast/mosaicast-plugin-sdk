@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.14.0' as const;
+export const PLATFORM_API_VERSION = '0.15.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -1952,6 +1952,34 @@ export interface PluginNavDeclaration {
   role?: DataAccessRole;
 }
 
+/**
+ * Text the host renders to an operator, in as many languages as you can write it.
+ *
+ * A plain string is one language and always accepted. The map form is locale code → text, resolved by the
+ * host down the chain the shell already uses everywhere else: the exact locale, then its base language so
+ * `de-AT` finds a `de` entry, then `en`, then any entry that exists.
+ *
+ * @since 0.15.0
+ */
+export type LocalizedText = string | Record<string, string>;
+
+/**
+ * One choice of a config field that declares a closed set.
+ *
+ * A field with `options` is rendered as a select and accepts nothing outside them — checked at load for
+ * the manifest's own `default` and at write time for an operator's override. Before that existed, a field
+ * its plugin understood as exactly two words was a free-text box in which a typo validated, saved, and
+ * then fell back silently at read time.
+ *
+ * @since 0.15.0
+ */
+export interface PluginConfigOption {
+  /** The value stored and handed back to your backend. */
+  value: string | number | boolean;
+  /** What the operator sees; falls back to the value itself when absent. */
+  label?: LocalizedText;
+}
+
 /** One declared config field, rendered by core as a generic admin form (§7.2). @since 0.9.0 */
 export interface PluginConfigField {
   /** The value type the admin form renders. */
@@ -1960,8 +1988,29 @@ export interface PluginConfigField {
   default?: string | number | boolean;
   /** The minimum role that may edit it. */
   editableBy?: DataAccessRole;
-  /** A short explanation shown beside the field. */
-  description?: string;
+  /**
+   * The field's name in the form, in place of the raw key.
+   *
+   * Plugins may not build their own config UI (§7.2), so the generic form is the only thing an operator
+   * ever sees — and without this it shows them `ingestIntervalSeconds` and nothing else. The key stays
+   * visible next to the label, because the key is what your own docs name.
+   *
+   * @since 0.15.0
+   */
+  label?: LocalizedText;
+  /**
+   * A short explanation shown under the field: what the setting does, what a sane value looks like, what
+   * unit it is in.
+   *
+   * Widened to {@link LocalizedText} in `0.15.0`; a plain string still means one language.
+   */
+  description?: LocalizedText;
+  /**
+   * The closed set of values this field accepts. Omit for a free-form input.
+   *
+   * @since 0.15.0
+   */
+  options?: PluginConfigOption[];
 }
 
 /** The shape of the manifest's `blobs` block (ARCHITECTURE §11.1). @since 0.9.0 */
@@ -2480,20 +2529,72 @@ export interface PluginContext {
 }
 
 /**
+ * What a render may return so it can **survive a new `ctx`** instead of being torn down for it.
+ *
+ * Returning a plain cleanup function (or nothing) keeps the original behaviour: every `ctx` assignment
+ * destroys the render and builds a new one, losing component state, in-flight requests, scroll position
+ * and open dialogs. That is fine for a static card and wrong for anything else, because `ctx` changes far
+ * more often than "a consent choice or a language switch" — a host that rebuilds its context object
+ * during playback can reassign it several times a second.
+ *
+ * Return this instead and the SDK stops tearing down: on a new `ctx` it refreshes the theme variables,
+ * calls {@link update} with the new context and leaves `root` and everything in it alone. {@link destroy}
+ * then means what it says — the element is going away.
+ *
+ * ```ts
+ * defineMosaicastElement({
+ *   tag: 'bingo-card',
+ *   render: ({ ctx, root }) => {
+ *     const app = mountMyFramework(root, ctx);
+ *     return { update: (next) => app.setCtx(next), destroy: () => app.unmount() };
+ *   },
+ * });
+ * ```
+ *
+ * @since 0.15.0
+ */
+export interface MosaicastHandle {
+  /**
+   * Called with the new context whenever the host reassigns `ctx`, in place of a re-render.
+   *
+   * `root` keeps its DOM and no cleanup runs first. The SDK has already applied the new theme tokens.
+   * Omit it and the SDK falls back to destroy-and-render, which is what a plugin returning a bare cleanup
+   * function gets.
+   *
+   * A host may reassign an **identical** context object; the SDK filters that case out, so every call you
+   * see carries a `ctx` that is at least a different object.
+   */
+  update?(ctx: PluginContext): void;
+  /**
+   * Called when the element disconnects, and before a full re-render — the same duty the bare cleanup
+   * callback has. Drop subscriptions ({@link Unsubscribe}), timers and in-flight requests here.
+   */
+  destroy?(): void;
+}
+
+/**
  * What a plugin author implements: render logic given the mount point and context.
  *
  * @param args.ctx  the host-provided context
  * @param args.root a dedicated container inside the component's shadow root to render into; it is
  *                  cleared by the SDK before each call
- * @returns an optional cleanup callback, run before the next render and on disconnect
+ * @returns nothing, a cleanup callback (run before the next render and on disconnect), or — since
+ *          `0.15.0` — a {@link MosaicastHandle} whose `update` takes a new `ctx` **without** the render
+ *          being torn down and rebuilt
  */
-export type MosaicastRender = (args: { ctx: PluginContext; root: HTMLElement }) => void | (() => void);
+export type MosaicastRender = (args: {
+  ctx: PluginContext;
+  root: HTMLElement;
+}) => void | (() => void) | MosaicastHandle;
 
 /** Options for {@link defineMosaicastElement}. */
 export interface DefineElementOptions {
   /** The custom-element tag name (must contain a hyphen), e.g. `bingo-episode-card`. */
   tag: string;
-  /** The render callback invoked whenever `ctx` is (re)assigned. */
+  /**
+   * The render callback. Invoked when `ctx` is first assigned, and again on every later assignment
+   * unless it returned a {@link MosaicastHandle} with an `update`.
+   */
   render: MosaicastRender;
 }
 
@@ -2516,13 +2617,30 @@ function themeCss(theme: ThemeTokens): string {
   return `:host { display: block; ${decls} }`;
 }
 
+/** Normalises what a render returned into one shape the element can drive. */
+function toHandle(result: void | (() => void) | MosaicastHandle): MosaicastHandle | null {
+  if (typeof result === 'function') {
+    return { destroy: result };
+  }
+  if (result && typeof result === 'object') {
+    return result;
+  }
+  return null;
+}
+
 /**
  * Registers a Mosaicast plugin Web Component.
  *
  * The created custom element attaches an open shadow root, accepts the host's {@link PluginContext} via
  * a `ctx` property, injects the theme tokens as `--mc-*` CSS custom properties into the shadow root, and
  * calls your {@link DefineElementOptions.render} into a dedicated container — so you write only render
- * logic. Re-assigning `ctx` re-renders (after running any cleanup the previous render returned).
+ * logic.
+ *
+ * **What a new `ctx` costs you is your choice (since `0.15.0`).** Return a {@link MosaicastHandle} with
+ * an `update` and the SDK hands the new context to the render you already have: theme variables are
+ * refreshed, `update(ctx)` is called, `root` is untouched. Return a bare cleanup callback (or nothing)
+ * and the old behaviour stands: cleanup runs, `root` is cleared, `render` is called again. Either way an
+ * assignment of the **same** context object is ignored, and `destroy` runs on disconnect.
  *
  * Calling twice with the same tag is a no-op (the browser forbids redefining a custom element).
  *
@@ -2538,7 +2656,11 @@ export function defineMosaicastElement(options: DefineElementOptions): void {
     private readonly styleEl: HTMLStyleElement;
     private readonly root: HTMLElement;
     private ctxValue: PluginContext | null = null;
-    private cleanup: (() => void) | void = undefined;
+    private handle: MosaicastHandle | null = null;
+    /** The context the live render was built with — the identity an incoming `ctx` is compared against. */
+    private renderedCtx: PluginContext | null = null;
+    /** Whether a render is currently live in `root` (false before the first one and after a teardown). */
+    private mounted = false;
 
     constructor() {
       super();
@@ -2548,35 +2670,62 @@ export function defineMosaicastElement(options: DefineElementOptions): void {
       shadow.append(this.styleEl, this.root);
     }
 
-    /** The host sets this to (re)render the component. */
+    /** The host sets this to render the component, and again whenever its context changes. */
     set ctx(value: PluginContext) {
+      // A host that rebuilds its context object on every one of its own renders reassigns this several
+      // times a second during playback. Re-handing an identical object is nothing to act on.
+      if (this.mounted && value === this.renderedCtx) {
+        this.ctxValue = value;
+        return;
+      }
       this.ctxValue = value;
-      this.rerender();
+      this.apply();
     }
 
     get ctx(): PluginContext | null {
       return this.ctxValue;
     }
 
-    private rerender(): void {
+    private apply(): void {
       const ctx = this.ctxValue;
       if (!ctx) {
         return;
       }
-      if (typeof this.cleanup === 'function') {
-        this.cleanup();
-        this.cleanup = undefined;
-      }
       this.styleEl.textContent = themeCss(ctx.theme);
+      this.renderedCtx = ctx;
+
+      const update = this.mounted ? this.handle?.update : undefined;
+      if (update) {
+        update.call(this.handle, ctx);
+        return;
+      }
+
+      this.teardown();
       this.root.replaceChildren();
-      this.cleanup = render({ ctx, root: this.root });
+      this.handle = toHandle(render({ ctx, root: this.root }));
+      this.mounted = true;
+    }
+
+    private teardown(): void {
+      const destroy = this.handle?.destroy;
+      if (destroy) {
+        destroy.call(this.handle);
+      }
+      this.handle = null;
+      this.mounted = false;
+    }
+
+    connectedCallback(): void {
+      // Moving an element in the DOM disconnects and reconnects it, which has already torn the render
+      // down. Without this the element would stay dead until the host happened to hand it a *different*
+      // context object.
+      if (!this.mounted && this.ctxValue) {
+        this.apply();
+      }
     }
 
     disconnectedCallback(): void {
-      if (typeof this.cleanup === 'function') {
-        this.cleanup();
-        this.cleanup = undefined;
-      }
+      this.teardown();
     }
   }
 
