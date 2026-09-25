@@ -18,8 +18,15 @@ import java.time.Instant;
  * runtime, speaking shares) are non-authoritative, may be absent, and belong only inside that plugin's
  * own UI — never mixed into this snapshot (§4.2).
  *
- * @param title        the episode title from the feed; never {@code null}
- * @param description  the episode description/show notes; never {@code null}, may be empty
+ * <p><strong>{@code description} is untrusted third-party HTML.</strong> It is the show-notes block exactly
+ * as the podcast host published it, and anyone who can edit that feed controls it. The host does not
+ * sanitize it for you. Anything that writes description text into output — an {@link OgMeta} description,
+ * a {@link SearchHit} excerpt, a notification, HTML of your own — should use {@link #descriptionText()},
+ * which the host has already reduced to plain text. The frontend runs HTML through {@code ctx.sanitize}.
+ *
+ * @param title           the episode title from the feed; never {@code null}
+ * @param description     the episode show notes as the feed published them — <strong>untrusted
+ *                        HTML</strong>; never {@code null}, may be empty
  * @param audioUrl     the enclosure audio URL; {@code null} for a {@code PLANNED} episode with no audio yet
  * @param publishedAt  the publication timestamp; {@code null} for a {@code PLANNED} episode
  * @param duration     the declared runtime ({@code itunes:duration}/enclosure); {@code null} when the feed
@@ -31,6 +38,10 @@ import java.time.Instant;
  * @param author       the episode author ({@code itunes:author}); {@code null} if the feed declares none
  * @param subtitle     a short episode subtitle ({@code itunes:subtitle}); {@code null} if the feed declares
  *                     none
+ * @param descriptionText the same show notes as plain text — tags removed, entities decoded, whitespace
+ *                        collapsed — computed by the host; never {@code null} (a {@code null} argument
+ *                        becomes {@code ""}), empty when the feed has no description
+ *                        (since 0.16.0)
  */
 public record DisplaySnapshot(
         String title,
@@ -41,7 +52,37 @@ public record DisplaySnapshot(
         String imageUrl,
         String feedImageUrl,
         String author,
-        String subtitle) {
+        String subtitle,
+        String descriptionText) {
+
+    /** Normalises an absent plain-text description to {@code ""}, so it is never {@code null}. */
+    public DisplaySnapshot {
+        descriptionText = descriptionText == null ? "" : descriptionText;
+    }
+
+    /**
+     * The pre-0.16.0 shape, without {@link #descriptionText()} — which is left <strong>empty</strong>.
+     *
+     * <p>Kept so test fixtures written against 0.15 still compile. The host always uses the canonical
+     * constructor; a fixture that renders description text should too, or it tests against an empty string.
+     *
+     * @param title        see the canonical constructor
+     * @param description  see the canonical constructor
+     * @param audioUrl     see the canonical constructor
+     * @param publishedAt  see the canonical constructor
+     * @param duration     see the canonical constructor
+     * @param imageUrl     see the canonical constructor
+     * @param feedImageUrl see the canonical constructor
+     * @param author       see the canonical constructor
+     * @param subtitle     see the canonical constructor
+     * @deprecated since 0.16.0 — pass {@code descriptionText} as the tenth argument
+     */
+    @Deprecated(since = "0.16.0", forRemoval = true)
+    public DisplaySnapshot(String title, String description, String audioUrl, Instant publishedAt,
+                           Duration duration, String imageUrl, String feedImageUrl, String author,
+                           String subtitle) {
+        this(title, description, audioUrl, publishedAt, duration, imageUrl, feedImageUrl, author, subtitle, "");
+    }
 
     /**
      * The artwork to display for this episode: the episode's own {@link #imageUrl()} if present, otherwise

@@ -446,7 +446,7 @@ describe('makeMockFeeds', () => {
   it('answers from registered snapshots and null for the rest', async () => {
     const feeds = makeMockFeeds().withDisplay('kraken', kraken);
 
-    expect(await feeds.display('kraken')).toEqual(kraken);
+    expect(await feeds.display('kraken')).toEqual({ ...kraken, descriptionText: 'a big squid' });
     // Not an error: the host answers the same way for an episode this visitor may not see.
     expect(await feeds.display('gated')).toBeNull();
     expect(feeds.requested).toEqual(['kraken', 'gated']);

