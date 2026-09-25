@@ -3,6 +3,7 @@
 
 package dev.mosaicast.plugin.testkit;
 
+import dev.mosaicast.plugin.api.CrossUserStore;
 import dev.mosaicast.plugin.api.DocStore;
 import dev.mosaicast.plugin.api.FeedAccess;
 import dev.mosaicast.plugin.api.Locales;
@@ -46,6 +47,7 @@ public final class FakePluginContext implements PluginContext {
     private Tags tags;
     private Users users;
     private Notifier notifier;
+    private boolean readsAllUsers;
     private Locales locales = FakeLocales.englishOnly();
     private Translation translation;
     private final List<ScheduledTask> scheduled = new ArrayList<>();
@@ -215,6 +217,35 @@ public final class FakePluginContext implements PluginContext {
     @Override
     public Notifier notifier() {
         return notifier;
+    }
+
+    /**
+     * Stands in for a manifest declaring {@code "data": { "readsAllUsers": true }}, so {@link #allUsers()}
+     * reads this context's own store's user partitions.
+     *
+     * <p>Off by default, as the declaration is: a backend written against a cross-user reader that is always
+     * there would fail at the first production load, where an undeclared plugin gets {@code null}. A test
+     * that exercises your aggregate turns it on; one that proves you handle its absence leaves it off.
+     *
+     * @return this instance, for chaining
+     * @since 0.16.0
+     */
+    public FakePluginContext withReadsAllUsers() {
+        this.readsAllUsers = true;
+        return this;
+    }
+
+    /**
+     * Every user partition of {@link #store()}, or {@code null} unless {@link #withReadsAllUsers()} was
+     * called — the same {@code null} a plugin that does not declare {@code data.readsAllUsers} sees from the
+     * host.
+     *
+     * @return the cross-user reader, or {@code null}
+     * @since 0.16.0
+     */
+    @Override
+    public CrossUserStore allUsers() {
+        return readsAllUsers ? store.acrossUsers() : null;
     }
 
     /**

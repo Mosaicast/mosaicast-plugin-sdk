@@ -225,7 +225,8 @@ export interface PagedDocs<T = unknown> {
  * The doc a backend writes with `ctx.store().put(scope, key, value)` is the one read here at
  * `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`: one store, two ends. The `user` scope is the
  * exception — it exists only here. A backend has no calling user, so it cannot write a user partition at
- * all and reads them only in aggregate, through the Java `DocStore.queryAcrossUsers(prefix)`.
+ * all and reads them only in aggregate, through the Java `ctx.allUsers().query(prefix)` — which the
+ * manifest has to declare ({@link PluginDataDeclaration.readsAllUsers}).
  *
  * ## Where per-user data goes
  *
@@ -290,7 +291,7 @@ export interface PagedDocs<T = unknown> {
  * await ctx.api.delete(`${mine}/${key}`);                     // idempotent
  *
  * // A leaderboard is not built here: the backend aggregates every user's marks with
- * // queryAcrossUsers(...) and writes the result to `${shared}/leaderboard` for this component to read.
+ * // ctx.allUsers().query(...) and writes the result to `${shared}/leaderboard` for this component to read.
  * // If the manifest declares that key backendOwned, a PUT to it from here is a 403 — by design.
  * const board = await ctx.api.get<Leaderboard>(`${shared}/leaderboard`);
  * ```
@@ -1696,7 +1697,7 @@ export interface NotifyMessage {
  * a person who did not ask for it, so the host draws two lines you cannot move:
  *
  * - **You may only notify users you already hold `user`-scope data for.** Enforced against the same
- *   partitions the backend's `queryAcrossUsers` reads: bingo may write to its participants because
+ *   partitions the backend's `allUsers().query(...)` reads: bingo may write to its participants because
  *   participants have rows, and no plugin can reach a user who never touched it.
  * - **The rate limits are the host's** — per recipient per window, plus a ceiling across all recipients.
  *   A limit a plugin enforces is a limit a plugin can drop, so there is no counter here to read.
@@ -1920,6 +1921,21 @@ export interface PluginDataDeclaration {
    * the backend cannot write at all — even a bare `*` leaves those to their owner.
    */
   backendOwned?: string[];
+  /**
+   * Whether this plugin's **backend** may read every user's `user` partition at once — the Java
+   * `ctx.allUsers()`, which is `null` without this.
+   *
+   * It is the one read that crosses an ownership boundary: every account's documents, each with the
+   * owner's UUID. That is a different thing to be told about before installing than "keeps per-user
+   * data", which is all the `user` scope implies — so it is declared, like `blobs`, `identity` and
+   * `notifications`, and absent means no. Declare it for a leaderboard, a rollup, a moderation view.
+   *
+   * Nothing changes for the frontend: a browser only ever reads its own partition, `'self'`, whatever
+   * this says. Until `0.16.0` the capability was `DocStore.queryAcrossUsers` and every plugin had it.
+   *
+   * @since 0.16.0
+   */
+  readsAllUsers?: boolean;
 }
 
 /**

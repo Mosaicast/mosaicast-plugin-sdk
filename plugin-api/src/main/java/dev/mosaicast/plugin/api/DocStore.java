@@ -27,7 +27,8 @@ import java.util.Optional;
  * <p><strong>A backend thread has no calling user</strong>, so every method below throws
  * {@link UnsupportedOperationException} when handed a {@code USER} scope — reads included, since
  * resolving "me" without a caller would have to pick someone, and any pick is wrong. To aggregate over
- * users, use {@link #queryAcrossUsers(String)}, which is explicit about having no single owner.
+ * users, declare {@code data.readsAllUsers} and use {@link PluginContext#allUsers()}, which is explicit
+ * about having no single owner.
  *
  * <p><strong>A shared-scope document has no owner.</strong> Anything above the plugin's
  * {@code writableBy} floor can overwrite or delete any key in a {@link ScopeType#SITE},
@@ -59,8 +60,8 @@ import java.util.Optional;
  * <p><strong>This is the plugin's sole persistence path</strong> (unless the manifest declares a
  * {@link SchemaStore schema}), and it is shared with the plugin's frontend: the host exposes a fixed,
  * generic, per-plugin-namespaced HTTP surface over it, which the Web Component reaches via
- * {@code ctx.api}. That surface mirrors this interface one-to-one — get, put, list, delete, and no more
- * ({@link #queryAcrossUsers(String)} excepted: it is backend-only and has no endpoint). A document
+ * {@code ctx.api}. That surface mirrors this interface one-to-one — get, put, list, delete, and no more.
+ * A document
  * written here with {@link #put(Scope, String, Object)} is read by the frontend at
  * {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — see {@link PluginContext#store()} for
  * the full endpoint list and its access rules. Plugins do not define HTTP routes.
@@ -118,7 +119,7 @@ public interface DocStore {
      * @param <T>   the value type
      * @return the value, or {@link Optional#empty()} if no entry exists for {@code (scope, key)}
      * @throws UnsupportedOperationException if {@code scope} is a {@link ScopeType#USER} scope — a
-     *         backend has no calling user; see {@link #queryAcrossUsers(String)}
+     *         backend has no calling user; see {@link PluginContext#allUsers()}
      */
     <T> Optional<T> get(Scope scope, String key, Class<T> type);
 
@@ -162,32 +163,7 @@ public interface DocStore {
      * @return the matching documents, in no guaranteed order; never {@code null}, empty when nothing
      *         matches
      * @throws UnsupportedOperationException if {@code scope} is a {@link ScopeType#USER} scope — use
-     *         {@link #queryAcrossUsers(String)}, which names the owner of each document it returns
+     *         {@link PluginContext#allUsers()}, which names the owner of each document it returns
      */
     List<DocEntry> query(Scope scope, String keyPrefix);
-
-    /**
-     * Every user's entries under {@code keyPrefix}, across all {@link ScopeType#USER} partitions of this
-     * plugin.
-     *
-     * <p><strong>This reads other people's data.</strong> It exists for aggregates — a leaderboard, a
-     * moderation view, a nightly rollup — and it is the wrong tool for showing one user their own state:
-     * that is {@code ctx.api} against {@code data/user/me/…} from the frontend, where the host resolves
-     * the caller.
-     *
-     * <p>Backend-only and read-only: there is no HTTP surface for it, so no visitor's request can reach
-     * another visitor's data through it. Keeping the aggregate on the server is also what makes it
-     * <em>true</em> — the alternative, having each browser report its own summary into a shared scope,
-     * puts a forgeable number in the client's hands.
-     *
-     * <p>Each result carries the host-resolved {@link OwnedDocEntry#userId() owner}. The scope is implicit
-     * (all user partitions), so unlike {@link #query(Scope, String)} there is nothing to pass but the
-     * prefix.
-     *
-     * @param keyPrefix the key prefix to match; an empty string matches every key in every user partition
-     * @return the matching documents with their owners, in no guaranteed order; never {@code null}, empty
-     *         when nothing matches
-     * @since 0.5.0
-     */
-    List<OwnedDocEntry> queryAcrossUsers(String keyPrefix);
 }

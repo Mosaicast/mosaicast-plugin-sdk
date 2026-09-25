@@ -179,16 +179,23 @@ boundary, so it does not share a constructor with anything in your plugin.
 - The partition is **flat** — one per user, not one per user and entity — so the entity goes in the key: `mark:<episodeSlug>:cell`.
 - `readableBy` does not apply to it. No floor makes someone else's partition readable.
 
-**A backend has no calling user**, so every `DocStore` method throws `UnsupportedOperationException` for a `USER` scope — reads included, since resolving "me" without a caller would have to pick someone. Aggregate instead:
+**A backend has no calling user**, so every `DocStore` method throws `UnsupportedOperationException` for a `USER` scope — reads included, since resolving "me" without a caller would have to pick someone. Aggregate instead — **after declaring it** (since 0.16.0):
+
+```json
+"data": { "writableBy": "fan", "readableBy": "anonymous", "readsAllUsers": true }
+```
 
 ```java
 // Backend-only, read-only, and no HTTP surface: no visitor's request can reach another's data.
-List<OwnedDocEntry> marks = ctx.store().queryAcrossUsers("mark:");
+// null without data.readsAllUsers — the one read that crosses an ownership boundary is declared.
+List<OwnedDocEntry> marks = ctx.allUsers().query("mark:");
 // record OwnedDocEntry(UUID userId, String key, JsonNode value) — the owner is host-resolved, never
 // a value the browser supplied, which is what makes a leaderboard built from it true.
 ```
 
-Write the aggregate back to an entity scope (`…/data/episode/s2e04/leaderboard`) and let the component read it there. In tests, `InMemoryDocStore.asUser(uuid)` stands in for the host resolving `me`, so you can seed what a frontend would have written and then assert on `queryAcrossUsers`.
+Write the aggregate back to an entity scope (`…/data/episode/s2e04/leaderboard`) and let the component read it there. In tests, `InMemoryDocStore.asUser(uuid)` stands in for the host resolving `me`, so you can seed what a frontend would have written; `FakePluginContext.withReadsAllUsers()` stands in for the declaration (off by default, so `ctx.allUsers()` is `null` as it is for an undeclared plugin), and `store.acrossUsers()` reads the partitions directly for your assertions.
+
+**Why `readsAllUsers` is declared.** Every other doc-store read is a plugin's own shared scopes or the caller's own partition. This one returns every account's documents with their owners' UUIDs — "can enumerate everyone who ever used me" — which an operator should be able to read off a manifest before installing, exactly as with `identity` and `notifications`. Until 0.16.0 it was `ctx.store().queryAcrossUsers(prefix)` and every plugin had it without asking.
 
 **The two ends see one store.** The doc a backend writes with `ctx.store().put(scope, key, value)` is exactly what the frontend reads at `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`.
 
@@ -418,7 +425,7 @@ Test with `makeMockTags({ writesEpisodes })` / `FakeTags`, both of which refuse 
 
 ## Who the UUIDs are — `ctx.users` / `ctx.users()` (since 0.13.0)
 
-A backend calling `queryAcrossUsers` gets `OwnedDocEntry(userId, …)` — UUIDs and a document. A leaderboard
+A backend calling `ctx.allUsers().query(...)` gets `OwnedDocEntry(userId, …)` — UUIDs and a document. A leaderboard
 built from that had ids and no way to draw a person, and both workarounds were bad: show raw UUIDs, or copy
 display names into the plugin's own store. This is the lookup that fixes it. It is deliberately a lookup
 rather than a wider `ctx.user`: the host still resolves access, and what you learn about somebody else stays
@@ -495,7 +502,7 @@ if (told.length < participants.length) prune(participants, told);
 ```
 
 - **Only users you already hold `user`-scope data for.** Host-enforced against the same partitions
-  `queryAcrossUsers` reads — participants have rows, and no plugin can reach a user who never touched it.
+  `allUsers().query(...)` reads — whether or not you declared `readsAllUsers` — participants have rows, and no plugin can reach a user who never touched it.
 - **`send` answers who actually got it.** An ineligible or erased recipient is left out rather than
   failing the call, so partial sends are normal and the return value is the only way to see one. A plugin
   that ignores it and works from a stale participant list notifies nobody while looking perfectly healthy.

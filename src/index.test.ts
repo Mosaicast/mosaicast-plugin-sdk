@@ -43,8 +43,10 @@ describe('the data declaration', () => {
       readableBy: 'anonymous',
       writableBy: 'podcaster',
       backendOwned: ['stats', 'agg:*'],
+      readsAllUsers: true,
     };
     expect(data.backendOwned).toContain('stats');
+    expect(data.readsAllUsers).toBe(true);
 
     // The floors are documentation-only, but the one rule the type does carry is this one.
     // @ts-expect-error a write floor of `anonymous` is rejected by the host at load.

@@ -32,8 +32,8 @@ public enum ScopeType {
      * where per-user data belongs — see {@link Scope#user()} and {@link DocStore}.
      *
      * <p>Backend-only code has no calling user, so a {@link DocStore} call with this scope throws
-     * {@link UnsupportedOperationException}; aggregate across users with
-     * {@link DocStore#queryAcrossUsers(String)} instead.
+     * {@link UnsupportedOperationException}; aggregate across users with {@link PluginContext#allUsers()}
+     * instead, which the manifest has to declare.
      *
      * @since 0.5.0
      */

@@ -9,7 +9,7 @@ import java.util.UUID;
  * Who a user id belongs to, in the only terms a plugin is given (ARCHITECTURE §8.8).
  *
  * <p>What a plugin holds is a {@link UUID}: {@link OwnedDocEntry#userId()} hands one over, and
- * {@link DocStore#queryAcrossUsers(String)} hands over a list of them. This is what turns one into
+ * {@link CrossUserStore#query(String)} hands over a list of them. This is what turns one into
  * something renderable — a name and a picture, and deliberately nothing else.
  *
  * <p><strong>Never email, provider or external id.</strong> Those stay server-side; the stable login key

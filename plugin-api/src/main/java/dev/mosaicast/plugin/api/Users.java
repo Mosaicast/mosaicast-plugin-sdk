@@ -10,7 +10,7 @@ import java.util.UUID;
 /**
  * Turns user UUIDs a plugin already holds into something it can render (ARCHITECTURE §8.8).
  *
- * <p>{@link DocStore#queryAcrossUsers(String)} hands a backend {@link OwnedDocEntry} — a
+ * <p>{@link CrossUserStore#query(String)} hands a backend {@link OwnedDocEntry} — a
  * {@link OwnedDocEntry#userId() userId} and a document, and nothing else. A plugin that aggregates
  * across users (a bingo leaderboard, the case this was written for) therefore held UUIDs with no way to
  * show a person. This is the gap being filled, and it is filled with a <strong>lookup rather than a

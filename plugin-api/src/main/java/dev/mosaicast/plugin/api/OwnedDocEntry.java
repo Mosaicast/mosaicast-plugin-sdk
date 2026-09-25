@@ -8,7 +8,7 @@ import java.util.UUID;
 import tools.jackson.databind.JsonNode;
 
 /**
- * One user's document from {@link DocStore#queryAcrossUsers(String)}: the owner, the key and the raw JSON
+ * One user's document from {@link CrossUserStore#query(String)}: the owner, the key and the raw JSON
  * value.
  *
  * <p>A {@link DocEntry} with an owner. The owner is here because a cross-user aggregate is meaningless

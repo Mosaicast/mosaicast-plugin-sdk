@@ -94,7 +94,7 @@ public record Scope(ScopeType type, String id) {
      *
      * <p>This scope is unusable from a backend thread — there is no calling user to resolve — so every
      * {@link DocStore} method throws {@link UnsupportedOperationException} for it. Aggregate with
-     * {@link DocStore#queryAcrossUsers(String)}.
+     * {@link PluginContext#allUsers()}, which the manifest has to declare.
      *
      * @return the calling user's scope
      * @since 0.5.0

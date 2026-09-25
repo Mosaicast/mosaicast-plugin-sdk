@@ -5,6 +5,7 @@ package dev.mosaicast.plugin.testkit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -116,7 +117,7 @@ class TestKitTest {
     }
 
     @Test
-    void asUserSeedsAPartitionAndQueryAcrossUsersAggregatesThem() {
+    void asUserSeedsAPartitionAndAcrossUsersAggregatesThem() {
         InMemoryDocStore store = new InMemoryDocStore();
         UUID alice = UUID.randomUUID();
         UUID bob = UUID.randomUUID();
@@ -126,17 +127,45 @@ class TestKitTest {
         store.asUser(bob).put(Scope.user(), "mark:s2e04:b7", new Vote("bob", 7));
         store.asUser(bob).put(Scope.user(), "pref:theme", "dark");
 
-        List<OwnedDocEntry> marks = store.queryAcrossUsers("mark:");
+        List<OwnedDocEntry> marks = store.acrossUsers().query("mark:");
 
         assertEquals(2, marks.size());
         assertEquals(Set.of(alice, bob), marks.stream().map(OwnedDocEntry::userId).collect(Collectors.toSet()));
-        assertEquals(3, store.queryAcrossUsers("").size());
+        assertEquals(3, store.acrossUsers().query("").size());
 
         // A partition is private to its owner: one user's view never sees another's document.
         assertTrue(store.asUser(alice).get(Scope.user(), "mark:s2e04:b7", Vote.class).isEmpty());
         assertEquals(new Vote("alice", 3),
                 store.asUser(alice).get(Scope.user(), "mark:s2e04:b3", Vote.class).orElseThrow());
         assertEquals(1, store.docsOf(alice).size());
+    }
+
+    @Test
+    void allUsersIsNullUntilTheManifestWouldDeclareIt() {
+        FakePluginContext ctx = new FakePluginContext();
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+        ctx.store().asUser(alice).put(Scope.user(), "mark:b3", true);
+        ctx.store().asUser(bob).put(Scope.user(), "mark:b7", true);
+
+        // Undeclared: the host hands out no cross-user reader, and neither does the fake.
+        assertNull(ctx.allUsers());
+
+        ctx.withReadsAllUsers();
+        List<OwnedDocEntry> marks = ctx.allUsers().query("mark:");
+        assertEquals(Set.of(alice, bob), marks.stream().map(OwnedDocEntry::userId).collect(Collectors.toSet()));
+    }
+
+    @Test
+    void notifierEligibilityDoesNotDependOnReadsAllUsers() {
+        FakePluginContext ctx = new FakePluginContext();
+        UUID ana = UUID.randomUUID();
+        ctx.store().asUser(ana).put(Scope.user(), "mark:b3", true);
+        FakeNotifier notifier = new FakeNotifier(ctx.store());
+        ctx.withNotifier(notifier);
+
+        assertNull(ctx.allUsers());
+        assertEquals(Set.of(ana), notifier.notifiable());
     }
 
     @Test

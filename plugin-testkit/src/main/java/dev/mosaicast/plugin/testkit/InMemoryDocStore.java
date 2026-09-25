@@ -3,9 +3,11 @@
 
 package dev.mosaicast.plugin.testkit;
 
+import dev.mosaicast.plugin.api.CrossUserStore;
 import dev.mosaicast.plugin.api.DocEntry;
 import dev.mosaicast.plugin.api.DocStore;
 import dev.mosaicast.plugin.api.OwnedDocEntry;
+import dev.mosaicast.plugin.api.PluginContext;
 import dev.mosaicast.plugin.api.Scope;
 import dev.mosaicast.plugin.api.ScopeType;
 import java.util.ArrayList;
@@ -34,7 +36,7 @@ import tools.jackson.databind.json.JsonMapper;
  * <p><strong>The {@link ScopeType#USER} scope behaves as it does in production</strong>: this store stands
  * in for a backend, which has no calling user, so every method throws
  * {@link UnsupportedOperationException} for it. To set up per-user data — the thing the frontend writes
- * and {@link #queryAcrossUsers(String)} aggregates — take a caller's view with {@link #asUser(UUID)},
+ * and {@link #acrossUsers()} aggregates — take a caller's view with {@link #asUser(UUID)},
  * which is the test's stand-in for the host resolving {@code me} from a session.
  *
  * <p>It enforces {@code data.backendOwned} the same way: declare patterns with
@@ -47,7 +49,7 @@ import tools.jackson.databind.json.JsonMapper;
  * store.asUser(alice).put(Scope.user(), "mark:s2e04:b3", true);   // as the frontend would
  *
  * plugin.register(ctx);                                            // backend aggregates
- * assertEquals(1, store.queryAcrossUsers("mark:").size());
+ * assertEquals(1, store.acrossUsers().query("mark:").size());
  * }</pre>
  */
 public final class InMemoryDocStore implements DocStore {
@@ -100,7 +102,7 @@ public final class InMemoryDocStore implements DocStore {
      * <p>On the returned store a {@link ScopeType#USER} scope addresses {@code userId}'s partition instead
      * of throwing; every other scope behaves exactly as on this one, and both share the same data. Use it
      * to seed what a frontend would have written, then aggregate from the backend store with
-     * {@link #queryAcrossUsers(String)}.
+     * {@link #acrossUsers()}.
      *
      * <p>Note this is a <em>test</em> affordance with no counterpart in the contract: no production
      * {@code DocStore} can write into another user's partition.
@@ -210,8 +212,23 @@ public final class InMemoryDocStore implements DocStore {
         return out;
     }
 
-    @Override
-    public List<OwnedDocEntry> queryAcrossUsers(String keyPrefix) {
+    /**
+     * Every user partition of this store, read the way {@link PluginContext#allUsers()} reads them — the
+     * {@link CrossUserStore} the host hands a plugin that declares {@code data.readsAllUsers}.
+     *
+     * <p>Always available here, because a test seeding and asserting on per-user data needs it whatever
+     * the plugin declares. The gate is on the context, not the store: {@link FakePluginContext#allUsers()}
+     * stays {@code null} until {@link FakePluginContext#withReadsAllUsers()}, as the host's does without
+     * the declaration — so a backend that forgot to declare fails in its tests.
+     *
+     * @return a live, read-only view over every user partition; never {@code null}
+     * @since 0.16.0
+     */
+    public CrossUserStore acrossUsers() {
+        return this::ownedEntries;
+    }
+
+    private List<OwnedDocEntry> ownedEntries(String keyPrefix) {
         Objects.requireNonNull(keyPrefix, "keyPrefix");
         List<OwnedDocEntry> out = new ArrayList<>();
         userData.forEach((userId, docs) -> docs.forEach((key, value) -> {
@@ -265,7 +282,7 @@ public final class InMemoryDocStore implements DocStore {
             if (caller == null) {
                 throw new UnsupportedOperationException(
                         "USER scope has no meaning on a backend: there is no calling user. "
-                                + "Use store().queryAcrossUsers(...) to aggregate, or address an entity scope.");
+                                + "Use allUsers().query(...) to aggregate (declare data.readsAllUsers), or address an entity scope.");
             }
             return create
                     ? userData.computeIfAbsent(caller, u -> new LinkedHashMap<>())
