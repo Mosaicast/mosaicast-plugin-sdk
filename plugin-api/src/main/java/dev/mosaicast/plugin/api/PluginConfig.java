@@ -11,6 +11,13 @@ import java.util.Optional;
  * <p>A plugin declares its config fields (name, type, default, {@code editableBy}) in the manifest.
  * The host renders a generic admin form from that declaration — <strong>plugins never build their own
  * config UI</strong> — and exposes the resolved values here, read-only.
+ *
+ * <p><strong>Declared bounds hold (since 0.16.0).</strong> A numeric field may declare {@code min},
+ * {@code max} and {@code step}, a string field {@code minLength} and {@code maxLength}. The host refuses an
+ * out-of-range write with a 400 naming the bound, refuses a manifest whose {@code default} breaks its own
+ * bounds, and treats a value stored before a bound existed that now breaks it as <em>unset</em>, so the
+ * default applies. A value read here therefore satisfies its declaration, and a plugin needs no defensive
+ * clamp of its own — declare {@code "min": 1} on an interval rather than guarding against {@code 0} in code.
  */
 public interface PluginConfig {
 

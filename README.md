@@ -845,6 +845,20 @@ shows them `ingestIntervalSeconds` and nothing else, with no room to say what a 
 it is in. Both take a locale map or a plain string; the key stays visible beside the label, because the key
 is what your own docs name. `options` declares a closed set, rendered as a select and refused outside it.
 
+**Config values have bounds (since 0.16.0).** `min`/`max`/`step` on a `number` field, `minLength`/`maxLength`
+on a `string` one. Without them any number an operator can type is legal — including the `0` that switches
+a scheduled task off. The host **refuses** an out-of-range write with a 400 naming the bound (never clamps),
+the form renders the bounds as input constraints, a `default` outside its own bounds is refused at load, and
+a value stored before a bound existed that now breaks it counts as unset. So what `PluginConfig.get` returns
+satisfies the declaration — put the rule in the manifest, not a clamp in code:
+
+```json
+"ingestIntervalSeconds": { "type": "number", "default": 60, "min": 10, "max": 3600, "step": 1 }
+```
+
+There is no `pattern` yet: Java and JavaScript regex dialects differ, and one field's regex would be two
+rules free to disagree.
+
 **`frontend.entry` has a grammar (since 0.16.0).** A relative path under the plugin's own `assets/`: one or
 more `[A-Za-z0-9._-]` segments joined by `/`, no leading slash, no `.` or `..` segment, no query and no
 fragment. The host builds `/plugins/<id>/assets/<entry>` from it and **rejects the plugin at load** when it

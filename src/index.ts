@@ -2164,6 +2164,33 @@ export interface PluginConfigField {
    * @since 0.15.0
    */
   options?: PluginConfigOption[];
+  /**
+   * The smallest value a `number` field accepts, inclusive.
+   *
+   * Without it, any number an operator can type is legal — including the `0` that switches a scheduled
+   * task off, or the `-1` that gets it rejected at the next boot. Declare the constraint here rather than
+   * clamping in code, where it runs only after the bad value is stored and the form has said "Saved."
+   *
+   * The host enforces every bound below the same way: an out-of-range write is **refused** with a 400 that
+   * names the bound (never silently clamped); the admin form renders them as input constraints; a manifest
+   * whose `default` breaks its own bounds, whose `min` exceeds its `max`, or that puts a bound on the
+   * wrong type (`min` on a `string`, `maxLength` on a `number`) is refused at load; and a value stored
+   * before a bound existed that now breaks it is treated as **unset**, so the default applies.
+   *
+   * @since 0.16.0
+   */
+  min?: number;
+  /** The largest value a `number` field accepts, inclusive. See {@link min}. @since 0.16.0 */
+  max?: number;
+  /**
+   * The granularity of a `number` field: a value must be `min + k·step` (or `k·step` without `min`).
+   * `1` makes a field whole-numbered. Must be positive. See {@link min}. @since 0.16.0
+   */
+  step?: number;
+  /** The fewest characters a `string` field accepts; `1` makes it non-empty. See {@link min}. @since 0.16.0 */
+  minLength?: number;
+  /** The most characters a `string` field accepts. See {@link min}. @since 0.16.0 */
+  maxLength?: number;
 }
 
 /** The shape of the manifest's `blobs` block (ARCHITECTURE §11.1). @since 0.9.0 */

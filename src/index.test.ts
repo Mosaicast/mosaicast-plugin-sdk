@@ -643,6 +643,23 @@ describe('defineManifest', () => {
     });
     expect(manifest.config?.matchMode?.options?.[2]?.label).toBeUndefined();
   });
+
+  it('types bounds on number and string config fields', () => {
+    const manifest = defineManifest({
+      id: 'bingo',
+      version: '1.0.0',
+      platformApi: PLATFORM_API_VERSION,
+      name: 'Bingo',
+      config: {
+        ingestIntervalSeconds: { type: 'number', default: 60, min: 10, max: 3600, step: 1 },
+        fuzzyThreshold: { type: 'number', default: 0.85, min: 0, max: 1 },
+        greeting: { type: 'string', default: 'Hi', minLength: 1, maxLength: 80 },
+      },
+    });
+
+    expect(manifest.config?.ingestIntervalSeconds?.min).toBe(10);
+    expect(manifest.config?.greeting?.maxLength).toBe(80);
+  });
 });
 
 describe('DOC_KEY_PATTERN', () => {
