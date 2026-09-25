@@ -1067,8 +1067,8 @@ per-service detail exists so the notice can name who stores what for how long; w
 the category. So if two plugins each declare an `analytics` service with different providers, the visitor
 sees **one** decision listing both plugins, and granting it grants both — there is no way to accept one
 provider and refuse the other. If you need your own services to be refusable independently, declare them
-under **different categories** (a plugin-declared category is fine; the shell just has no translated label
-for it). That is the only lever the contract gives you.
+under **different categories** (a plugin-declared category is fine — label it, see below). That is the only
+lever the contract gives you.
 
 **`necessary` is never asked about.** `has('necessary')` is always `true` and the host never prompts for
 it — it is the category the core itself uses, and a banner-free site stays banner-free. Declaring a
@@ -1104,6 +1104,29 @@ where plugin authors look, so the required shape is documented here. **From `0.4
   }]
 }
 ```
+
+**Label a category you introduce (since 0.16.0).** The category is what the visitor consents to, so it is
+the one string that cannot fall back to a developer key — a bare `social` between two explained core
+categories reads as a bug, not a choice. Give it a name and a one-line hint, as a locale map or a plain
+string:
+
+```json
+"consent": {
+  "services": [{ "id": "mastodon", "category": "social", "…": "…" }],
+  "categoryLabels": {
+    "social": {
+      "label": { "en": "Social media", "de": "Soziale Medien" },
+      "hint": { "en": "Posts embedded from social networks." }
+    }
+  }
+}
+```
+
+Declaring a category outside `necessary`/`functional`/`analytics` **obliges you to label it**: an
+unlabelled one still loads but is shown wrapped in a generic phrase. A label for a **core** category, or for
+a category none of your services declares, is refused at load. If two plugins label the same category the
+host picks one, deterministically — the decision is shared, so only one label can be shown. (`categoryLabels`
+is not the pre-0.4 `categories` array, which stays rejected.)
 
 | Field | Meaning |
 |---|---|

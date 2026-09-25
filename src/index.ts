@@ -1710,8 +1710,9 @@ export interface NotifyClient {
  * assume `has('analytics')` says anything about *which* provider was accepted — it says the category was.
  *
  * If you need a visitor to be able to accept one of your services and refuse another, declare them under
- * **different categories** (a plugin-declared category is allowed, it just has no translated label in the
- * shell). That is the only lever the contract gives you.
+ * **different categories** (a plugin-declared category is allowed; since `0.16.0` give it a label with
+ * {@link PluginConsentCategoryLabel} — without one the shell can only show a generic phrase around the
+ * raw id). That is the only lever the contract gives you.
  *
  * ## `necessary` is never asked about
  *
@@ -1934,6 +1935,47 @@ export interface ConsentServiceDeclaration {
   thirdCountryTransfer: boolean;
   /** Each item the service stores on the visitor's device. */
   storage: ConsentStorageDeclaration[];
+}
+
+/**
+ * What a visitor reads for a consent category **your plugin introduced** — one entry of the manifest's
+ * `consent.categoryLabels`, keyed by the category id.
+ *
+ * The category is the thing being consented to, so it is the one plugin-authored string that cannot fall
+ * back to a developer key. The core categories (`necessary`, `functional`, `analytics`) have a title and
+ * an explanation in every shell language; a plugin-declared one such as `social` used to appear as the
+ * bare lowercase word, with nothing to say what it covers, between two that explain themselves.
+ *
+ * ```json
+ * "consent": {
+ *   "services": [{ "id": "mastodon", "category": "social", … }],
+ *   "categoryLabels": {
+ *     "social": {
+ *       "label": { "en": "Social media", "de": "Soziale Medien" },
+ *       "hint": { "en": "Posts embedded from social networks.", "de": "Eingebettete Beiträge aus sozialen Netzwerken." }
+ *     }
+ *   }
+ * }
+ * ```
+ *
+ * The rules the host applies:
+ *
+ * - **Declaring a category outside the core vocabulary obliges you to label it.** An unlabelled one still
+ *   loads, but the host shows it wrapped in a generic localised phrase ("Other services: social") rather
+ *   than as a choice it can explain — which is a worse consent request, not a neutral one.
+ * - **A core category cannot be relabelled.** An entry for `necessary`, `functional` or `analytics` is
+ *   refused at load: a plugin rewording what every other plugin's visitors consent to is not a label.
+ * - **An entry must label a category one of your services declares**, and is refused at load otherwise.
+ * - **Two plugins labelling the same category** is resolved by the host, deterministically — the
+ *   decision is shared across plugins (see {@link ConsentApi}), so only one label can be shown.
+ *
+ * @since 0.16.0
+ */
+export interface PluginConsentCategoryLabel {
+  /** The category's name in the consent notice and the settings page — short, like a heading. */
+  label: LocalizedText;
+  /** One sentence under it: what accepting this category lets load, in the visitor's terms. */
+  hint?: LocalizedText;
 }
 
 /**
@@ -2299,7 +2341,15 @@ export interface PluginManifest {
   /** Config fields core renders as an admin form; plugins never build their own config UI. */
   config?: Record<string, PluginConfigField>;
   /** Third-party services this plugin loads. Omit entirely when it loads none. */
-  consent?: { services: ConsentServiceDeclaration[] };
+  consent?: {
+    /** Every service, each under the category the visitor decides it by. */
+    services: ConsentServiceDeclaration[];
+    /**
+     * Labels for the categories your services introduce, keyed by category id — see
+     * {@link PluginConsentCategoryLabel}. @since 0.16.0
+     */
+    categoryLabels?: Record<string, PluginConsentCategoryLabel>;
+  };
   /** The host ignores fields it does not know, so this type does too. */
   [field: string]: unknown;
 }

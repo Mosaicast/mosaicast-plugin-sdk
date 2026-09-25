@@ -575,6 +575,27 @@ describe('defineManifest', () => {
     expect(manifest.external?.kinds).toEqual(['translation']);
   });
 
+  it('types a label for a consent category the plugin introduces', () => {
+    const manifest = defineManifest({
+      id: 'sample',
+      version: '1.0.0',
+      platformApi: PLATFORM_API_VERSION,
+      name: 'Sample',
+      consent: {
+        services: [{
+          id: 'mastodon', name: 'Mastodon', provider: 'Mastodon gGmbH', category: 'social',
+          privacyUrl: 'https://mastodon.social/privacy-policy', hosts: ['https://mastodon.social'],
+          thirdCountryTransfer: false, storage: [],
+        }],
+        categoryLabels: {
+          social: { label: { en: 'Social media', de: 'Soziale Medien' }, hint: 'Posts embedded from social networks.' },
+        },
+      },
+    });
+
+    expect(manifest.consent?.categoryLabels?.social?.label).toEqual({ en: 'Social media', de: 'Soziale Medien' });
+  });
+
   it('accepts an external block that leaves usedBy to the podcaster default', () => {
     const manifest = defineManifest({
       id: 'sample',
