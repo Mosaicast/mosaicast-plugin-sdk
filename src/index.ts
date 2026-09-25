@@ -2079,6 +2079,29 @@ export interface PluginExternalDeclaration {
 }
 
 /**
+ * The grammar of `frontend.entry` — mirror of the host's `PluginManifest.FRONTEND_ENTRY_PATTERN`.
+ *
+ * A relative path under the plugin's own `assets/`: one or more `[A-Za-z0-9._-]` segments joined by `/`,
+ * with no leading slash, no `.` or `..` segment, no empty segment, and no query or fragment.
+ *
+ * It is the one manifest string that becomes a URL path, and it was the last one without a grammar: the
+ * shell builds `/plugins/<id>/assets/<entry>` by interpolation, so an entry carrying `../`, `?` or `#`
+ * addressed something other than what its author wrote. The host **rejects** a manifest whose entry does
+ * not match — at load, with the entry named — rather than dropping the field, the same rule
+ * {@link PluginDataDeclaration.backendOwned} follows: a plugin whose bundle silently never loads is worse
+ * than one that fails with a named cause. Test your manifest against this to find out before the host
+ * does.
+ *
+ * ```ts
+ * FRONTEND_ENTRY_PATTERN.test('sample.es.js');   // true
+ * FRONTEND_ENTRY_PATTERN.test('../sample.es.js'); // false
+ * ```
+ *
+ * @since 0.16.0
+ */
+export const FRONTEND_ENTRY_PATTERN = /^(?!\.{1,2}(\/|$))[A-Za-z0-9._-]+(\/(?!\.{1,2}(\/|$))[A-Za-z0-9._-]+)*$/;
+
+/**
  * The whole of `plugin.json`, typed.
  *
  * ## Read this before relying on it
@@ -2134,7 +2157,12 @@ export interface PluginManifest {
   };
   /** The frontend half: the bundle and the custom elements it registers. */
   frontend?: {
-    /** The ES module entry, relative to the plugin's bundle. */
+    /**
+     * The ES module entry, relative to the plugin's own `assets/` — e.g. `sample.es.js`.
+     *
+     * Must match {@link FRONTEND_ENTRY_PATTERN}: `[A-Za-z0-9._-]` segments joined by `/`, no leading
+     * slash, no `.`/`..` segment, no query or fragment. The host rejects the plugin at load otherwise.
+     */
     entry: string;
     /** Every custom-element tag the entry registers. Each `slots[].element` must be one of these. */
     elements: string[];

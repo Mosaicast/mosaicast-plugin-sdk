@@ -786,6 +786,12 @@ shows them `ingestIntervalSeconds` and nothing else, with no room to say what a 
 it is in. Both take a locale map or a plain string; the key stays visible beside the label, because the key
 is what your own docs name. `options` declares a closed set, rendered as a select and refused outside it.
 
+**`frontend.entry` has a grammar (since 0.16.0).** A relative path under the plugin's own `assets/`: one or
+more `[A-Za-z0-9._-]` segments joined by `/`, no leading slash, no `.` or `..` segment, no query and no
+fragment. The host builds `/plugins/<id>/assets/<entry>` from it and **rejects the plugin at load** when it
+does not match, rather than loading a URL you did not write. `FRONTEND_ENTRY_PATTERN` is the same rule, so a
+test can find out before the host does.
+
 **Documentation, not enforcement** — the same caveat `PluginDataDeclaration` and
 `ConsentServiceDeclaration` have carried since 0.4.0. The manifest is owned and validated by the **host**;
 the SDK never reads `plugin.json`, and if this type and core disagree, **core wins**.

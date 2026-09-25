@@ -10,6 +10,7 @@ import {
   defineManifest,
   defineMosaicastElement,
   DOC_KEY_PATTERN,
+  FRONTEND_ENTRY_PATTERN,
   iconCss,
   iconMask,
   isPluginApiError,
@@ -615,6 +616,21 @@ describe('DOC_KEY_PATTERN', () => {
     expect(DOC_KEY_PATTERN.test('marks/s2e04')).toBe(false);
     expect(DOC_KEY_PATTERN.test('')).toBe(false);
     expect(DOC_KEY_PATTERN.test('x'.repeat(201))).toBe(false);
+  });
+});
+
+describe('FRONTEND_ENTRY_PATTERN', () => {
+  it('accepts a relative path of plain segments under assets/', () => {
+    for (const entry of ['sample.es.js', 'dist/a-b.js', 'v1.2/x_y.js', '.hidden.js']) {
+      expect(FRONTEND_ENTRY_PATTERN.test(entry), entry).toBe(true);
+    }
+  });
+
+  it('refuses anything that would address a different URL than the one written', () => {
+    for (const entry of ['', '/x.js', '../x.js', 'a/../x.js', 'a/./b.js', '.', '..', 'x.js?v=1', 'x.js#f',
+      'a//b.js', 'a/', 'a b.js', 'a\\b.js', '%2e%2e/x.js']) {
+      expect(FRONTEND_ENTRY_PATTERN.test(entry), entry).toBe(false);
+    }
   });
 });
 
