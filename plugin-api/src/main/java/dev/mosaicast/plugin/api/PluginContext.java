@@ -36,7 +36,9 @@ public interface PluginContext {
      *
      * <pre>{@code
      * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
-     *          → one JSON doc; 404 if absent
+     *          → one JSON doc; 204 (no body) if the key is not set
+     * GET    /api/plugins/{id}/data/{scopeType}?ids=a,b&keys=x,y
+     *          → { a: { x: … }, b: {} } — misses absent; ≤ 100 ids and ≤ 100 keys (since 0.16.0)
      * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
      *          → { items: [{ key, value }], page, size, totalElements, totalPages }
      * PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)

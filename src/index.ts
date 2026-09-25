@@ -202,7 +202,9 @@ export interface PagedDocs<T = unknown> {
  *
  * ```text
  * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
- *          → one JSON doc; 404 if absent
+ *          → one JSON doc; 204 (no body) if the key is not set
+ * GET    /api/plugins/{id}/data/{scopeType}?ids=a,b&keys=x,y
+ *          → { a: { x: … }, b: {} } — misses absent; ≤ 100 ids and ≤ 100 keys (since 0.16.0)
  * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
  *          → { items: [{ key, value }], page, size, totalElements, totalPages }
  * PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
@@ -297,13 +299,16 @@ export interface PluginApiClient {
   /**
    * GET a path, resolving to the parsed JSON body.
    *
-   * Rejects with a {@link PluginApiError} on any non-2xx response — **including 404**, which is the
-   * normal answer for a document that does not exist yet. Prefer {@link getOrNull} when absence is an
-   * expected outcome rather than a failure.
+   * Rejects with a {@link PluginApiError} on any non-2xx response. A document that is simply not set
+   * answers **204** (since 0.16.0; it was a 404 before), which this resolves as **`undefined`** — so a
+   * raw `get` of a doc path can come back empty. Prefer {@link getOrNull}, or better `ctx.docs.get`,
+   * when absence is an expected outcome rather than a failure. A 404 now means the *address* is wrong:
+   * an unknown or disabled plugin, an unknown scope.
    */
   get<T = unknown>(path: string): Promise<T>;
   /**
-   * Like {@link get}, but resolves **`null`** on a 404 instead of rejecting.
+   * Like {@link get}, but resolves **`null`** for an absent document — the host's 204 — and on a 404
+   * instead of rejecting.
    *
    * "Nothing saved yet" is the ordinary state of a doc-store key, so every plugin ends up writing
    * `get(path).catch(() => undefined)` — which also swallows the 500, the 403 from the read floor and
@@ -313,7 +318,7 @@ export interface PluginApiClient {
    * Every other non-2xx still rejects with a {@link PluginApiError}.
    *
    * @param path the path relative to the plugin's base
-   * @returns the parsed body, or `null` when the host answered 404
+   * @returns the parsed body, or `null` when the host answered 204 or 404
    * @since 0.9.0
    */
   getOrNull<T = unknown>(path: string): Promise<T | null>;
@@ -402,6 +407,15 @@ export function isPluginApiError(e: unknown): e is PluginApiError {
 export const DOC_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
 
 /**
+ * The most scope ids, and the most keys, one {@link DocClient.getMany} request carries — the host's
+ * per-request ceiling. The client splits a larger call for you, so this is for sizing, not a limit you
+ * have to enforce.
+ *
+ * @since 0.16.0
+ */
+export const DOC_BATCH_LIMIT = 100;
+
+/**
  * Which partition a {@link DocClient} call addresses.
  *
  * A {@link Scope} for a page-level partition — `ctx.scope` is usually the one you want — or one of two
@@ -416,7 +430,7 @@ export type DocTarget = Scope | 'self' | 'site';
 
 /**
  * A typed client for this plugin's doc store — the same endpoints {@link PluginApiClient} reaches, with
- * the path building, the key validation and the 404 handling done for you.
+ * the path building, the key validation and the absence handling done for you.
  *
  * Every doc access before this was string concatenation against a four-segment path, with the plugin
  * responsible for `encodeURIComponent`, for {@link DOC_KEY_PATTERN}, for knowing that `site` is always
@@ -445,11 +459,31 @@ export type DocTarget = Scope | 'self' | 'site';
  * unknown scope, the 401 on an anonymous `user` request. See {@link PluginApiClient} for all of it;
  * that client stays available as the escape hatch for anything this does not cover.
  *
+ * ## What it remembers for you (guaranteed since 0.16.0)
+ *
+ * "This episode has no highlight" is the **normal** answer for an optional per-episode document, and a
+ * tile asks for its keys every time it renders. Measured before these guarantees: 98% of one session's
+ * 3,737 plugin requests were answers of "not set", one key asked 178 times. So the host's client
+ * promises, per plugin and per signed-in identity, for the life of the page:
+ *
+ * 1. **Identical `get`s in flight share one request.**
+ * 2. **A miss is remembered.** A key the host answered "not set" resolves `null` without a round trip
+ *    from then on — misses from {@link getMany} included.
+ * 3. **Your own writes are seen.** `put` and `remove` through this client forget the address they
+ *    touched, so reading back what you just stored returns it rather than the earlier miss.
+ * 4. **Hits are never cached.** A document another session wrote shows up on the next render.
+ * 5. **An error is never remembered** — a 404 (unknown plugin or scope) or a 5xx is retried next time.
+ *
+ * What that means for your code: a cache of **misses** of your own is unnecessary — delete it. A cache
+ * of **hits** is allowed but harmful the moment it outlives a write made elsewhere; if you keep one,
+ * scope it to a render. And for more than one scope, use {@link getMany}: one request for a whole page
+ * of cards instead of one per card per key.
+ *
  * @since 0.9.0
  */
 export interface DocClient {
   /**
-   * One document, or **`null`** when there is none.
+   * One document, or **`null`** when there is none (the host's 204).
    *
    * Null rather than a rejection: absence is the ordinary state of a key nothing has written yet, and
    * making it an exception is what produced the `catch` that also swallowed every real failure. Other
@@ -460,6 +494,33 @@ export interface DocClient {
    * @throws Error synchronously-thrown-as-rejection if the key is malformed
    */
   get<T = unknown>(target: DocTarget, key: string): Promise<T | null>;
+  /**
+   * The same keys across many scopes of one level, in one request — what a page of episode cards needs.
+   *
+   * ```ts
+   * const slugs = ctx.episodes.slice(0, 20);
+   * const docs = await ctx.docs.getMany<Highlight>('episode', slugs, ['highlight', 'template']);
+   * for (const slug of slugs) render(slug, docs[slug]?.highlight ?? null);
+   * ```
+   *
+   * The answer maps scope id → key → value, and **a miss is simply absent**: no `null`, no error — an
+   * id with nothing set may be missing entirely or map to `{}`. Every access rule of {@link get} applies
+   * per id: the same read floor, and an id the caller may not address rejects the whole call with a
+   * {@link PluginApiError} rather than being quietly skipped.
+   *
+   * More than {@link DOC_BATCH_LIMIT} ids or keys is **split** into several requests and merged, so you
+   * never see the host's per-request ceiling. An empty `ids` or `keys` resolves `{}` without a request.
+   * Misses feed the same memory {@link get} uses, so a later `get` of one costs nothing.
+   *
+   * Not for `user` scope: there is one caller partition, and `get('self', key)` reads it.
+   *
+   * @param type the scope level every id belongs to
+   * @param ids  scope ids at that level — episode slugs, feed ids, `'main'` for the site
+   * @param keys document keys; each must match {@link DOC_KEY_PATTERN}
+   * @throws Error synchronously-thrown-as-rejection if a key is malformed
+   * @since 0.16.0
+   */
+  getMany<T = unknown>(type: Scope['type'], ids: string[], keys: string[]): Promise<Record<string, Record<string, T>>>;
   /**
    * Upserts a document. Last-write-wins, as everywhere on this store.
    *
@@ -2535,7 +2596,7 @@ export interface PluginContext {
   api: PluginApiClient;
   /**
    * A typed client for the same doc store {@link api} reaches — path building, key validation and
-   * null-on-404 done for you.
+   * null-when-absent done for you, plus request dedupe and a miss cache — see {@link DocClient}.
    *
    * Never `null`: every plugin has a doc store. `ctx.api` remains the escape hatch for anything this
    * does not cover. See {@link DocClient}, and note `'self'` for the caller's own partition.

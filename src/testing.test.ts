@@ -729,6 +729,39 @@ describe('makeMockDocs', () => {
     expect(page.totalElements).toBe(2);
   });
 
+  it('reads many scopes in one call, with misses simply absent', async () => {
+    const docs = makeMockDocs({
+      'data/episode/kraken/highlight': { at: 42 },
+      'data/episode/kraken/template': 'classic',
+      'data/episode/siren/template': 'classic',
+    });
+
+    const answer = await docs.getMany('episode', ['kraken', 'siren', 'empty'], ['highlight', 'template']);
+
+    expect(answer).toEqual({
+      kraken: { highlight: { at: 42 }, template: 'classic' },
+      siren: { template: 'classic' },
+      empty: {},
+    });
+    expect(await docs.getMany('episode', [], ['highlight'])).toEqual({});
+    expect(await docs.getMany('episode', ['kraken'], [])).toEqual({});
+  });
+
+  it('records calls, so a test can tell one batch from a request per card', async () => {
+    const docs = makeMockDocs();
+    await docs.getMany('episode', ['a', 'b'], ['highlight']);
+    await docs.get({ type: 'episode', id: 'a' }, 'highlight');
+
+    expect(docs.calls).toEqual([
+      { method: 'getMany', partitions: ['data/episode/a', 'data/episode/b'], keys: ['highlight'] },
+      { method: 'get', partitions: ['data/episode/a'], keys: ['highlight'] },
+    ]);
+  });
+
+  it('rejects a malformed key in a batch like a single read', async () => {
+    await expect(makeMockDocs().getMany('episode', ['a'], ['ok', 'no/slash'])).rejects.toThrow(/doc key must match/);
+  });
+
   it('removes idempotently', async () => {
     const docs = makeMockDocs({ 'data/user/me/marks': { b3: true } });
     await docs.remove('self', 'marks');
@@ -762,6 +795,8 @@ describe('the mock api client', () => {
     });
 
     expect(await ctx.api.getOrNull('missing')).toBeNull();
+    // An unregistered path stands in for the host's 204: nothing set, answered as null too.
+    expect(await ctx.api.getOrNull('never-written')).toBeNull();
     expect(await ctx.api.getOrNull('there')).toEqual({ ok: true });
     // The failure the old `catch(() => undefined)` swallowed alongside the 404.
     await expect(ctx.api.getOrNull('broken')).rejects.toThrow(/500/);

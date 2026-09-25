@@ -85,7 +85,9 @@ This is the part plugin authors most often guess wrong, so it is stated plainly.
 
 ```text
 GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
-         → one JSON doc; 404 if absent
+         → one JSON doc; 204 (no body) if the key is not set — 404 means a wrong address
+GET    /api/plugins/{id}/data/{scopeType}?ids=a,b&keys=x,y          (since 0.16.0)
+         → { a: { x: … }, b: {} } — misses absent; ≤ 100 ids and ≤ 100 keys per request
 GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
          → { items: [{ key, value }], page, size, totalElements, totalPages }
 PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
@@ -109,7 +111,7 @@ DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
 ### The typed client — `ctx.docs` (since 0.9.0)
 
 `ctx.api` is the raw surface and stays available. `ctx.docs` is the same endpoints with the path building,
-the key validation and the 404 handling done for you — which removes a whole class of bug, since every doc
+the key validation and the absence handling done for you — which removes a whole class of bug, since every doc
 access above was string concatenation the plugin had to get right four segments at a time:
 
 ```ts
@@ -122,8 +124,22 @@ await ctx.docs.remove(ctx.scope, 'draft');                    // any Scope addre
 - **`'self'` is `data/user/me`** and `'site'` is `data/site/main` — the two singletons. Making the
   per-user partition the *shortest* thing to write is deliberate: it is the most security-relevant
   convention in the contract, and a convention only sticks when it is also the easy path.
-- **`get` resolves `null` on 404**, because a key nothing has written yet is a normal state rather than a
-  failure. The same is true of `ctx.api.getOrNull(path)`.
+- **`get` resolves `null` when the key is not set** (the host's 204), because a key nothing has written
+  yet is a normal state rather than a failure. The same is true of `ctx.api.getOrNull(path)`; a raw
+  `ctx.api.get` resolves `undefined` there.
+- **`getMany(type, ids, keys)` reads a page of cards in one request** (since 0.16.0), answering
+  `{ id: { key: value } }` with misses simply absent. Over 100 ids or keys is split and merged for you.
+
+  ```ts
+  const docs = await ctx.docs.getMany<Highlight>('episode', ctx.episodes.slice(0, 20), ['highlight']);
+  ```
+
+- **The client remembers for you (guaranteed since 0.16.0)**, per plugin and signed-in identity, for the
+  life of the page: identical `get`s in flight share one request; a miss is remembered (from `getMany`
+  too); your own `put`/`remove` forget the address they touched; hits are never cached; errors are never
+  remembered. So **delete any cache of misses you wrote yourself** — it is redundant — and keep a cache of
+  hits, if at all, no longer than a render: it hides writes made in other sessions. Before this, 98% of
+  one measured session's plugin requests were "not set", with one key asked 178 times.
 - **A malformed key throws at the call site**, with `DOC_KEY_PATTERN` in the message, instead of costing a
   400 round-trip whose body you then have to read.
 - Everything else is unchanged and still the host's: both access floors, `backendOwned`, the 400 on an

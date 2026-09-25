@@ -209,7 +209,8 @@ function makeMockApi(responses: Record<string, unknown>): MockApiClient {
     get: (path) => resolve('get', path),
     getOrNull: async (path) => {
       try {
-        return await resolve('get', path);
+        // `undefined` is the host's 204 — an absent document — and is an answer too.
+        return (await resolve('get', path)) ?? null;
       } catch (e) {
         // Exactly the host's rule: 404 is an answer, everything else is a failure.
         if (e instanceof Error && (e as PluginApiError).status === 404) {
@@ -979,10 +980,27 @@ export function makeMockNotify(
   };
 }
 
+/** One call a component made on a {@link MockDocClient}. @since 0.16.0 */
+export interface DocCallRecord {
+  /** The {@link DocClient} method called. */
+  method: 'get' | 'getMany' | 'put' | 'list' | 'remove';
+  /** The partitions addressed, e.g. `"data/episode/kraken"` — one, except for `getMany`. */
+  partitions: string[];
+  /** The keys addressed; empty for `list`. */
+  keys: string[];
+}
+
 /** A {@link DocClient} storing in memory, keyed by resolved partition path. @since 0.9.0 */
 export interface MockDocClient extends DocClient {
   /** What is currently stored, keyed `"<partition>/<key>"` — e.g. `"data/user/me/marks"`. */
   readonly stored: Record<string, unknown>;
+  /**
+   * Every call the component made, in order — one entry per call, however many requests the host's
+   * client would have split it into. Assert "one `getMany`, not twenty `get`s" against this.
+   *
+   * @since 0.16.0
+   */
+  readonly calls: DocCallRecord[];
 }
 
 /** Resolves a {@link DocTarget} to the partition path the host would address. */
@@ -1019,14 +1037,39 @@ function requireDocKey(key: string): string {
  */
 export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClient {
   const stored: Record<string, unknown> = { ...initial };
+  const calls: DocCallRecord[] = [];
 
   return {
     stored,
-    get: async (target, key) => (stored[`${docPath(target)}/${requireDocKey(key)}`] ?? null) as never,
+    calls,
+    get: async (target, key) => {
+      calls.push({ method: 'get', partitions: [docPath(target)], keys: [key] });
+      return (stored[`${docPath(target)}/${requireDocKey(key)}`] ?? null) as never;
+    },
+    getMany: async (type, ids, keys) => {
+      keys.forEach(requireDocKey);
+      calls.push({ method: 'getMany', partitions: ids.map((id) => docPath({ type, id })), keys: [...keys] });
+      const answer: Record<string, Record<string, never>> = {};
+      if (keys.length === 0) {
+        return answer;
+      }
+      for (const id of ids) {
+        const found: Record<string, never> = {};
+        for (const key of keys) {
+          const value = stored[`${docPath({ type, id })}/${key}`];
+          // Absent, not null: a miss is simply not a key in the answer, as the host sends it.
+          if (value !== undefined) found[key] = value as never;
+        }
+        answer[id] = found;
+      }
+      return answer;
+    },
     put: async (target, key, value) => {
+      calls.push({ method: 'put', partitions: [docPath(target)], keys: [key] });
       stored[`${docPath(target)}/${requireDocKey(key)}`] = value;
     },
     list: async (target, opts) => {
+      calls.push({ method: 'list', partitions: [docPath(target)], keys: [] });
       const prefix = `${docPath(target)}/`;
       const items = Object.entries(stored)
         .filter(([path]) => path.startsWith(prefix))
@@ -1045,6 +1088,7 @@ export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClie
       return result;
     },
     remove: async (target, key) => {
+      calls.push({ method: 'remove', partitions: [docPath(target)], keys: [key] });
       // Idempotent, like the host: removing what is gone resolves rather than rejecting.
       delete stored[`${docPath(target)}/${requireDocKey(key)}`];
     },
