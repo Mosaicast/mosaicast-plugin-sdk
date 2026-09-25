@@ -940,6 +940,7 @@ export const DEFAULT_THEME: ThemeTokens = {
   textMuted: '#666666',
   accent: '#3b5bdb',
   accentContrast: '#ffffff',
+  accentText: '#3b5bdb',
   accent2: '#7048e8',
   border: '#dddddd',
 };

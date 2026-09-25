@@ -125,10 +125,29 @@ export interface ThemeTokens {
   text: string;
   /** Muted/secondary text color. */
   textMuted: string;
-  /** Accent color. */
+  /**
+   * The accent as the admin chose it — for **fills** (buttons, badges, bars), paired with
+   * {@link accentContrast} for whatever sits on top.
+   *
+   * **Not for text, links or focus rings.** The seed is not contrast-checked against the page: a pale
+   * choice such as `#FFF176` measured 1.12:1 as link text. Use {@link accentText} (`--mc-accent-text`)
+   * for anything read or anything that marks focus.
+   */
   accent: string;
   /** Readable text color on top of {@link accent}. */
   accentContrast: string;
+  /**
+   * The accent clamped to WCAG AA (4.5:1) against both {@link bg} and {@link surface} — for **text,
+   * links and focus rings**, where {@link accent} may be unreadable.
+   *
+   * Optional because a host older than `0.16.0` does not send it. The host also sets
+   * `--mc-accent-text` on `:root`, which inherits through the shadow boundary, so in CSS
+   * `color: var(--mc-accent-text)` works whether or not this field is present. The SDK writes it onto
+   * `:host` only when it is.
+   *
+   * @since 0.16.0
+   */
+  accentText?: string;
   /** Optional secondary accent. */
   accent2?: string;
   /** Border/divider color. */
@@ -2633,6 +2652,7 @@ const THEME_TOKEN_VARS: ReadonlyArray<[keyof ThemeTokens, string]> = [
   ['textMuted', '--mc-text-muted'],
   ['accent', '--mc-accent'],
   ['accentContrast', '--mc-accent-contrast'],
+  ['accentText', '--mc-accent-text'],
   ['accent2', '--mc-accent-2'],
   ['border', '--mc-border'],
 ];

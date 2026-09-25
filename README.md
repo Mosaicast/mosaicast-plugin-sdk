@@ -603,6 +603,34 @@ ceilings and the allow-list**: a component that has only ever met an accepting d
 refusal in front of a podcaster. Neither reads file formats — name the file that should be refused
 (`rejectContent`) to exercise that path.
 
+## Theme tokens — `--mc-*` (`--mc-accent-text` since 0.16.0)
+
+`defineMosaicastElement` writes `ctx.theme` onto your `:host` as custom properties; the host also sets the
+same names on `:root`, so they inherit into any shadow root.
+
+| Token | CSS | Use it for |
+|---|---|---|
+| `bg` / `surface` | `--mc-bg` / `--mc-surface` | page and raised backgrounds |
+| `text` / `textMuted` | `--mc-text` / `--mc-text-muted` | body and secondary text |
+| `accent` | `--mc-accent` | **fills only** — buttons, badges, bars |
+| `accentContrast` | `--mc-accent-contrast` | text and icons *on* an `--mc-accent` fill |
+| `accentText` | `--mc-accent-text` | **text, links and focus rings** in the accent colour |
+| `accent2` | `--mc-accent-2` | an optional secondary accent |
+| `border` | `--mc-border` | dividers and outlines |
+
+**Never colour text with `--mc-accent`.** It is the admin's seed, unchecked against the page: a pale seed
+such as `#FFF176` measured 1.12:1 as link text. `--mc-accent-text` is the same accent clamped to WCAG AA
+(4.5:1) against both `--mc-bg` and `--mc-surface`:
+
+```css
+a, .link { color: var(--mc-accent-text); }
+:focus-visible { outline: 2px solid var(--mc-accent-text); }
+button.primary { background: var(--mc-accent); color: var(--mc-accent-contrast); }
+```
+
+`ctx.theme.accentText` is optional — a host older than 0.16.0 does not send it — and the SDK only writes
+it onto `:host` when present, so the value inherited from `:root` is never shadowed by an empty one.
+
 ## Host icons — `iconCss` / `iconMask` (since 0.9.0)
 
 The host publishes its icon set as `--mc-icon-*` custom properties, which inherit through the shadow

@@ -151,6 +151,22 @@ describe('defineMosaicastElement', () => {
     expect(style).toContain('--mc-bg: #ffffff');
     expect(style).toContain('--mc-text-muted: #666666');
     expect(style).toContain('--mc-accent: #3b5bdb');
+    expect(style).toContain('--mc-accent-text: #3b5bdb');
+  });
+
+  it('leaves --mc-accent-text to inheritance when the host sends no accentText', () => {
+    const tag = 'mc-test-no-accent-text';
+    defineMosaicastElement({ tag, render: () => {} });
+
+    const { accentText: _dropped, ...olderHost } = DEFAULT_THEME;
+    const el = document.createElement(tag) as HTMLElement & { ctx: PluginContext };
+    el.ctx = makeMockCtx({ theme: olderHost });
+    document.body.appendChild(el);
+
+    // Writing `undefined` onto :host would shadow the value the host already set on :root.
+    const style = el.shadowRoot!.querySelector('style')!.textContent ?? '';
+    expect(style).not.toContain('--mc-accent-text');
+    expect(style).toContain('--mc-accent: #3b5bdb');
   });
 
   it('runs cleanup on re-render and clears prior content', () => {
