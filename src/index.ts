@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.16.0' as const;
+export const PLATFORM_API_VERSION = '0.16.1' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -1287,10 +1287,12 @@ export const DISPLAY_BATCH_LIMIT = 200;
  * and what {@link PluginContext.sanitize} applies.
  *
  * Plain data, so the SDK stays dependency-free and the host can import this one object instead of
- * keeping a copy. The names map one-to-one onto DOMPurify's config keys (`ALLOWED_TAGS`,
- * `ALLOWED_ATTR`, `FORBID_TAGS`, `FORBID_ATTR`, `ALLOWED_URI_REGEXP`) for a plugin that must run its own
- * sanitizer somewhere `ctx` does not reach — but prefer `ctx.sanitize`, which is the same decision
- * without a dependency.
+ * keeping a copy. The names map onto DOMPurify's config keys (`ALLOWED_TAGS`, `ALLOWED_ATTR`, `FORBID_TAGS`,
+ * `FORBID_ATTR`, `ALLOWED_URI_REGEXP`) for a plugin that must run its own sanitizer somewhere `ctx` does not
+ * reach — **but the lists alone are not the policy**: DOMPurify also needs `ALLOW_DATA_ATTR: false`,
+ * `ALLOW_ARIA_ATTR: false` and `ADD_URI_SAFE_ATTR` set to every allowed attribute but `href` and `src`, or it
+ * keeps attributes the list does not name and strips ones it does (core#232). Prefer `ctx.sanitize`, which is
+ * the same decision without a dependency or those traps.
  *
  * ## Why not DOMPurify's defaults
  *
@@ -1316,7 +1318,16 @@ export const FEED_HTML_POLICY: Readonly<{
    * with their content.
    */
   allowedTags: readonly string[];
-  /** Every attribute that survives, on any allowed element. */
+  /**
+   * Every attribute that survives, on any allowed element — **and nothing else**: no `data-*`, no `aria-*`,
+   * no `class`, no `id`. A plugin may therefore mark its *own* elements with `data-*` and trust that an
+   * author's markup cannot carry the same marker. Only `href` and `src` are held to
+   * {@link allowedUriRegexp}; every other listed attribute keeps whatever value it has.
+   *
+   * `start` (on `<ol>`, since 0.16.1) keeps a list that resumes after an image or a code block numbered
+   * where it left off. `align` (since 0.16.1) is obsolete HTML, but the only way Markdown table alignment
+   * reaches the page without `style`, which this policy refuses; the worst it does elsewhere is float an image.
+   */
   allowedAttrs: readonly string[];
   /**
    * Elements that never survive, even if a later edit adds them to `allowedTags` — belt and braces, so
@@ -1325,7 +1336,12 @@ export const FEED_HTML_POLICY: Readonly<{
   forbidTags: readonly string[];
   /** Attributes removed even if a later edit adds them to `allowedAttrs`. */
   forbidAttrs: readonly string[];
-  /** What an `href` or `src` may start with; anything else (`javascript:`, `data:`) is dropped. */
+  /**
+   * What an `href` or `src` may start with, after surrounding whitespace is trimmed; anything else
+   * (`javascript:`, `data:`) is dropped. **One exception, on `<img src>` only:** a `data:` URI is kept — the
+   * host's sanitizer (DOMPurify) allows inline images whatever this pattern says, and an image cannot run
+   * script, so the policy states it rather than pretending otherwise. A `data:` link is still dropped.
+   */
   allowedUriRegexp: RegExp;
   /** The `rel` put on every link that leaves the site, next to `target="_blank"`. */
   externalLinkRel: string;
@@ -1336,7 +1352,9 @@ export const FEED_HTML_POLICY: Readonly<{
     'q', 's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th',
     'thead', 'tr', 'u', 'ul', 'var',
   ]),
-  allowedAttrs: Object.freeze(['href', 'title', 'alt', 'src', 'width', 'height', 'lang', 'dir', 'colspan', 'rowspan']),
+  allowedAttrs: Object.freeze([
+    'href', 'title', 'alt', 'src', 'width', 'height', 'lang', 'dir', 'colspan', 'rowspan', 'start', 'align',
+  ]),
   forbidTags: Object.freeze(['style', 'script', 'iframe', 'object', 'embed', 'form', 'input', 'link', 'base']),
   forbidAttrs: Object.freeze(['style', 'srcset', 'formaction', 'ping']),
   allowedUriRegexp: /^(?:https?:|mailto:|tel:|#|\/)/i,
@@ -2645,7 +2663,9 @@ export interface PluginContext {
    * - keeps only the allowed tags and attributes, dropping `<style>`, `<script>`, `<iframe>`, forms and
    *   every `style`, `srcset` and event-handler attribute — including their content where that could run
    *   or style anything;
-   * - drops an `href`/`src` that is not `http(s):`, `mailto:`, `tel:`, `#…` or a `/` path;
+   * - drops an `href`/`src` that is not `http(s):`, `mailto:`, `tel:`, `#…` or a `/` path — except a `data:`
+   *   image in `<img src>`, which cannot run script and is kept;
+   * - keeps no `data-*`, `aria-*`, `class` or `id` attribute, so your own `data-*` markers cannot be forged;
    * - gives every link that leaves the site `target="_blank"` and `rel="noopener noreferrer nofollow ugc"`
    *   — following one in the same tab would tear down the SPA and stop the player.
    *

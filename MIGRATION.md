@@ -1,4 +1,10 @@
-# Migrating a plugin to `platformApi` 0.16.0
+# Migrating a plugin to `platformApi` 0.16.x
+
+**0.16.0 → 0.16.1 needs nothing.** A patch: `platformApi` 0.16.0 keeps loading. `ctx.sanitize` keeps
+`<ol start>` and table `align` now, and `sanitizeLikeHost` matches the host more closely — if a component test
+asserted that `<object>`/`<select>`/`<textarea>` text disappears, it was asserting something production never
+did. Should you bump the npm dependency to 0.16.1, a manifest test comparing `platformApi` with
+`PLATFORM_API_VERSION` wants `"0.16.1"` in `plugin.json` too — either spelling loads.
 
 Nine migrations in one file. **On `0.15.x`?** Read the next section and stop. **On `0.14.x`?** Do
 [0.14.x → 0.15.0](#014x--0150-a-schedule-that-follows-config-and-a-component-that-survives-a-new-ctx)
