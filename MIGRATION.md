@@ -1,7 +1,99 @@
-# Migrating a plugin to `platformApi` 0.15.0
+# Migrating a plugin to `platformApi` 0.16.0
 
-Eight migrations in one file. **On `0.14.x`?** Read the next section and stop. **On `0.13.x`?** Do
-[0.13.x → 0.14.0](#013x--0140-telling-a-user-something-happened) first, then work upward.
+Nine migrations in one file. **On `0.15.x`?** Read the next section and stop. **On `0.14.x`?** Do
+[0.14.x → 0.15.0](#014x--0150-a-schedule-that-follows-config-and-a-component-that-survives-a-new-ctx)
+first, then work upward.
+
+---
+
+# 0.15.x → 0.16.0: what the audit found in the contract
+
+**This one you must do.** `platformApi` matches on `major.minor`, so a plugin declaring `0.15.x` is
+rejected by a `0.16.0` host. Re-declare, rebuild, reinstall.
+
+```diff
+  // plugin.json
+- "platformApi": "0.15.0",
++ "platformApi": "0.16.0",
+```
+
+```diff
+- implementation("dev.mosaicast:plugin-api:0.15.0")
++ implementation("dev.mosaicast:plugin-api:0.16.0")
+- "@mosaicast/plugin-sdk": "^0.15.0"
++ "@mosaicast/plugin-sdk": "^0.16.0"
+```
+
+## Required if your backend aggregates over users: declare `readsAllUsers`
+
+`DocStore.queryAcrossUsers` is **gone**. Reading every user's partition at once is now a capability you
+declare, like `blobs`, `identity` and `notifications`, and it has its own handle — `null` without the
+declaration:
+
+```diff
+  // plugin.json
+- "data": { "writableBy": "fan", "readableBy": "anonymous" }
++ "data": { "writableBy": "fan", "readableBy": "anonymous", "readsAllUsers": true }
+```
+
+```diff
+- List<OwnedDocEntry> marks = ctx.store().queryAcrossUsers("mark:");
++ List<OwnedDocEntry> marks = ctx.allUsers().query("mark:");
+```
+
+Tests: `FakePluginContext.allUsers()` is `null` until you call `withReadsAllUsers()`, and a test that
+asserted on `store.queryAcrossUsers(p)` uses `store.acrossUsers().query(p)`. Nothing changes for
+`FakeNotifier` or for who the host lets you notify.
+
+The compiler finds every call site. If you would rather not declare it, that is the point: an operator
+now reads off the manifest whether a plugin can enumerate every account that ever used it.
+
+## Required if you insert feed HTML: stop, or sanitize it
+
+`DisplaySnapshot.description` has always been the feed's show notes **verbatim** — third-party HTML
+nobody sanitized. If you assign it to `innerHTML`, change that today:
+
+```diff
+- card.querySelector('.teaser')!.innerHTML = snap.description;
++ card.querySelector('.teaser')!.textContent = snap.descriptionText;      // plain text — cards, teasers
+- notes.innerHTML = snap.description;
++ notes.innerHTML = ctx.sanitize(snap.description);                       // the host's own policy
+```
+
+And if you run a sanitizer of your own — `DOMPurify.sanitize(html)` with defaults lets `<style>` and
+`style=` through, which under this CSP is click-jacking and CSS exfiltration:
+
+```diff
+- page.innerHTML = DOMPurify.sanitize(marked.parse(md), { ADD_ATTR: ['target', 'rel'] });
++ page.innerHTML = ctx.sanitize(marked.parse(md));
+```
+
+Java: `DisplaySnapshot` gained a tenth component, `descriptionText`. The nine-argument constructor still
+compiles, deprecated for removal, and leaves it `""` — move fixtures to ten arguments when you touch them.
+A backend writing show notes into an `OgMeta`, a `SearchHit` or a notification uses `descriptionText()`.
+
+## Recommended
+
+- **Colour text with `--mc-accent-text`, not `--mc-accent`.** The accent is the admin's unchecked seed; a
+  pale one measured 1.12:1 as link text. `--mc-accent-text` is the same colour clamped to WCAG AA. Keep
+  `--mc-accent` for fills.
+
+  ```diff
+  - a { color: var(--mc-accent); }
+  - :focus-visible { outline: 2px solid var(--mc-accent); }
+  + a { color: var(--mc-accent-text); }
+  + :focus-visible { outline: 2px solid var(--mc-accent-text); }
+  ```
+
+- **Put bounds on numeric config** and delete the clamp in your code: `"min": 10, "max": 3600` on an
+  interval. The host refuses an out-of-range write and treats a stored one as unset.
+- **Label a consent category you introduced** under `consent.categoryLabels`, or visitors are asked to
+  consent to a bare id.
+- **Read a page of cards with `ctx.docs.getMany`**, and delete any cache of misses you wrote around
+  `ctx.docs.get` — the client remembers misses now, and says so. A raw `ctx.api.get` of an absent document
+  now resolves `undefined` (the host's 204) instead of rejecting 404; `getOrNull` handles both.
+- **Check `frontend.entry` against `FRONTEND_ENTRY_PATTERN`.** Plain segments under `assets/` load as
+  before; an entry with `..`, a leading `/`, `?` or `#` is rejected at load.
 
 ---
 

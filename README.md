@@ -85,7 +85,9 @@ This is the part plugin authors most often guess wrong, so it is stated plainly.
 
 ```text
 GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
-         → one JSON doc; 404 if absent
+         → one JSON doc; 204 (no body) if the key is not set — 404 means a wrong address
+GET    /api/plugins/{id}/data/{scopeType}?ids=a,b&keys=x,y          (since 0.16.0)
+         → { a: { x: … }, b: {} } — misses absent; ≤ 100 ids and ≤ 100 keys per request
 GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
          → { items: [{ key, value }], page, size, totalElements, totalPages }
 PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
@@ -109,7 +111,7 @@ DELETE /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
 ### The typed client — `ctx.docs` (since 0.9.0)
 
 `ctx.api` is the raw surface and stays available. `ctx.docs` is the same endpoints with the path building,
-the key validation and the 404 handling done for you — which removes a whole class of bug, since every doc
+the key validation and the absence handling done for you — which removes a whole class of bug, since every doc
 access above was string concatenation the plugin had to get right four segments at a time:
 
 ```ts
@@ -122,8 +124,22 @@ await ctx.docs.remove(ctx.scope, 'draft');                    // any Scope addre
 - **`'self'` is `data/user/me`** and `'site'` is `data/site/main` — the two singletons. Making the
   per-user partition the *shortest* thing to write is deliberate: it is the most security-relevant
   convention in the contract, and a convention only sticks when it is also the easy path.
-- **`get` resolves `null` on 404**, because a key nothing has written yet is a normal state rather than a
-  failure. The same is true of `ctx.api.getOrNull(path)`.
+- **`get` resolves `null` when the key is not set** (the host's 204), because a key nothing has written
+  yet is a normal state rather than a failure. The same is true of `ctx.api.getOrNull(path)`; a raw
+  `ctx.api.get` resolves `undefined` there.
+- **`getMany(type, ids, keys)` reads a page of cards in one request** (since 0.16.0), answering
+  `{ id: { key: value } }` with misses simply absent. Over 100 ids or keys is split and merged for you.
+
+  ```ts
+  const docs = await ctx.docs.getMany<Highlight>('episode', ctx.episodes.slice(0, 20), ['highlight']);
+  ```
+
+- **The client remembers for you (guaranteed since 0.16.0)**, per plugin and signed-in identity, for the
+  life of the page: identical `get`s in flight share one request; a miss is remembered (from `getMany`
+  too); your own `put`/`remove` forget the address they touched; hits are never cached; errors are never
+  remembered. So **delete any cache of misses you wrote yourself** — it is redundant — and keep a cache of
+  hits, if at all, no longer than a render: it hides writes made in other sessions. Before this, 98% of
+  one measured session's plugin requests were "not set", with one key asked 178 times.
 - **A malformed key throws at the call site**, with `DOC_KEY_PATTERN` in the message, instead of costing a
   400 round-trip whose body you then have to read.
 - Everything else is unchanged and still the host's: both access floors, `backendOwned`, the 400 on an
@@ -163,16 +179,23 @@ boundary, so it does not share a constructor with anything in your plugin.
 - The partition is **flat** — one per user, not one per user and entity — so the entity goes in the key: `mark:<episodeSlug>:cell`.
 - `readableBy` does not apply to it. No floor makes someone else's partition readable.
 
-**A backend has no calling user**, so every `DocStore` method throws `UnsupportedOperationException` for a `USER` scope — reads included, since resolving "me" without a caller would have to pick someone. Aggregate instead:
+**A backend has no calling user**, so every `DocStore` method throws `UnsupportedOperationException` for a `USER` scope — reads included, since resolving "me" without a caller would have to pick someone. Aggregate instead — **after declaring it** (since 0.16.0):
+
+```json
+"data": { "writableBy": "fan", "readableBy": "anonymous", "readsAllUsers": true }
+```
 
 ```java
 // Backend-only, read-only, and no HTTP surface: no visitor's request can reach another's data.
-List<OwnedDocEntry> marks = ctx.store().queryAcrossUsers("mark:");
+// null without data.readsAllUsers — the one read that crosses an ownership boundary is declared.
+List<OwnedDocEntry> marks = ctx.allUsers().query("mark:");
 // record OwnedDocEntry(UUID userId, String key, JsonNode value) — the owner is host-resolved, never
 // a value the browser supplied, which is what makes a leaderboard built from it true.
 ```
 
-Write the aggregate back to an entity scope (`…/data/episode/s2e04/leaderboard`) and let the component read it there. In tests, `InMemoryDocStore.asUser(uuid)` stands in for the host resolving `me`, so you can seed what a frontend would have written and then assert on `queryAcrossUsers`.
+Write the aggregate back to an entity scope (`…/data/episode/s2e04/leaderboard`) and let the component read it there. In tests, `InMemoryDocStore.asUser(uuid)` stands in for the host resolving `me`, so you can seed what a frontend would have written; `FakePluginContext.withReadsAllUsers()` stands in for the declaration (off by default, so `ctx.allUsers()` is `null` as it is for an undeclared plugin), and `store.acrossUsers()` reads the partitions directly for your assertions.
+
+**Why `readsAllUsers` is declared.** Every other doc-store read is a plugin's own shared scopes or the caller's own partition. This one returns every account's documents with their owners' UUIDs — "can enumerate everyone who ever used me" — which an operator should be able to read off a manifest before installing, exactly as with `identity` and `notifications`. Until 0.16.0 it was `ctx.store().queryAcrossUsers(prefix)` and every plugin had it without asking.
 
 **The two ends see one store.** The doc a backend writes with `ctx.store().put(scope, key, value)` is exactly what the frontend reads at `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`.
 
@@ -327,7 +350,38 @@ const one = await ctx.feeds.display('kraken');   // null when absent or not visi
   reason to read it live. Cache per render, never per install.
 - `displayMany` **clamps** at 200 slugs rather than erroring, so check what came back.
 
+- **`description` is untrusted third-party HTML** — whatever the podcast host put in the feed, unsanitized.
+  Never assign it to `innerHTML` as it stands. Show `descriptionText` (plain text, since 0.16.0) for a card
+  or a teaser, or run it through `ctx.sanitize` (below). A Java backend putting show notes into an
+  `OgMeta`, a `SearchHit` or a notification uses `descriptionText()` too.
+
 Test it with `makeMockFeeds().withDisplay(slug, snapshot)`, mirroring the Java `FakeFeedAccess.withDisplay`.
+The double derives `descriptionText` from `description` when a fixture leaves it out.
+
+## Rendering HTML you did not write — `ctx.sanitize` (since 0.16.0)
+
+```ts
+notes.innerHTML = ctx.sanitize(snap.description);          // show notes from the feed
+page.innerHTML = ctx.sanitize(marked.parse(markdown));     // a podcaster's Markdown, after rendering
+```
+
+`ctx.sanitize` applies **the host's own policy** — the one the shell applies to feed HTML, exported as
+`FEED_HTML_POLICY`. It keeps prose, links, lists, tables and images; drops `<style>`, `<script>`,
+`<iframe>`, forms, and every `style`, `srcset` and event-handler attribute; drops `javascript:`/`data:`
+links; and sends every external link to a new tab with `rel="noopener noreferrer nofollow ugc"`, so
+following one does not stop the player.
+
+**Why not `DOMPurify.sanitize(html)`?** Its defaults stop scripts but allow `<style>` and `style=`. The
+plugin contract needs `style-src 'unsafe-inline'`, and `img-src` stays open to any `https:` host for
+artwork, so a stylesheet in someone else's HTML becomes a full-viewport click-jacking overlay or an
+attribute-selector that leaks form values one character at a time. The wiki plugin shipped exactly that.
+With `ctx.sanitize` a plugin cannot end up with a weaker policy than the host by writing less code. If you
+really must sanitize where `ctx` does not reach, pass `FEED_HTML_POLICY`'s lists to your sanitizer rather
+than its defaults.
+
+In tests, `makeMockCtx()` puts `sanitizeLikeHost` on `ctx.sanitize`: the same policy walked over a parsed
+tree, so a component test sees the same removals. It needs a DOM (`// @vitest-environment jsdom`) and is a
+test double, never a boundary — ship `ctx.sanitize`.
 
 ## Site-wide tags — `ctx.tags` / `ctx.tags()` (since 0.9.0)
 
@@ -371,7 +425,7 @@ Test with `makeMockTags({ writesEpisodes })` / `FakeTags`, both of which refuse 
 
 ## Who the UUIDs are — `ctx.users` / `ctx.users()` (since 0.13.0)
 
-A backend calling `queryAcrossUsers` gets `OwnedDocEntry(userId, …)` — UUIDs and a document. A leaderboard
+A backend calling `ctx.allUsers().query(...)` gets `OwnedDocEntry(userId, …)` — UUIDs and a document. A leaderboard
 built from that had ids and no way to draw a person, and both workarounds were bad: show raw UUIDs, or copy
 display names into the plugin's own store. This is the lookup that fixes it. It is deliberately a lookup
 rather than a wider `ctx.user`: the host still resolves access, and what you learn about somebody else stays
@@ -448,7 +502,7 @@ if (told.length < participants.length) prune(participants, told);
 ```
 
 - **Only users you already hold `user`-scope data for.** Host-enforced against the same partitions
-  `queryAcrossUsers` reads — participants have rows, and no plugin can reach a user who never touched it.
+  `allUsers().query(...)` reads — whether or not you declared `readsAllUsers` — participants have rows, and no plugin can reach a user who never touched it.
 - **`send` answers who actually got it.** An ineligible or erased recipient is left out rather than
   failing the call, so partial sends are normal and the return value is the only way to see one. A plugin
   that ignores it and works from a stale participant list notifies nobody while looking perfectly healthy.
@@ -602,6 +656,34 @@ Test it with `makeMockBlobs()` from `/testing` and `InMemoryPluginBlobs` in the 
 ceilings and the allow-list**: a component that has only ever met an accepting double meets its first
 refusal in front of a podcaster. Neither reads file formats — name the file that should be refused
 (`rejectContent`) to exercise that path.
+
+## Theme tokens — `--mc-*` (`--mc-accent-text` since 0.16.0)
+
+`defineMosaicastElement` writes `ctx.theme` onto your `:host` as custom properties; the host also sets the
+same names on `:root`, so they inherit into any shadow root.
+
+| Token | CSS | Use it for |
+|---|---|---|
+| `bg` / `surface` | `--mc-bg` / `--mc-surface` | page and raised backgrounds |
+| `text` / `textMuted` | `--mc-text` / `--mc-text-muted` | body and secondary text |
+| `accent` | `--mc-accent` | **fills only** — buttons, badges, bars |
+| `accentContrast` | `--mc-accent-contrast` | text and icons *on* an `--mc-accent` fill |
+| `accentText` | `--mc-accent-text` | **text, links and focus rings** in the accent colour |
+| `accent2` | `--mc-accent-2` | an optional secondary accent |
+| `border` | `--mc-border` | dividers and outlines |
+
+**Never colour text with `--mc-accent`.** It is the admin's seed, unchecked against the page: a pale seed
+such as `#FFF176` measured 1.12:1 as link text. `--mc-accent-text` is the same accent clamped to WCAG AA
+(4.5:1) against both `--mc-bg` and `--mc-surface`:
+
+```css
+a, .link { color: var(--mc-accent-text); }
+:focus-visible { outline: 2px solid var(--mc-accent-text); }
+button.primary { background: var(--mc-accent); color: var(--mc-accent-contrast); }
+```
+
+`ctx.theme.accentText` is optional — a host older than 0.16.0 does not send it — and the SDK only writes
+it onto `:host` when present, so the value inherited from `:root` is never shadowed by an empty one.
 
 ## Host icons — `iconCss` / `iconMask` (since 0.9.0)
 
@@ -785,6 +867,26 @@ the generic admin form is the only thing an operator ever sees — and without `
 shows them `ingestIntervalSeconds` and nothing else, with no room to say what a sane value is or what unit
 it is in. Both take a locale map or a plain string; the key stays visible beside the label, because the key
 is what your own docs name. `options` declares a closed set, rendered as a select and refused outside it.
+
+**Config values have bounds (since 0.16.0).** `min`/`max`/`step` on a `number` field, `minLength`/`maxLength`
+on a `string` one. Without them any number an operator can type is legal — including the `0` that switches
+a scheduled task off. The host **refuses** an out-of-range write with a 400 naming the bound (never clamps),
+the form renders the bounds as input constraints, a `default` outside its own bounds is refused at load, and
+a value stored before a bound existed that now breaks it counts as unset. So what `PluginConfig.get` returns
+satisfies the declaration — put the rule in the manifest, not a clamp in code:
+
+```json
+"ingestIntervalSeconds": { "type": "number", "default": 60, "min": 10, "max": 3600, "step": 1 }
+```
+
+There is no `pattern` yet: Java and JavaScript regex dialects differ, and one field's regex would be two
+rules free to disagree.
+
+**`frontend.entry` has a grammar (since 0.16.0).** A relative path under the plugin's own `assets/`: one or
+more `[A-Za-z0-9._-]` segments joined by `/`, no leading slash, no `.` or `..` segment, no query and no
+fragment. The host builds `/plugins/<id>/assets/<entry>` from it and **rejects the plugin at load** when it
+does not match, rather than loading a URL you did not write. `FRONTEND_ENTRY_PATTERN` is the same rule, so a
+test can find out before the host does.
 
 **Documentation, not enforcement** — the same caveat `PluginDataDeclaration` and
 `ConsentServiceDeclaration` have carried since 0.4.0. The manifest is owned and validated by the **host**;
@@ -1002,8 +1104,8 @@ per-service detail exists so the notice can name who stores what for how long; w
 the category. So if two plugins each declare an `analytics` service with different providers, the visitor
 sees **one** decision listing both plugins, and granting it grants both — there is no way to accept one
 provider and refuse the other. If you need your own services to be refusable independently, declare them
-under **different categories** (a plugin-declared category is fine; the shell just has no translated label
-for it). That is the only lever the contract gives you.
+under **different categories** (a plugin-declared category is fine — label it, see below). That is the only
+lever the contract gives you.
 
 **`necessary` is never asked about.** `has('necessary')` is always `true` and the host never prompts for
 it — it is the category the core itself uses, and a banner-free site stays banner-free. Declaring a
@@ -1039,6 +1141,29 @@ where plugin authors look, so the required shape is documented here. **From `0.4
   }]
 }
 ```
+
+**Label a category you introduce (since 0.16.0).** The category is what the visitor consents to, so it is
+the one string that cannot fall back to a developer key — a bare `social` between two explained core
+categories reads as a bug, not a choice. Give it a name and a one-line hint, as a locale map or a plain
+string:
+
+```json
+"consent": {
+  "services": [{ "id": "mastodon", "category": "social", "…": "…" }],
+  "categoryLabels": {
+    "social": {
+      "label": { "en": "Social media", "de": "Soziale Medien" },
+      "hint": { "en": "Posts embedded from social networks." }
+    }
+  }
+}
+```
+
+Declaring a category outside `necessary`/`functional`/`analytics` **obliges you to label it**: an
+unlabelled one still loads but is shown wrapped in a generic phrase. A label for a **core** category, or for
+a category none of your services declares, is refused at load. If two plugins label the same category the
+host picks one, deterministically — the decision is shared, so only one label can be shown. (`categoryLabels`
+is not the pre-0.4 `categories` array, which stays rejected.)
 
 | Field | Meaning |
 |---|---|

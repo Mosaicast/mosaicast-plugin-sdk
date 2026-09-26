@@ -5,6 +5,7 @@ package dev.mosaicast.plugin.testkit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -116,7 +117,7 @@ class TestKitTest {
     }
 
     @Test
-    void asUserSeedsAPartitionAndQueryAcrossUsersAggregatesThem() {
+    void asUserSeedsAPartitionAndAcrossUsersAggregatesThem() {
         InMemoryDocStore store = new InMemoryDocStore();
         UUID alice = UUID.randomUUID();
         UUID bob = UUID.randomUUID();
@@ -126,17 +127,45 @@ class TestKitTest {
         store.asUser(bob).put(Scope.user(), "mark:s2e04:b7", new Vote("bob", 7));
         store.asUser(bob).put(Scope.user(), "pref:theme", "dark");
 
-        List<OwnedDocEntry> marks = store.queryAcrossUsers("mark:");
+        List<OwnedDocEntry> marks = store.acrossUsers().query("mark:");
 
         assertEquals(2, marks.size());
         assertEquals(Set.of(alice, bob), marks.stream().map(OwnedDocEntry::userId).collect(Collectors.toSet()));
-        assertEquals(3, store.queryAcrossUsers("").size());
+        assertEquals(3, store.acrossUsers().query("").size());
 
         // A partition is private to its owner: one user's view never sees another's document.
         assertTrue(store.asUser(alice).get(Scope.user(), "mark:s2e04:b7", Vote.class).isEmpty());
         assertEquals(new Vote("alice", 3),
                 store.asUser(alice).get(Scope.user(), "mark:s2e04:b3", Vote.class).orElseThrow());
         assertEquals(1, store.docsOf(alice).size());
+    }
+
+    @Test
+    void allUsersIsNullUntilTheManifestWouldDeclareIt() {
+        FakePluginContext ctx = new FakePluginContext();
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+        ctx.store().asUser(alice).put(Scope.user(), "mark:b3", true);
+        ctx.store().asUser(bob).put(Scope.user(), "mark:b7", true);
+
+        // Undeclared: the host hands out no cross-user reader, and neither does the fake.
+        assertNull(ctx.allUsers());
+
+        ctx.withReadsAllUsers();
+        List<OwnedDocEntry> marks = ctx.allUsers().query("mark:");
+        assertEquals(Set.of(alice, bob), marks.stream().map(OwnedDocEntry::userId).collect(Collectors.toSet()));
+    }
+
+    @Test
+    void notifierEligibilityDoesNotDependOnReadsAllUsers() {
+        FakePluginContext ctx = new FakePluginContext();
+        UUID ana = UUID.randomUUID();
+        ctx.store().asUser(ana).put(Scope.user(), "mark:b3", true);
+        FakeNotifier notifier = new FakeNotifier(ctx.store());
+        ctx.withNotifier(notifier);
+
+        assertNull(ctx.allUsers());
+        assertEquals(Set.of(ana), notifier.notifiable());
     }
 
     @Test
@@ -301,7 +330,7 @@ class TestKitTest {
         Scope feed = Scope.feed("f1");
         DisplaySnapshot snap = new DisplaySnapshot("Ep 1", "notes", "http://a/1.mp3",
                 Instant.parse("2026-01-01T00:00:00Z"), Duration.ofMinutes(42),
-                "http://a/ep1.jpg", "http://a/feed.jpg", "Ada Lovelace", "First episode");
+                "http://a/ep1.jpg", "http://a/feed.jpg", "Ada Lovelace", "First episode", "notes");
         FakeFeedAccess feeds = new FakeFeedAccess(Map.of(feed, List.of("ep-1", "ep-2")))
                 .withDisplay("ep-1", snap);
 
@@ -312,9 +341,19 @@ class TestKitTest {
         // artwork() prefers the episode cover, falls back to the feed cover, then null.
         assertEquals("http://a/ep1.jpg", snap.artwork());
         assertEquals("http://a/feed.jpg", new DisplaySnapshot("t", "d", null, null, null,
-                null, "http://a/feed.jpg", null, null).artwork());
+                null, "http://a/feed.jpg", null, null, "d").artwork());
         assertEquals(null, new DisplaySnapshot("t", "d", null, null, null,
-                null, null, null, null).artwork());
+                null, null, null, null, "d").artwork());
+    }
+
+    @Test
+    @SuppressWarnings("removal")
+    void displaySnapshotPlainTextIsNeverNull() {
+        // The host always fills it; a null (an old stored row) and the 0.15 constructor both mean "".
+        assertEquals("", new DisplaySnapshot("t", "<p>d</p>", null, null, null,
+                null, null, null, null, null).descriptionText());
+        assertEquals("", new DisplaySnapshot("t", "<p>d</p>", null, null, null,
+                null, null, null, null).descriptionText());
     }
 
     @Test

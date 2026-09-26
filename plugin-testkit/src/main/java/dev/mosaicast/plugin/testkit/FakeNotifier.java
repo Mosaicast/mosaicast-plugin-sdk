@@ -23,7 +23,7 @@ import java.util.UUID;
  * <p><strong>Eligibility comes from the doc store, not from a list you seed.</strong> The host will only
  * deliver to users the plugin already holds {@link dev.mosaicast.plugin.api.ScopeType#USER}-scope data
  * for, so this double asks the same {@link InMemoryDocStore} the context is wired to, exactly as the host
- * asks the same partitions {@code queryAcrossUsers} reads. A hand-seeded allow-list would be a second
+ * asks the same partitions {@code allUsers().query(...)} reads. A hand-seeded allow-list would be a second
  * copy of that rule, free to drift from it — and the drift would always fall the same way, with the
  * double permitting what production refuses.
  *
@@ -127,7 +127,9 @@ public final class FakeNotifier implements Notifier {
      */
     public Set<UUID> notifiable() {
         Set<UUID> eligible = new LinkedHashSet<>();
-        for (OwnedDocEntry entry : store.queryAcrossUsers("")) {
+        // Straight from the store, not through a context: the host's rule does not depend on whether the
+        // plugin declared data.readsAllUsers, so neither does this double's.
+        for (OwnedDocEntry entry : store.acrossUsers().query("")) {
             eligible.add(entry.userId());
         }
         return eligible;

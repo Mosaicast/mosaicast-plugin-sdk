@@ -35,7 +35,7 @@ import java.util.UUID;
  * list. So the host draws two lines the plugin cannot move.
  *
  * <p><strong>A plugin may only notify users it already holds {@link ScopeType#USER}-scope data for.</strong>
- * Enforced against the same partitions {@link DocStore#queryAcrossUsers(String)} reads, so it needs no new
+ * Enforced against the same partitions {@link CrossUserStore#query(String)} reads, so it needs no new
  * concept: bingo may write to its participants because participants have rows, and no plugin can reach a
  * user who never touched it. The rule outlives the case it was written for — a comments plugin notifies a
  * thread's participants, who are exactly the users it stores rows for.

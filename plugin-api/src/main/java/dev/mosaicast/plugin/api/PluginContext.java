@@ -36,7 +36,9 @@ public interface PluginContext {
      *
      * <pre>{@code
      * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
-     *          → one JSON doc; 404 if absent
+     *          → one JSON doc; 204 (no body) if the key is not set
+     * GET    /api/plugins/{id}/data/{scopeType}?ids=a,b&keys=x,y
+     *          → { a: { x: … }, b: {} } — misses absent; ≤ 100 ids and ≤ 100 keys (since 0.16.0)
      * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
      *          → { items: [{ key, value }], page, size, totalElements, totalPages }
      * PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
@@ -58,8 +60,8 @@ public interface PluginContext {
      * <p>So the document a backend writes with {@code ctx.store().put(scope, key, value)} is exactly the
      * one the frontend reads at {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — backend
      * and frontend see one store, not two. The exception is the {@code USER} scope, which exists only on
-     * this HTTP surface: a backend has no calling user, so it reads user partitions through
-     * {@link DocStore#queryAcrossUsers(String)} and writes none.
+     * this HTTP surface: a backend has no calling user, so it writes none, and reads them only through
+     * {@link #allUsers()} — which the manifest has to declare.
      *
      * <p>The host enforces the boundaries on that surface: data is hard-scoped to the plugin id (a plugin
      * only ever sees its own), the scope must exist (and its feed be enabled), and the call carries the
@@ -160,7 +162,7 @@ public interface PluginContext {
      *
      * <p>{@code null} without the declaration, exactly as with {@link #schema()}, {@link #blobs()} and
      * {@link #tags()}. Declare it when your plugin aggregates across people and has to draw them: a
-     * leaderboard built from {@link DocStore#queryAcrossUsers(String)} holds {@link OwnedDocEntry} — UUIDs
+     * leaderboard built from {@link #allUsers()} holds {@link OwnedDocEntry} — UUIDs
      * and documents — and without this has no way to turn a row into a person.
      *
      * <p>Declared rather than derived even though the plugin already <em>has</em> the ids, because the
@@ -205,6 +207,25 @@ public interface PluginContext {
      * @since 0.14.0
      */
     Notifier notifier();
+
+    /**
+     * Every user's {@link ScopeType#USER} partition of this plugin, for plugins whose manifest declares
+     * {@code "data": { "readsAllUsers": true }} (ARCHITECTURE §7.4).
+     *
+     * <p>{@code null} without the declaration, exactly as with {@link #blobs()}, {@link #tags()},
+     * {@link #users()} and {@link #notifier()}. It is the one read that crosses an ownership boundary — every
+     * account's documents, owner UUID included — so it is what an operator should be able to read off a
+     * manifest before installing. Declare it when your backend aggregates over its users: a leaderboard, a
+     * rollup, a moderation view. See {@link CrossUserStore}.
+     *
+     * <p>Replaces {@code DocStore.queryAcrossUsers(prefix)}, removed in 0.16.0: the call is now
+     * {@code ctx.allUsers().query(prefix)}.
+     *
+     * @return the cross-user reader, or {@code null} when the manifest does not declare
+     *         {@code data.readsAllUsers} (most plugins)
+     * @since 0.16.0
+     */
+    CrossUserStore allUsers();
 
     /**
      * Which languages this site has, and which content may be authored in (ARCHITECTURE §12.7).

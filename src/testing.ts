@@ -44,7 +44,7 @@ import type {
   UserDirectory,
   UserRef,
 } from './index.js';
-import { DISPLAY_BATCH_LIMIT, DOC_KEY_PATTERN, declaredTypeFor } from './index.js';
+import { DISPLAY_BATCH_LIMIT, DOC_KEY_PATTERN, FEED_HTML_POLICY, declaredTypeFor } from './index.js';
 
 /** One recorded {@link PluginContext.log} call. */
 export interface LogRecord {
@@ -209,7 +209,8 @@ function makeMockApi(responses: Record<string, unknown>): MockApiClient {
     get: (path) => resolve('get', path),
     getOrNull: async (path) => {
       try {
-        return await resolve('get', path);
+        // `undefined` is the host's 204 — an absent document — and is an answer too.
+        return (await resolve('get', path)) ?? null;
       } catch (e) {
         // Exactly the host's rule: 404 is an answer, everything else is a failure.
         if (e instanceof Error && (e as PluginApiError).status === 404) {
@@ -453,6 +454,12 @@ export function makeMockSchema(rows: Record<string, Record<string, unknown>[]> =
   return client;
 }
 
+/**
+ * A {@link DisplaySnapshot} as a test writes it: `descriptionText` optional, derived from `description`
+ * when absent. @since 0.16.0
+ */
+export type DisplaySnapshotFixture = Omit<DisplaySnapshot, 'descriptionText'> & { descriptionText?: string };
+
 /** A {@link FeedsClient} answering from registered snapshots. @since 0.9.0 */
 export interface MockFeedsClient extends FeedsClient {
   /**
@@ -461,11 +468,14 @@ export interface MockFeedsClient extends FeedsClient {
    * Mirrors the Java kit's `FakeFeedAccess.withDisplay(...)`, so both halves of a plugin describe the
    * host's answer the same way.
    *
+   * `descriptionText` may be left out: the double derives it from `description` the way the host does,
+   * so a fixture written before `0.16.0` keeps working.
+   *
    * @param slug     the episode's public slug
    * @param snapshot what the host would hand over
    * @returns this client, for chaining
    */
-  withDisplay(slug: string, snapshot: DisplaySnapshot): MockFeedsClient;
+  withDisplay(slug: string, snapshot: DisplaySnapshotFixture): MockFeedsClient;
   /** Every slug asked for, in order — batched calls contribute each slug separately. */
   readonly requested: string[];
 }
@@ -490,14 +500,17 @@ export interface MockFeedsClient extends FeedsClient {
  * @returns a feeds double with `withDisplay` and a recorded `requested` list
  * @since 0.9.0
  */
-export function makeMockFeeds(snapshots: Record<string, DisplaySnapshot> = {}): MockFeedsClient {
-  const stored: Record<string, DisplaySnapshot> = { ...snapshots };
+export function makeMockFeeds(snapshots: Record<string, DisplaySnapshotFixture> = {}): MockFeedsClient {
+  const stored: Record<string, DisplaySnapshot> = {};
+  for (const [slug, snapshot] of Object.entries(snapshots)) {
+    stored[slug] = completeSnapshot(snapshot);
+  }
   const requested: string[] = [];
 
   const client: MockFeedsClient = {
     requested,
     withDisplay(slug, snapshot) {
-      stored[slug] = snapshot;
+      stored[slug] = completeSnapshot(snapshot);
       return client;
     },
     display: (slug) => {
@@ -518,6 +531,118 @@ export function makeMockFeeds(snapshots: Record<string, DisplaySnapshot> = {}): 
     },
   };
   return client;
+}
+
+/** Fills in `descriptionText` the way the host does, unless the fixture pins it. */
+function completeSnapshot(snapshot: DisplaySnapshotFixture): DisplaySnapshot {
+  return { ...snapshot, descriptionText: snapshot.descriptionText ?? plainText(snapshot.description) };
+}
+
+/** Show notes as one run of prose: tags gone, entities decoded, whitespace collapsed. */
+function plainText(html: string): string {
+  if (!html) {
+    return '';
+  }
+  const text =
+    typeof DOMParser === 'undefined'
+      ? html.replace(/<[^>]*>/g, ' ')
+      : (new DOMParser().parseFromString(html, 'text/html').body.textContent ?? '');
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Elements whose content is never prose, so unwrapping them would put code or CSS on the page as text.
+ * DOMPurify's `FORBID_CONTENTS` makes the same distinction, which is what the host runs.
+ */
+const CONTENT_DROPPED = new Set([
+  'script', 'style', 'template', 'iframe', 'noscript', 'noembed', 'noframes', 'object', 'embed', 'svg',
+  'math', 'title', 'head', 'xmp', 'plaintext', 'audio', 'video', 'select', 'textarea', 'option',
+]);
+
+/**
+ * The test kit's {@link PluginContext.sanitize}: {@link FEED_HTML_POLICY}, applied by walking the parsed
+ * tree — what {@link makeMockCtx} puts on `ctx.sanitize`.
+ *
+ * **A test double, not a security boundary.** The host runs DOMPurify with this policy; this reimplements
+ * enough of it for a component test to see the same removals — `<style>`, `style=`, `<script>`, event
+ * handlers, `javascript:` links, `srcset` — and the same `target`/`rel` on external links. Never ship it:
+ * call `ctx.sanitize` in plugin code, and let the host decide.
+ *
+ * Needs a DOM (`// @vitest-environment jsdom`, or `happy-dom`), as mounting your component does anyway.
+ *
+ * ```ts
+ * const ctx = makeMockCtx();
+ * mount(ctx, '<p style="position:fixed">x</p><style>:host{}</style>');
+ * expect(root.innerHTML).not.toContain('style');
+ * ```
+ *
+ * @param html untrusted HTML; `null`, `undefined` and `''` give `''`
+ * @returns the HTML with only what the host's policy allows
+ * @since 0.16.0
+ */
+export function sanitizeLikeHost(html: string | null | undefined): string {
+  if (!html) {
+    return '';
+  }
+  if (typeof DOMParser === 'undefined') {
+    throw new Error('sanitizeLikeHost needs a DOM — run this test with `// @vitest-environment jsdom`');
+  }
+  const body = new DOMParser().parseFromString(`<!doctype html><body>${html}`, 'text/html').body;
+  cleanChildren(body);
+  return body.innerHTML;
+}
+
+function cleanChildren(parent: Element): void {
+  for (const node of Array.from(parent.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      // Comments, processing instructions, CDATA: nothing a reader sees, and a classic smuggling spot.
+      node.remove();
+      continue;
+    }
+    const el = node as Element;
+    const name = el.localName;
+    if (CONTENT_DROPPED.has(name)) {
+      el.remove();
+      continue;
+    }
+    cleanChildren(el);
+    if (FEED_HTML_POLICY.forbidTags.includes(name) || !FEED_HTML_POLICY.allowedTags.includes(name)) {
+      el.replaceWith(...Array.from(el.childNodes));
+      continue;
+    }
+    for (const attr of Array.from(el.attributes)) {
+      const attrName = attr.name.toLowerCase();
+      const allowed =
+        FEED_HTML_POLICY.allowedAttrs.includes(attrName) && !FEED_HTML_POLICY.forbidAttrs.includes(attrName);
+      const uriOk =
+        (attrName !== 'href' && attrName !== 'src') ||
+        FEED_HTML_POLICY.allowedUriRegexp.test(attr.value.replace(/[\u0000-\u0020]/g, ''));
+      if (!allowed || !uriOk) {
+        el.removeAttribute(attr.name);
+      }
+    }
+    markExternalLink(el);
+  }
+}
+
+/** `target="_blank"` and the host's `rel` on a link that leaves the site — nothing else is touched. */
+function markExternalLink(el: Element): void {
+  if (el.localName !== 'a' || !el.hasAttribute('href')) {
+    return;
+  }
+  let url: URL;
+  try {
+    url = new URL(el.getAttribute('href') ?? '', window.location.href);
+  } catch {
+    return;
+  }
+  if ((url.protocol === 'http:' || url.protocol === 'https:') && url.origin !== window.location.origin) {
+    el.setAttribute('target', '_blank');
+    el.setAttribute('rel', FEED_HTML_POLICY.externalLinkRel);
+  }
 }
 
 /** A {@link TagsClient} backed by an in-memory vocabulary. @since 0.9.0 */
@@ -855,10 +980,27 @@ export function makeMockNotify(
   };
 }
 
+/** One call a component made on a {@link MockDocClient}. @since 0.16.0 */
+export interface DocCallRecord {
+  /** The {@link DocClient} method called. */
+  method: 'get' | 'getMany' | 'put' | 'list' | 'remove';
+  /** The partitions addressed, e.g. `"data/episode/kraken"` — one, except for `getMany`. */
+  partitions: string[];
+  /** The keys addressed; empty for `list`. */
+  keys: string[];
+}
+
 /** A {@link DocClient} storing in memory, keyed by resolved partition path. @since 0.9.0 */
 export interface MockDocClient extends DocClient {
   /** What is currently stored, keyed `"<partition>/<key>"` — e.g. `"data/user/me/marks"`. */
   readonly stored: Record<string, unknown>;
+  /**
+   * Every call the component made, in order — one entry per call, however many requests the host's
+   * client would have split it into. Assert "one `getMany`, not twenty `get`s" against this.
+   *
+   * @since 0.16.0
+   */
+  readonly calls: DocCallRecord[];
 }
 
 /** Resolves a {@link DocTarget} to the partition path the host would address. */
@@ -895,14 +1037,39 @@ function requireDocKey(key: string): string {
  */
 export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClient {
   const stored: Record<string, unknown> = { ...initial };
+  const calls: DocCallRecord[] = [];
 
   return {
     stored,
-    get: async (target, key) => (stored[`${docPath(target)}/${requireDocKey(key)}`] ?? null) as never,
+    calls,
+    get: async (target, key) => {
+      calls.push({ method: 'get', partitions: [docPath(target)], keys: [key] });
+      return (stored[`${docPath(target)}/${requireDocKey(key)}`] ?? null) as never;
+    },
+    getMany: async (type, ids, keys) => {
+      keys.forEach(requireDocKey);
+      calls.push({ method: 'getMany', partitions: ids.map((id) => docPath({ type, id })), keys: [...keys] });
+      const answer: Record<string, Record<string, never>> = {};
+      if (keys.length === 0) {
+        return answer;
+      }
+      for (const id of ids) {
+        const found: Record<string, never> = {};
+        for (const key of keys) {
+          const value = stored[`${docPath({ type, id })}/${key}`];
+          // Absent, not null: a miss is simply not a key in the answer, as the host sends it.
+          if (value !== undefined) found[key] = value as never;
+        }
+        answer[id] = found;
+      }
+      return answer;
+    },
     put: async (target, key, value) => {
+      calls.push({ method: 'put', partitions: [docPath(target)], keys: [key] });
       stored[`${docPath(target)}/${requireDocKey(key)}`] = value;
     },
     list: async (target, opts) => {
+      calls.push({ method: 'list', partitions: [docPath(target)], keys: [] });
       const prefix = `${docPath(target)}/`;
       const items = Object.entries(stored)
         .filter(([path]) => path.startsWith(prefix))
@@ -921,6 +1088,7 @@ export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClie
       return result;
     },
     remove: async (target, key) => {
+      calls.push({ method: 'remove', partitions: [docPath(target)], keys: [key] });
       // Idempotent, like the host: removing what is gone resolves rather than rejecting.
       delete stored[`${docPath(target)}/${requireDocKey(key)}`];
     },
@@ -940,6 +1108,7 @@ export const DEFAULT_THEME: ThemeTokens = {
   textMuted: '#666666',
   accent: '#3b5bdb',
   accentContrast: '#ffffff',
+  accentText: '#3b5bdb',
   accent2: '#7048e8',
   border: '#dddddd',
 };
@@ -1221,6 +1390,8 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     // so there is no "declared it or not" case for a component to handle here.
     docs: makeMockDocs(),
     feeds: makeMockFeeds(),
+    // The host's policy, reimplemented closely enough for a component test to see the same removals.
+    sanitize: sanitizeLikeHost,
     // Null, like schema and blobs: `ctx.tags` exists only for a plugin whose manifest declares a `tags`
     // block, and a component written against a context that always has one breaks on every plugin that
     // does not.

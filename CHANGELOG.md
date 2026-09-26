@@ -7,6 +7,69 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] — 2026-09-25
+
+What three test passes against core 0.7.2 found in the **contract** (issues #72–#79), shipped as **one**
+bump so plugins re-declare and rebuild once. One break — the cross-user read is now declared — and one
+security fix every plugin rendering feed HTML should act on.
+
+**Core must pin `mosaicastSdk = "0.16.0"`** and, to implement it: put `ctx.sanitize` on the context over
+`FEED_HTML_POLICY` (and import that constant into `sanitize.ts` instead of its own copy); fill
+`DisplaySnapshot.descriptionText`; stop stripping `accentText` in `buildCtx.sdkTheme`; add `getMany` to
+`makePluginDocs` over the existing batch endpoint, split at 100 and feeding the miss cache; parse and
+validate `consent.categoryLabels` and the config bounds; and hand out `allUsers()` only for
+`data.readsAllUsers`, showing it on the admin plugin page. The 204-for-absent, the batch endpoint, the miss
+cache and the `frontend.entry` grammar are already in core; this release writes them into the contract.
+
+### Added
+
+- **`ctx.sanitize(html)`** and **`FEED_HTML_POLICY`** (#72, #73) — a plugin rendering HTML it did not
+  write gets the host's own policy instead of falling back to DOMPurify defaults, which allow `<style>`
+  and `style=`: with the contract's `style-src 'unsafe-inline'` that is a full-viewport click-jacking
+  overlay or attribute-selector CSS exfiltration. The shipped wiki plugin did exactly that. The policy is
+  plain data so the SDK stays dependency-free and the host can import one copy.
+- **`DisplaySnapshot.descriptionText`** (TS + Java) — the show notes as plain text, computed by the host,
+  for cards, teasers, `OgMeta` and search excerpts.
+- **`PluginContext.allUsers()` → `CrossUserStore`** and **`data.readsAllUsers`** (#78) — see Removed.
+- **`ctx.docs.getMany(type, ids, keys)`** and **`DOC_BATCH_LIMIT`** (#76) — one request for a page of
+  cards; misses absent; split over 100 by the client. `DocClient` now states what the client guarantees:
+  in-flight dedupe, remembered misses, own writes seen, hits never cached, errors never remembered.
+  Measured before: 98% of a session's 3,737 plugin requests answered "not set".
+- **`ThemeTokens.accentText`** / `--mc-accent-text` (#79) — the accent clamped to WCAG AA for text,
+  links and focus rings. Written onto `:host` only when the host sends it; inherited from `:root` anyway.
+- **`min` / `max` / `step` and `minLength` / `maxLength` on `PluginConfigField`** (#75) — refused by the
+  host on write with a 400 naming the bound; a stored value that breaks a later bound counts as unset.
+  `pattern` is deliberately not included: Java and ECMAScript regex dialects differ.
+- **`consent.categoryLabels`** and **`PluginConsentCategoryLabel`** (#74) — a localized label and hint for
+  a consent category a plugin introduces. Relabelling a core category is refused at load.
+- **`FRONTEND_ENTRY_PATTERN`** (#77) — the `frontend.entry` grammar the host enforces at load, written
+  into the contract.
+- Test kit: `sanitizeLikeHost` on `makeMockCtx().sanitize`; `makeMockDocs` gains `getMany` and a `calls`
+  log; `makeMockFeeds` derives `descriptionText`; `FakePluginContext.withReadsAllUsers()`;
+  `InMemoryDocStore.acrossUsers()`.
+
+### Changed
+
+- **An absent document answers 204**, not 404 (core#159). `ctx.api.get` of one resolves `undefined`;
+  `getOrNull` and `ctx.docs.get` resolve `null`. A 404 now means a wrong address. The mock's `getOrNull`
+  models the 204.
+- `DisplaySnapshot.description` is documented, on both halves, as untrusted third-party HTML.
+- The nine-argument `DisplaySnapshot` constructor is deprecated for removal; it leaves
+  `descriptionText` empty.
+
+### Removed
+
+- **`DocStore.queryAcrossUsers(prefix)`** (#78, breaking) — replaced by `ctx.allUsers().query(prefix)`,
+  `null` unless the manifest declares `data.readsAllUsers: true`. It was the one read crossing an ownership
+  boundary — every account's documents with owner UUIDs — and every plugin had it by existing. See
+  MIGRATION.md.
+
+### Security
+
+- Feed HTML and other untrusted markup now have a sanctioned, host-equal sanitizer (#72, #73; audit
+  SEC-C07, SEC-E03).
+- Cross-user reads are declared and visible to an operator before install (#78; audit SEC-E04).
+
 ## [0.15.0] — 2026-09-12
 
 Two contract fixes found in the same sweep, deliberately shipped as **one** bump: a plugin can finally

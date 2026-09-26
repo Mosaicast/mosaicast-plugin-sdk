@@ -10,6 +10,7 @@ import {
   defineManifest,
   defineMosaicastElement,
   DOC_KEY_PATTERN,
+  FRONTEND_ENTRY_PATTERN,
   iconCss,
   iconMask,
   isPluginApiError,
@@ -32,7 +33,7 @@ import { DEFAULT_THEME, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.15.0');
+    expect(PLATFORM_API_VERSION).toBe('0.16.0');
   });
 });
 
@@ -42,8 +43,10 @@ describe('the data declaration', () => {
       readableBy: 'anonymous',
       writableBy: 'podcaster',
       backendOwned: ['stats', 'agg:*'],
+      readsAllUsers: true,
     };
     expect(data.backendOwned).toContain('stats');
+    expect(data.readsAllUsers).toBe(true);
 
     // The floors are documentation-only, but the one rule the type does carry is this one.
     // @ts-expect-error a write floor of `anonymous` is rejected by the host at load.
@@ -149,6 +152,22 @@ describe('defineMosaicastElement', () => {
     const style = shadow.querySelector('style')!.textContent ?? '';
     expect(style).toContain('--mc-bg: #ffffff');
     expect(style).toContain('--mc-text-muted: #666666');
+    expect(style).toContain('--mc-accent: #3b5bdb');
+    expect(style).toContain('--mc-accent-text: #3b5bdb');
+  });
+
+  it('leaves --mc-accent-text to inheritance when the host sends no accentText', () => {
+    const tag = 'mc-test-no-accent-text';
+    defineMosaicastElement({ tag, render: () => {} });
+
+    const { accentText: _dropped, ...olderHost } = DEFAULT_THEME;
+    const el = document.createElement(tag) as HTMLElement & { ctx: PluginContext };
+    el.ctx = makeMockCtx({ theme: olderHost });
+    document.body.appendChild(el);
+
+    // Writing `undefined` onto :host would shadow the value the host already set on :root.
+    const style = el.shadowRoot!.querySelector('style')!.textContent ?? '';
+    expect(style).not.toContain('--mc-accent-text');
     expect(style).toContain('--mc-accent: #3b5bdb');
   });
 
@@ -558,6 +577,27 @@ describe('defineManifest', () => {
     expect(manifest.external?.kinds).toEqual(['translation']);
   });
 
+  it('types a label for a consent category the plugin introduces', () => {
+    const manifest = defineManifest({
+      id: 'sample',
+      version: '1.0.0',
+      platformApi: PLATFORM_API_VERSION,
+      name: 'Sample',
+      consent: {
+        services: [{
+          id: 'mastodon', name: 'Mastodon', provider: 'Mastodon gGmbH', category: 'social',
+          privacyUrl: 'https://mastodon.social/privacy-policy', hosts: ['https://mastodon.social'],
+          thirdCountryTransfer: false, storage: [],
+        }],
+        categoryLabels: {
+          social: { label: { en: 'Social media', de: 'Soziale Medien' }, hint: 'Posts embedded from social networks.' },
+        },
+      },
+    });
+
+    expect(manifest.consent?.categoryLabels?.social?.label).toEqual({ en: 'Social media', de: 'Soziale Medien' });
+  });
+
   it('accepts an external block that leaves usedBy to the podcaster default', () => {
     const manifest = defineManifest({
       id: 'sample',
@@ -605,6 +645,23 @@ describe('defineManifest', () => {
     });
     expect(manifest.config?.matchMode?.options?.[2]?.label).toBeUndefined();
   });
+
+  it('types bounds on number and string config fields', () => {
+    const manifest = defineManifest({
+      id: 'bingo',
+      version: '1.0.0',
+      platformApi: PLATFORM_API_VERSION,
+      name: 'Bingo',
+      config: {
+        ingestIntervalSeconds: { type: 'number', default: 60, min: 10, max: 3600, step: 1 },
+        fuzzyThreshold: { type: 'number', default: 0.85, min: 0, max: 1 },
+        greeting: { type: 'string', default: 'Hi', minLength: 1, maxLength: 80 },
+      },
+    });
+
+    expect(manifest.config?.ingestIntervalSeconds?.min).toBe(10);
+    expect(manifest.config?.greeting?.maxLength).toBe(80);
+  });
 });
 
 describe('DOC_KEY_PATTERN', () => {
@@ -615,6 +672,21 @@ describe('DOC_KEY_PATTERN', () => {
     expect(DOC_KEY_PATTERN.test('marks/s2e04')).toBe(false);
     expect(DOC_KEY_PATTERN.test('')).toBe(false);
     expect(DOC_KEY_PATTERN.test('x'.repeat(201))).toBe(false);
+  });
+});
+
+describe('FRONTEND_ENTRY_PATTERN', () => {
+  it('accepts a relative path of plain segments under assets/', () => {
+    for (const entry of ['sample.es.js', 'dist/a-b.js', 'v1.2/x_y.js', '.hidden.js']) {
+      expect(FRONTEND_ENTRY_PATTERN.test(entry), entry).toBe(true);
+    }
+  });
+
+  it('refuses anything that would address a different URL than the one written', () => {
+    for (const entry of ['', '/x.js', '../x.js', 'a/../x.js', 'a/./b.js', '.', '..', 'x.js?v=1', 'x.js#f',
+      'a//b.js', 'a/', 'a b.js', 'a\\b.js', '%2e%2e/x.js']) {
+      expect(FRONTEND_ENTRY_PATTERN.test(entry), entry).toBe(false);
+    }
   });
 });
 
