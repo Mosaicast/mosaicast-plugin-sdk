@@ -551,12 +551,19 @@ function plainText(html: string): string {
 }
 
 /**
- * Elements whose content is never prose, so unwrapping them would put code or CSS on the page as text.
- * DOMPurify's `FORBID_CONTENTS` makes the same distinction, which is what the host runs.
+ * Elements that, when removed, take their content with them — everything else removed is unwrapped.
+ *
+ * The host runs DOMPurify, and this set is **what the host measurably does**, not a guess at what should be
+ * dropped: DOMPurify's `FORBID_CONTENTS` defaults, except `noscript`, whose content DOMPurify 3.4 keeps in
+ * practice. Measured element by element against core's `sanitizeFeedHtml` in jsdom — where plugin tests run —
+ * because a double that is stricter than the host is as wrong as one that is looser: a plugin test would pass
+ * on output production does not produce. (`object`, `select`, `option` and `textarea` used to be listed here;
+ * the host keeps their text.) Core's parity test compares the two on sample markup.
  */
 const CONTENT_DROPPED = new Set([
-  'script', 'style', 'template', 'iframe', 'noscript', 'noembed', 'noframes', 'object', 'embed', 'svg',
-  'math', 'title', 'head', 'xmp', 'plaintext', 'audio', 'video', 'select', 'textarea', 'option',
+  'annotation-xml', 'audio', 'colgroup', 'desc', 'foreignobject', 'head', 'iframe', 'math', 'mi', 'mn', 'mo',
+  'ms', 'mtext', 'noembed', 'noframes', 'plaintext', 'script', 'selectedcontent', 'style', 'svg', 'template',
+  'thead', 'title', 'video', 'xmp',
 ]);
 
 /**
@@ -604,24 +611,33 @@ function cleanChildren(parent: Element): void {
     }
     const el = node as Element;
     const name = el.localName;
-    if (CONTENT_DROPPED.has(name)) {
+    const kept = FEED_HTML_POLICY.allowedTags.includes(name) && !FEED_HTML_POLICY.forbidTags.includes(name);
+    // Content goes with an element only when the element itself goes, as in DOMPurify — an allowed `thead`
+    // is on the list and keeps everything in it.
+    if (!kept && CONTENT_DROPPED.has(name)) {
       el.remove();
       continue;
     }
     cleanChildren(el);
-    if (FEED_HTML_POLICY.forbidTags.includes(name) || !FEED_HTML_POLICY.allowedTags.includes(name)) {
+    if (!kept) {
       el.replaceWith(...Array.from(el.childNodes));
       continue;
     }
     for (const attr of Array.from(el.attributes)) {
       const attrName = attr.name.toLowerCase();
+      // The host trims every attribute value and writes the trimmed one back.
+      const value = attr.value.trim();
       const allowed =
         FEED_HTML_POLICY.allowedAttrs.includes(attrName) && !FEED_HTML_POLICY.forbidAttrs.includes(attrName);
       const uriOk =
         (attrName !== 'href' && attrName !== 'src') ||
-        FEED_HTML_POLICY.allowedUriRegexp.test(attr.value.replace(/[\u0000-\u0020]/g, ''));
+        FEED_HTML_POLICY.allowedUriRegexp.test(value.replace(/[\u0000-\u0020]/g, '')) ||
+        // The one exception the policy states: an inline image, which cannot run script.
+        (name === 'img' && attrName === 'src' && value.startsWith('data:'));
       if (!allowed || !uriOk) {
         el.removeAttribute(attr.name);
+      } else if (value !== attr.value) {
+        el.setAttribute(attr.name, value);
       }
     }
     markExternalLink(el);

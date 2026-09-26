@@ -7,6 +7,33 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] — 2026-09-26
+
+A patch release: the sanitizer policy only allows **more**, so nothing installed is rejected and no plugin has
+to re-declare `platformApi` (the patch floats). **Core should pin `mosaicastSdk = "0.16.1"`** to pick up the
+two new attributes — its `sanitize.ts` imports the lists — and add `ol[start]` to the no-JS server copy.
+
+### Changed
+
+- **`FEED_HTML_POLICY.allowedAttrs` gains `start` and `align`** (#81). Ordinary Markdown did not survive
+  `ctx.sanitize`: a numbered list resumed after an image or a code block (`<ol start="3">`) silently renumbered
+  from 1, which changes what it says, and table alignment (`<th align="center">`) was lost. `align` is
+  obsolete HTML but the only way that alignment reaches the page without `style`, which the policy refuses;
+  the worst it does elsewhere is float an image.
+- **The policy says what it does, completely.** `allowedAttrs` is documented as the whole list — no `data-*`,
+  no `aria-*` (core#232 turned off DOMPurify's defaults that kept both) — and `allowedUriRegexp` states its one
+  exception: a `data:` image in `<img src>` is kept, as the host's sanitizer keeps it.
+
+### Fixed
+
+- **`sanitizeLikeHost` matches the host.** Measured element by element against core's `sanitizeFeedHtml`, it
+  differed in both directions: it kept the text of `annotation-xml`, `desc`, `foreignobject`, `mi`/`mn`/`mo`/
+  `ms`/`mtext` and `selectedcontent`, which the host drops, and dropped the text of `noscript`, `object`,
+  `select`/`option` and `textarea`, which the host keeps. It also checked its content-dropping list before the
+  allow-list (an allowed `thead` would have lost its rows), did not trim attribute values, and refused a
+  `data:` image the host keeps. A double stricter than production is as wrong as a looser one — a plugin test
+  passes on output nobody sees.
+
 ## [0.16.0] — 2026-09-25
 
 What three test passes against core 0.7.2 found in the **contract** (issues #72–#79), shipped as **one**

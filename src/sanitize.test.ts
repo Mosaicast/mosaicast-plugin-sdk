@@ -84,6 +84,70 @@ describe('ctx.sanitize in the test kit', () => {
   });
 });
 
+describe('ordinary Markdown survives the policy (#81)', () => {
+  const { sanitize } = makeMockCtx();
+
+  it('keeps where a resumed numbered list starts', () => {
+    // `3. three` after a code block: without `start` the list silently renumbers from 1.
+    expect(sanitize('<ol start="3"><li>three</li><li>four</li></ol>')).toBe('<ol start="3"><li>three</li><li>four</li></ol>');
+  });
+
+  it('keeps Markdown table alignment, the one form of it that needs no style', () => {
+    const out = sanitize(
+      '<table><thead><tr><th align="center">a</th></tr></thead><tbody><tr><td align="right">1</td></tr></tbody></table>',
+    );
+    expect(out).toContain('<th align="center">a</th>');
+    expect(out).toContain('<td align="right">1</td>');
+  });
+
+  it('keeps the value of an attribute that is not a URL', () => {
+    // Only href and src are held to the URI allow-list; "de" and "10" are not URLs and need not be.
+    expect(sanitize('<p lang="de" dir="rtl">p</p>')).toBe('<p lang="de" dir="rtl">p</p>');
+    expect(sanitize('<td colspan="2">c</td>')).not.toContain('colspan=""');
+  });
+});
+
+describe('the allow-list is the whole list (core#232)', () => {
+  const { sanitize } = makeMockCtx();
+
+  it('names no data-* or aria-* attribute, so none survives', () => {
+    expect(FEED_HTML_POLICY.allowedAttrs.some((a) => a.startsWith('data-') || a.startsWith('aria-'))).toBe(false);
+    // A plugin marking its own elements with data-* can tell them from an author's.
+    expect(sanitize('<p data-x="1" aria-label="y">t</p><a data-wiki="evil" href="/x">f</a>')).toBe(
+      '<p>t</p><a href="/x">f</a>',
+    );
+  });
+});
+
+describe('content of removed elements, as the host measurably handles it', () => {
+  const { sanitize } = makeMockCtx();
+
+  it('drops what is never prose, including MathML and SVG text', () => {
+    for (const html of ['<math><mi>x</mi></math>', '<svg><desc>d</desc></svg>', '<mtext>m</mtext>', '<title>t</title>']) {
+      expect(sanitize(html), html).toBe('');
+    }
+  });
+
+  it('keeps the text the host keeps — a double stricter than the host is wrong too', () => {
+    // DOMPurify unwraps these rather than dropping their content; the kit used to drop it, so a plugin test
+    // could pass on output production does not produce.
+    expect(sanitize('<object>fallback</object>')).toBe('fallback');
+    expect(sanitize('<select><option>x</option></select>')).toBe('x');
+    expect(sanitize('<textarea>t</textarea>')).toBe('t');
+    expect(sanitize('<noscript><b>n</b></noscript>')).toBe('<b>n</b>');
+  });
+
+  it('trims attribute values, and keeps a data: image but never a data: link, as the host does', () => {
+    expect(sanitize('<a href=" /local">l</a>')).toBe('<a href="/local">l</a>');
+    expect(sanitize('<img src="data:image/png;base64,AA" alt="i">')).toBe('<img src="data:image/png;base64,AA" alt="i">');
+    expect(sanitize('<a href="data:text/html,x">d</a>')).toBe('<a>d</a>');
+  });
+
+  it('keeps an allowed element whole even when its name is on the content-dropping list', () => {
+    expect(sanitize('<table><thead><tr><th>h</th></tr></thead></table>')).toContain('<th>h</th>');
+  });
+});
+
 describe('descriptionText in the feeds double', () => {
   it('is derived from description when a fixture leaves it out', async () => {
     const feeds = makeMockFeeds({

@@ -369,7 +369,10 @@ page.innerHTML = ctx.sanitize(marked.parse(markdown));     // a podcaster's Mark
 `FEED_HTML_POLICY`. It keeps prose, links, lists, tables and images; drops `<style>`, `<script>`,
 `<iframe>`, forms, and every `style`, `srcset` and event-handler attribute; drops `javascript:`/`data:`
 links; and sends every external link to a new tab with `rel="noopener noreferrer nofollow ugc"`, so
-following one does not stop the player.
+following one does not stop the player. Since 0.16.1 it keeps `start` on a resumed numbered list and `align`
+on table cells, so ordinary Markdown survives it. The allow-list is the **whole** list: no `data-*`, no
+`aria-*`, no `class` — so a plugin's own `data-*` markers cannot be forged by an author. The one exception to
+the URL rule is a `data:` image in `<img src>`, which cannot run script and is kept.
 
 **Why not `DOMPurify.sanitize(html)`?** Its defaults stop scripts but allow `<style>` and `style=`. The
 plugin contract needs `style-src 'unsafe-inline'`, and `img-src` stays open to any `https:` host for
@@ -377,11 +380,14 @@ artwork, so a stylesheet in someone else's HTML becomes a full-viewport click-ja
 attribute-selector that leaks form values one character at a time. The wiki plugin shipped exactly that.
 With `ctx.sanitize` a plugin cannot end up with a weaker policy than the host by writing less code. If you
 really must sanitize where `ctx` does not reach, pass `FEED_HTML_POLICY`'s lists to your sanitizer rather
-than its defaults.
+than its defaults — and with DOMPurify also `ALLOW_DATA_ATTR: false`, `ALLOW_ARIA_ATTR: false` and
+`ADD_URI_SAFE_ATTR` for every allowed attribute but `href`/`src`; without them the lists are not the policy.
 
 In tests, `makeMockCtx()` puts `sanitizeLikeHost` on `ctx.sanitize`: the same policy walked over a parsed
-tree, so a component test sees the same removals. It needs a DOM (`// @vitest-environment jsdom`) and is a
-test double, never a boundary — ship `ctx.sanitize`.
+tree, so a component test sees the same removals. Since 0.16.1 it matches the host exactly on
+core's parity samples — including which removed elements take their text with them — because a double
+stricter than production is as misleading as a looser one. It needs a DOM (`// @vitest-environment jsdom`)
+and is a test double, never a boundary — ship `ctx.sanitize`.
 
 ## Site-wide tags — `ctx.tags` / `ctx.tags()` (since 0.9.0)
 
