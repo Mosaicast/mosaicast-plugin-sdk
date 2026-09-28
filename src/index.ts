@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.16.1' as const;
+export const PLATFORM_API_VERSION = '0.16.2' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -465,14 +465,19 @@ export type DocTarget = Scope | 'self' | 'site';
  * "This episode has no highlight" is the **normal** answer for an optional per-episode document, and a
  * tile asks for its keys every time it renders. Measured before these guarantees: 98% of one session's
  * 3,737 plugin requests were answers of "not set", one key asked 178 times. So the host's client
- * promises, per plugin and per signed-in identity, for the life of the page:
+ * promises, per plugin and per signed-in identity:
  *
  * 1. **Identical `get`s in flight share one request.**
- * 2. **A miss is remembered.** A key the host answered "not set" resolves `null` without a round trip
- *    from then on — misses from {@link getMany} included.
+ * 2. **A miss is remembered briefly.** A key the host answered "not set" resolves `null` without a round
+ *    trip for a short while (currently 30 s) and never across a navigation — misses from {@link getMany}
+ *    included. A key your backend or another session writes later is picked up on the next read after
+ *    that. If your UI must notice such a key while the visitor stays on one page (a leaderboard your
+ *    schedule publishes, a game a podcaster opens), re-read it on your own cadence; a remembered miss will
+ *    not hide it for long. (Until core 0.7.5 a miss was believed for the life of the page, which hid
+ *    exactly those keys until a reload.)
  * 3. **Your own writes are seen.** `put` and `remove` through this client forget the address they
  *    touched, so reading back what you just stored returns it rather than the earlier miss.
- * 4. **Hits are never cached.** A document another session wrote shows up on the next render.
+ * 4. **Hits are never cached.** A change to a document that exists shows up on the next read.
  * 5. **An error is never remembered** — a 404 (unknown plugin or scope) or a 5xx is retried next time.
  *
  * What that means for your code: a cache of **misses** of your own is unnecessary — delete it. A cache
@@ -511,7 +516,7 @@ export interface DocClient {
    *
    * More than {@link DOC_BATCH_LIMIT} ids or keys is **split** into several requests and merged, so you
    * never see the host's per-request ceiling. An empty `ids` or `keys` resolves `{}` without a request.
-   * Misses feed the same memory {@link get} uses, so a later `get` of one costs nothing.
+   * Misses feed the same memory {@link get} uses, so a `get` of one shortly after costs nothing.
    *
    * Not for `user` scope: there is one caller partition, and `get('self', key)` reads it.
    *

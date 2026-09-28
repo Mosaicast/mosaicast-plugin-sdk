@@ -7,6 +7,26 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] — 2026-09-29
+
+A patch release: one dependency moved to meet the host, and one guarantee reworded to match what the host
+does since core 0.7.5. No `platformApi` change — plugins declaring 0.16.0 keep loading.
+
+### Changed
+
+- **`plugin-api` depends on PF4J 3.16.0** (was 3.15.1), the version core 0.7.5 loads plugins with (#88).
+  Plugins compiled and generated their extension index against a PF4J one minor behind their host; nothing
+  is known to break, but the contract is where that version is decided. Jackson (3.2.2) and SLF4J (2.0.19)
+  stay where they are: they already match what core resolves, and a version ahead of the host is one a
+  plugin compiles against and never gets, since plugins load parent-first. The build file's comment, which
+  still named the versions of Spring Boot 4.1's first release, now says this.
+- **`DocClient` guarantee 2: a remembered miss is short-lived** (#87). It read "for the life of the page";
+  core 0.7.5 (core#237) believes a "not set" answer for 30 s and never across a navigation, because the
+  page-long version hid every key that starts unset and appears later — a leaderboard the backend
+  publishes, a game another session creates — until a reload. The other four guarantees are unchanged, and a
+  miss cache of your own is still unnecessary; a UI that must notice a key appearing while the visitor stays
+  on one page re-reads it on its own cadence.
+
 ## [0.16.1] — 2026-09-26
 
 A patch release: the sanitizer policy only allows **more**, so nothing installed is rejected and no plugin has

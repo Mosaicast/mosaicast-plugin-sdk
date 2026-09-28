@@ -15,13 +15,16 @@
 //     `provided` and resolve to the host's copy, which is already named
 //     `plugin.<pluginId>` so the host can attribute the output.
 //
-// Versions track what Spring Boot 4.1 manages (jackson-bom 3.1.4, slf4j 2.0.18) so a
-// plugin built standalone against this SDK meets the same classes at runtime. PF4J
-// already pulls slf4j-api transitively; declaring it pins the version and makes the
-// contract's use of it explicit.
+// Versions track what the host actually resolves at runtime — core's own PF4J pin and
+// the Jackson and SLF4J its Spring Boot manages (core 0.7.5: pf4j 3.16.0, jackson-databind
+// 3.2.2, slf4j-api 2.0.19) — so a plugin built standalone against this SDK meets the same
+// classes it runs with. Never ahead of the host: plugins load parent-first, so a newer
+// version here is one a plugin compiles against and never gets. PF4J already pulls
+// slf4j-api transitively; declaring it pins the version and makes the contract's use of
+// it explicit.
 
 dependencies {
-    api("org.pf4j:pf4j:3.15.1")
+    api("org.pf4j:pf4j:3.16.0")
     api("tools.jackson.core:jackson-databind:3.2.2")
     api("org.slf4j:slf4j-api:2.0.19")
 }
