@@ -662,8 +662,14 @@ try (InputStream in = Files.newInputStream(path)) {
 - **Store the `ref`, never the URL.** The URL is derived and the host may change how; the ref is the
   identity.
 - **Writes are the point here**, unlike `ctx.schema`. A file has no relational invariant for plugin code to
-  enforce, so `data.writableBy` plus a quota is the whole authorization story and a client may upload
-  directly. Reads follow `data.readableBy`.
+  enforce, so a write floor plus a quota is the whole authorization story and a client may upload
+  directly.
+- **The floors default to the `data` floors** (since 0.18.0). `blobs.readableBy` / `blobs.writableBy` set
+  their own — same vocabulary, `writableBy` never `anonymous` — and gate listing, download, quota, upload and
+  delete. Use it when uploads are *inputs*: a plugin publishing derived numbers to everyone
+  (`data.readableBy: "anonymous"`) keeps the raw archives to podcasters with `"blobs": { …,
+  "readableBy": "podcaster" }`. A read floor above `anonymous` also makes downloads `Cache-Control: private`.
+  The backend's `ctx.blobs()` is gated by neither.
 - **Uploads are refused for reasons you can predict**: size against your effective ceiling, declared type
   against the effective allow-list, then the *actual* type read from the leading bytes. A file whose content
   contradicts its extension is refused, and SVG is never accepted — it is a script container wearing an
