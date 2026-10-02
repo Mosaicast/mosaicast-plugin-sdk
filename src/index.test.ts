@@ -23,6 +23,7 @@ import {
   SELF_SCOPE_ID,
   type DataScopeType,
   type DisplaySnapshot,
+  type PluginBlobsDeclaration,
   type PluginContext,
   type PluginDataDeclaration,
   type PluginRoute,
@@ -480,6 +481,8 @@ describe('declaredTypeFor', () => {
     // Chrome on Windows reports the registry's association; the host checks the registered type.
     expect(declaredTypeFor(fileNamed('export.zip', 'application/x-zip-compressed'))).toBe('application/zip');
     expect(declaredTypeFor(fileNamed('export.zip', 'application/x-zip'))).toBe('application/zip');
+    expect(declaredTypeFor(fileNamed('export.zip', 'application/zip-compressed'))).toBe('application/zip');
+    expect(declaredTypeFor(fileNamed('export.zip', 'multipart/x-zip'))).toBe('application/zip');
     expect(declaredTypeFor(fileNamed('export.zip', 'application/zip'))).toBe('application/zip');
   });
 });
@@ -612,6 +615,28 @@ describe('defineManifest', () => {
     expect(manifest.identity?.resolvesUsers).toBe(true);
     expect(manifest.notifications?.perUserPerDay).toBe(5);
     expect(manifest.external?.kinds).toEqual(['translation']);
+  });
+
+  it('types blob floors stricter than the data floors', () => {
+    const manifest = defineManifest({
+      id: 'stats',
+      version: '1.0.0',
+      platformApi: PLATFORM_API_VERSION,
+      name: 'Stats',
+      data: { readableBy: 'anonymous', writableBy: 'podcaster' },
+      blobs: {
+        maxFileBytes: 1024,
+        quotaBytes: 4096,
+        mimeTypes: ['application/zip'],
+        readableBy: 'podcaster',
+        writableBy: 'admin',
+      },
+    });
+
+    expect(manifest.blobs?.readableBy).toBe('podcaster');
+    // @ts-expect-error — a write floor may not be anonymous, for files as for data.
+    const anonymousWrite: PluginBlobsDeclaration['writableBy'] = 'anonymous';
+    expect(anonymousWrite).toBe('anonymous');
   });
 
   it('types a label for a consent category the plugin introduces', () => {

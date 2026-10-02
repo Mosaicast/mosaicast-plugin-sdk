@@ -28,12 +28,22 @@ the planned-episode feature.
 - **`PluginContext.onEpisodeReleased(Consumer<String>)`** — a `default` no-op method the host overrides.
   Called once per release after the commit, with the slug, best effort: not durable or replayed, so a plugin
   must reconcile by phase on its schedule as well. Not called for an episode that arrives already released.
+- **`blobs.readableBy` / `blobs.writableBy`** on `PluginBlobsDeclaration` (#92, core#247): the file surface's
+  own floors, defaulting to the `data` floors, so uploads that are *inputs* (the stats plugin's raw archives)
+  can stay private while the numbers derived from them are public. Same vocabulary as `data`; `writableBy`
+  may not be `anonymous`. They gate listing, download, quota, upload and delete; a read floor above
+  `anonymous` makes downloads `Cache-Control: private`. The backend's `ctx.blobs()` is gated by neither.
+  Optional and additive — it needs no bump of its own and rides on this one.
+- **`declaredTypeFor`** also folds `application/zip-compressed` and `multipart/x-zip` into `application/zip`,
+  matching the alias list core now applies to the declared type and to `blobs.mimeTypes`.
 - **Test kit:** `FakeFeedAccess.withPhase(...)`, `FakePluginContext.fireEpisodeReleased(...)` /
   `episodeReleasedListenerCount()`; TS `makeMockEpisode(phase, announceAt?)` and
   `MockFeedsClient.withPhase(...)`.
 
 ### Changed
 
+- **The file-storage docs say the floors default to `data`'s** rather than that `data`'s floors govern files
+  (`BlobClient`, `PluginBlobs`, README).
 - **Documented visibility:** a `planned` episode is absent from `ctx.episodes`, `ctx.feeds.display` and the
   scope-episodes surface below podcaster; a backend's `FeedAccess` sees it with its phase.
 - The Java `DisplaySnapshot` gains a 15-component canonical constructor; the 13-argument one stays (phase

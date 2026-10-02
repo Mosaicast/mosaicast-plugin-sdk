@@ -16,6 +16,9 @@
   `FeedAccess` now hands you `planned` episodes visitors cannot see — do not publish anything derived from one
   where they can read it. To act on a release, register `ctx.onEpisodeReleased(...)` **and** reconcile by phase
   in an `onSchedule` task; the event is best effort and is lost while your plugin is not running.
+- **If you store uploads that should not be as public as your data**, give the `blobs` block its own floors:
+  `"blobs": { …, "readableBy": "podcaster" }`. Leave them out and nothing changes — they default to the `data`
+  floors.
 - Java fixtures keep compiling on the 13-argument `DisplaySnapshot` constructor (phase `null`); a
   `PluginContext` double of your own keeps compiling because `onEpisodeReleased` is a `default` method.
 

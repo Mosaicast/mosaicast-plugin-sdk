@@ -795,8 +795,11 @@ export interface BlobQuota {
  * on `ctx` when it does not, exactly like {@link SchemaClient}.
  *
  * Unlike the schema surface, **writes are the point here**. A schema write has relational invariants a
- * client cannot be trusted with; a file has none, so the manifest's `data.writableBy` floor plus a quota
- * is the whole authorization story, and a plugin's own editing UI can upload directly.
+ * client cannot be trusted with; a file has none, so a write floor plus a quota is the whole authorization
+ * story, and a plugin's own editing UI can upload directly. The floors are `blobs.readableBy` /
+ * `blobs.writableBy` and **default to the `data` floors** when the `blobs` block leaves them out (since
+ * 0.18.0) — so uploads can be more private than the data derived from them. They gate listing, download,
+ * quota, upload and delete alike.
  *
  * ```ts
  * const blobs = ctx.blobs;
@@ -888,6 +891,8 @@ const EXTENSION_MIME_TYPES: Readonly<Record<string, string>> = {
 const TYPE_ALIASES: Readonly<Record<string, string>> = {
   'application/x-zip-compressed': 'application/zip',
   'application/x-zip': 'application/zip',
+  'application/zip-compressed': 'application/zip',
+  'multipart/x-zip': 'application/zip',
 };
 
 /**
@@ -915,8 +920,10 @@ const TYPE_ALIASES: Readonly<Record<string, string>> = {
  *
  * @param file the file or blob about to be uploaded
  * Since 0.17.0 it also maps `.zip` → `application/zip` and rewrites the non-standard ZIP types some
- * browsers report (`application/x-zip-compressed`, `application/x-zip`) to it, as core 0.7.6 does on its side
- * too — whether a plugin may store ZIPs at all is still its manifest's `blobs.mimeTypes` and the host's to
+ * browsers report (`application/x-zip-compressed`, `application/x-zip`; since 0.18.0 also
+ * `application/zip-compressed`, `multipart/x-zip`) to it. Core folds the same aliases on the declared type
+ * and in `blobs.mimeTypes`, so this is no longer needed for correctness — but mapping `.zip` still helps an
+ * empty `File.type`. Whether a plugin may store ZIPs at all is still its manifest's `blobs.mimeTypes` and the host's to
  * decide.
  *
  * @returns the browser's `type` (with a known alias normalised) when it gave one, else the type its
@@ -2433,6 +2440,33 @@ export interface PluginBlobsDeclaration {
   quotaBytes: number;
   /** The content types you want to store. `image/svg+xml` is refused at load — SVG is never storable. */
   mimeTypes: string[];
+  /**
+   * The minimum role that may **read** files over HTTP — list, download and see the quota. Defaults to the
+   * `data` read floor ({@link PluginDataDeclaration.readableBy}), so a plugin that declares neither of these
+   * behaves as before.
+   *
+   * Declare it when your uploads are *inputs* rather than content: a plugin that publishes numbers derived
+   * from raw archives to everyone should not publish the archives with them —
+   *
+   * ```json
+   * "data":  { "readableBy": "anonymous", "writableBy": "podcaster" },
+   * "blobs": { "mimeTypes": ["application/zip"], "readableBy": "podcaster", … }
+   * ```
+   *
+   * A floor above `anonymous` also makes downloads `Cache-Control: private`. Same vocabulary as `data`;
+   * the backend's `ctx.blobs()` is not gated by either floor.
+   *
+   * @since 0.18.0
+   */
+  readableBy?: DataAccessRole;
+  /**
+   * The minimum role that may **upload and delete** files over HTTP. Defaults to the `data` write floor
+   * ({@link PluginDataDeclaration.writableBy}). May not be `anonymous` — the host refuses such a manifest at
+   * load, as it does for `data`.
+   *
+   * @since 0.18.0
+   */
+  writableBy?: Exclude<DataAccessRole, 'anonymous'>;
 }
 
 /**
