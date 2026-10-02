@@ -50,7 +50,9 @@ import java.util.Optional;
  * }</pre>
  *
  * <p><strong>This is the backend half.</strong> A plugin's own UI uploads through {@code ctx.blobs} in the
- * TypeScript SDK, which reaches the same store over HTTP under the manifest's {@code data} floors. Reach for
+ * TypeScript SDK, which reaches the same store over HTTP under the {@code blobs} block's own
+ * {@code readableBy}/{@code writableBy} floors — the {@code data} floors when it declares none (since 0.18.0).
+ * Neither gates this interface. Reach for
  * the Java side for what only a backend can do: fetching something on a schedule, and deleting the files a
  * document no longer refers to. Nothing collects orphans for you — a file outlives the document that named
  * it, and only your plugin knows which those are.
