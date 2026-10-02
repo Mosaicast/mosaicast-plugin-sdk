@@ -12,6 +12,13 @@ import java.util.List;
  * plugin's — a plugin never figures out on its own how a season is defined or which episodes a user may
  * see. The host also applies access/tier gating (§10) before handing the list over, so a plugin only
  * ever receives {@code EpisodeRef} IDs the current user is allowed to see.
+ *
+ * <p><strong>A backend sees planned episodes.</strong> The site hides an episode in phase
+ * {@link EpisodePhase#PLANNED} from everyone below podcaster — {@code ctx.episodes}, {@code ctx.feeds.display}
+ * and the scope-episodes surface leave it out — but this interface hands it over, phase included
+ * ({@link DisplaySnapshot#phase()}), because a planned episode is exactly when a plugin prepares content for
+ * it: a bingo set up before the episode airs. Check the phase before you publish anything derived from one
+ * where visitors can read it (since 0.18.0).
  */
 public interface FeedAccess {
 

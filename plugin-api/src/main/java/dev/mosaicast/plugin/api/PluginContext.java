@@ -5,6 +5,7 @@ package dev.mosaicast.plugin.api;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 
@@ -370,4 +371,46 @@ public interface PluginContext {
      * @since 0.15.0
      */
     void onSchedule(Supplier<Duration> every, Runnable task);
+
+    /**
+     * Registers a listener the host calls when a planned episode is released — when it binds to its feed item
+     * and moves from {@code PLANNED} to {@code PUBLISHED} (ARCHITECTURE §4.3, §5.3).
+     *
+     * <p>The listener receives the episode's public slug: the id {@link Scope#episode(String)} takes and
+     * {@link FeedAccess#episodesIn(Scope)} returns. Use it to resolve what was prepared while the episode was
+     * planned — a bingo opening for marks, a wiki page leaving draft.
+     *
+     * <p><strong>Best effort, and only a shortcut.</strong> The host calls it once per release, after the
+     * transaction that bound the episode has committed, on a host thread; an exception the listener throws is
+     * caught and logged against this plugin, and the host goes on to the next listener. The event is not durable and
+     * not replayed: a plugin that was not running at that moment — stopped, restarting, being upgraded —
+     * never hears about that release. So do not make it the only path. Reconcile on a schedule as well:
+     *
+     * <pre>{@code
+     * ctx.onEpisodeReleased(this::open);
+     * ctx.onSchedule(Duration.ofMinutes(15), () ->
+     *     ctx.feeds().episodesIn(Scope.site()).stream()
+     *         .filter(slug -> ctx.feeds().display(slug).phase() == EpisodePhase.RELEASED)
+     *         .filter(this::stillClosed)
+     *         .forEach(this::open));
+     * }</pre>
+     *
+     * <p>The listener should therefore be idempotent: the event and the reconciliation may both handle one
+     * release.
+     *
+     * <p><strong>Not for every new episode.</strong> An episode that arrives from the feed already released,
+     * with no planned episode before it, never fires this. Neither does a planned episode becoming
+     * {@link EpisodePhase#UPCOMING}: that is the clock passing its announcement instant, and nothing is written.
+     *
+     * <p>A {@code default} method that does nothing, so an existing {@code PluginContext} implementation — a
+     * test double of your own — keeps compiling. The host overrides it. There is no frontend event: the shell
+     * hands a component a new {@code ctx} when the phase changes.
+     *
+     * @param listener called with the released episode's slug; never {@code null}
+     * @throws NullPointerException if {@code listener} is {@code null}
+     * @since 0.18.0
+     */
+    default void onEpisodeReleased(Consumer<String> listener) {
+        Objects.requireNonNull(listener, "listener");
+    }
 }

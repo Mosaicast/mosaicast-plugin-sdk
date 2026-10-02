@@ -19,6 +19,8 @@ import type {
   DisplaySnapshot,
   DocClient,
   DocTarget,
+  EpisodePhase,
+  EpisodeStatus,
   FeedsClient,
   FilterState,
   LogLevel,
@@ -476,6 +478,20 @@ export interface MockFeedsClient extends FeedsClient {
    * @returns this client, for chaining
    */
   withDisplay(slug: string, snapshot: DisplaySnapshotFixture): MockFeedsClient;
+  /**
+   * Moves a registered episode to another phase, keeping the rest of its snapshot. Leaving `planned` or
+   * `upcoming` drops `announceAt`, as the host does. Mirrors the Java kit's `FakeFeedAccess.withPhase(...)`.
+   *
+   * The double does not hide a `planned` snapshot: it does not know who is looking. A test for a visitor
+   * below podcaster should not register one at all, which is what the host's answer amounts to.
+   *
+   * @param slug  the episode's public slug; must already be registered
+   * @param phase the phase it is in now
+   * @returns this client, for chaining
+   * @throws Error if no snapshot is registered for `slug`
+   * @since 0.18.0
+   */
+  withPhase(slug: string, phase: EpisodePhase): MockFeedsClient;
   /** Every slug asked for, in order — batched calls contribute each slug separately. */
   readonly requested: string[];
 }
@@ -513,6 +529,15 @@ export function makeMockFeeds(snapshots: Record<string, DisplaySnapshotFixture> 
       stored[slug] = completeSnapshot(snapshot);
       return client;
     },
+    withPhase(slug, phase) {
+      const current = stored[slug];
+      if (!current) {
+        throw new Error(`withPhase: no snapshot registered for ${slug}`);
+      }
+      const { announceAt, ...rest } = current;
+      stored[slug] = isPlanned(phase) ? { ...rest, phase, ...(announceAt ? { announceAt } : {}) } : { ...rest, phase };
+      return client;
+    },
     display: (slug) => {
       requested.push(slug);
       return Promise.resolve(stored[slug] ?? null);
@@ -531,6 +556,37 @@ export function makeMockFeeds(snapshots: Record<string, DisplaySnapshotFixture> 
     },
   };
   return client;
+}
+
+/** The two phases of a `PLANNED` episode — the only ones that carry an `announceAt`. */
+function isPlanned(phase: EpisodePhase): boolean {
+  return phase === 'planned' || phase === 'upcoming';
+}
+
+/**
+ * The {@link PluginContext.episode} member for a mock context in a given phase — `status` derived from the
+ * phase the way the host stores it, so a test names the one thing it is about:
+ *
+ * ```ts
+ * const ctx = makeMockCtx({
+ *   scope: { type: 'episode', id: 'kraken' },
+ *   episode: makeMockEpisode('upcoming', '2026-10-09T18:00:00Z'),
+ * });
+ * ```
+ *
+ * To test a phase change, render again with a new context: the shell reassigns `ctx`, it sends no event.
+ *
+ * @param phase      the episode's phase
+ * @param announceAt ISO-8601 instant; kept only for `planned` and `upcoming`, the phases that carry one
+ * @returns `{ status, phase, announceAt? }`
+ * @since 0.18.0
+ */
+export function makeMockEpisode(
+  phase: EpisodePhase,
+  announceAt?: string,
+): { status: EpisodeStatus; phase: EpisodePhase; announceAt?: string } {
+  const status: EpisodeStatus = isPlanned(phase) ? 'PLANNED' : phase === 'released' ? 'PUBLISHED' : 'WITHDRAWN';
+  return isPlanned(phase) && announceAt ? { status, phase, announceAt } : { status, phase };
 }
 
 /** Fills in `descriptionText` the way the host does, unless the fixture pins it. */

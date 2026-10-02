@@ -1053,6 +1053,46 @@ short periods to a floor it owns.
 supplier on demand, so a test changes `MapPluginConfig` and sees the new period — a plugin that captured a
 `Duration` at `register()` keeps reporting the old one and fails the assertion.
 
+## Planned episodes — the release phase and `ctx.onEpisodeReleased(...)` (since 0.18.0)
+
+A podcaster can create an episode before it is in the RSS, and plugin data attaches to it at once — a bingo
+on `episode/<slug>` set up while the episode is still being recorded. The host derives a **phase** on read:
+
+| phase | stored status | who sees the episode |
+|---|---|---|
+| `planned` | `PLANNED`, not announced (no `announceAt`, or one in the future) | podcasters and admins |
+| `upcoming` | `PLANNED`, `announceAt` has passed | everyone ("Upcoming" card, no audio) |
+| `released` | `PUBLISHED` — the feed item arrived and bound, even before `announceAt` | everyone |
+| `withdrawn` | `WITHDRAWN` | as before |
+
+It rides on `DisplaySnapshot.phase` / `.announceAt` (Java `EpisodePhase` enum, TS lower-case strings) and,
+on the episode scope, on `ctx.episode` (`{ status, phase, announceAt? }`). Identity, not feed presentation:
+added on read, never stored. **Visibility:** a `planned` episode is missing from `ctx.episodes`,
+`ctx.feeds.display` and the scope-episodes surface for anyone below podcaster; a backend's `FeedAccess`
+sees it, phase included, because that is when it prepares content. Check the phase before you publish
+something derived from one where visitors can read it.
+
+On the backend, the host tells you when a planned episode is released:
+
+```java
+ctx.onEpisodeReleased(this::openBingo);                       // a shortcut — best effort
+ctx.onSchedule(Duration.ofMinutes(15), () ->                  // the guarantee — reconcile by phase
+    ctx.feeds().episodesIn(Scope.site()).stream()
+        .filter(slug -> ctx.feeds().display(slug).phase() == EpisodePhase.RELEASED)
+        .forEach(this::openBingo));                           // so openBingo must be idempotent
+```
+
+The host calls the listener once per release, with the episode's slug, after the binding transaction commits,
+on a host thread; what it throws is caught and logged against your plugin. It is **not durable**: a plugin
+that was stopped or restarting at that moment never hears of that release, which is why the reconciliation
+is not optional. It never fires for an episode that arrives already released with no planned predecessor,
+nor when a planned episode becomes `upcoming`. There is no frontend event — the shell reassigns `ctx` when
+the phase changes, so render from `ctx.episode.phase`.
+
+Test kit: `FakeFeedAccess.withPhase(slug, phase)` and `FakePluginContext.fireEpisodeReleased(slug)` (it
+catches and logs like the host); in TypeScript `makeMockEpisode('upcoming', at)` for `ctx.episode` and
+`makeMockFeeds().withPhase(slug, phase)`.
+
 ## Surviving a new `ctx` — `MosaicastHandle` (since 0.15.0)
 
 ```ts
@@ -1237,6 +1277,9 @@ assertEquals(Optional.of("world"),
 ctx.runScheduled();                                // tick again (since 0.15.0)
 config.with("ingestIntervalSeconds", 10);          // and prove the period follows config
 assertEquals(List.of(Duration.ofSeconds(10)), ctx.scheduledPeriods());
+
+feeds.withPhase("ep-7", EpisodePhase.RELEASED);    // a planned episode binds (since 0.18.0)
+ctx.fireEpisodeReleased("ep-7");                   // and the host tells the plugin
 ```
 
 **TypeScript** (`@mosaicast/plugin-sdk/testing`, jsdom):

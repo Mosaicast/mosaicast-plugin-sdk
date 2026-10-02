@@ -31,6 +31,13 @@ import java.time.Instant;
  * ride on this record because a plugin reading episodes already holds one; build a season scope from them
  * with {@link #seasonScope()}, never by parsing {@code ctx.episodeLabels}.
  *
+ * <p><strong>{@code phase} and {@code announceAt} are identity too</strong> (since 0.18.0), under the same
+ * rule: the host adds them on read and never stores them here. The phase is derived from the
+ * {@code EpisodeRef} status, the announcement instant and the clock, so the same episode can read
+ * {@link EpisodePhase#PLANNED} on one call and {@link EpisodePhase#UPCOMING} on the next without anything
+ * being written. A plugin backend sees every phase through {@link FeedAccess}; a visitor below podcaster
+ * never sees a {@code PLANNED} one.
+ *
  * @param title           the episode title from the feed; never {@code null}
  * @param description     the episode show notes as the feed published them — <strong>untrusted
  *                        HTML</strong>; never {@code null}, may be empty
@@ -57,6 +64,12 @@ import java.time.Instant;
  * @param episodeNo    the episode number within its season ({@code itunes:episode}); {@code null} when the
  *                     episode has none — a numbered season may still hold an unnumbered prologue
  *                     (since 0.17.0)
+ * @param phase        where the episode stands in its release, derived by the host on read; {@code null}
+ *                     only on a snapshot built without it (a test fixture on a shorter constructor — a host
+ *                     that loads a 0.18 plugin always sends it) (since 0.18.0)
+ * @param announceAt   when a {@code PLANNED} episode is (or was) announced to everyone; {@code null} when it
+ *                     has no scheduled announcement, and once it is {@code PUBLISHED} or {@code WITHDRAWN}
+ *                     (since 0.18.0)
  */
 public record DisplaySnapshot(
         String title,
@@ -71,7 +84,9 @@ public record DisplaySnapshot(
         String descriptionText,
         String feed,
         Integer season,
-        Integer episodeNo) {
+        Integer episodeNo,
+        EpisodePhase phase,
+        Instant announceAt) {
 
     /** Normalises an absent plain-text description to {@code ""}, so it is never {@code null}. */
     public DisplaySnapshot {
@@ -79,8 +94,37 @@ public record DisplaySnapshot(
     }
 
     /**
-     * The 0.16 shape, without the episode's place in the site: {@link #feed()}, {@link #season()} and
-     * {@link #episodeNo()} are {@code null}.
+     * The 0.17 shape, without the release phase: {@link #phase()} and {@link #announceAt()} are {@code null}.
+     *
+     * <p>Kept, and not deprecated, for test fixtures that never look at the phase. The host always uses the
+     * canonical constructor; a fixture for code that branches on the phase must too.
+     *
+     * @param title           see the canonical constructor
+     * @param description     see the canonical constructor
+     * @param audioUrl        see the canonical constructor
+     * @param publishedAt     see the canonical constructor
+     * @param duration        see the canonical constructor
+     * @param imageUrl        see the canonical constructor
+     * @param feedImageUrl    see the canonical constructor
+     * @param author          see the canonical constructor
+     * @param subtitle        see the canonical constructor
+     * @param descriptionText see the canonical constructor
+     * @param feed            see the canonical constructor
+     * @param season          see the canonical constructor
+     * @param episodeNo       see the canonical constructor
+     * @since 0.18.0
+     */
+    public DisplaySnapshot(String title, String description, String audioUrl, Instant publishedAt,
+                           Duration duration, String imageUrl, String feedImageUrl, String author,
+                           String subtitle, String descriptionText, String feed, Integer season,
+                           Integer episodeNo) {
+        this(title, description, audioUrl, publishedAt, duration, imageUrl, feedImageUrl, author, subtitle,
+                descriptionText, feed, season, episodeNo, null, null);
+    }
+
+    /**
+     * The 0.16 shape, without the episode's place in the site: {@link #feed()}, {@link #season()},
+     * {@link #episodeNo()}, {@link #phase()} and {@link #announceAt()} are {@code null}.
      *
      * <p>Kept, and not deprecated, for test fixtures that never look at seasons. The host always uses the
      * canonical constructor; a fixture for code that aggregates per season or feed must too.
@@ -101,7 +145,7 @@ public record DisplaySnapshot(
                            Duration duration, String imageUrl, String feedImageUrl, String author,
                            String subtitle, String descriptionText) {
         this(title, description, audioUrl, publishedAt, duration, imageUrl, feedImageUrl, author, subtitle,
-                descriptionText, null, null, null);
+                descriptionText, null, null, null, null, null);
     }
 
     /**
@@ -126,7 +170,7 @@ public record DisplaySnapshot(
                            Duration duration, String imageUrl, String feedImageUrl, String author,
                            String subtitle) {
         this(title, description, audioUrl, publishedAt, duration, imageUrl, feedImageUrl, author, subtitle,
-                "", null, null, null);
+                "", null, null, null, null, null);
     }
 
     /**

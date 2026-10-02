@@ -1,4 +1,29 @@
-# Migrating a plugin to `platformApi` 0.17.0
+# Migrating a plugin to `platformApi` 0.18.0
+
+**0.17.x → 0.18.0: the bump is required; one test fixture shape may need a phase.** `platformApi` matches on
+`major.minor`, so re-declare and rebuild:
+
+```diff
+- "platformApi": "0.17.0",                           + "platformApi": "0.18.0",
+- implementation("dev.mosaicast:plugin-api:0.17.0")  + implementation("dev.mosaicast:plugin-api:0.18.0")
+- "@mosaicast/plugin-sdk": "^0.17.0"                 + "@mosaicast/plugin-sdk": "^0.18.0"
+```
+
+- **A TS test that builds `ctx.episode` by hand** — `episode: { status: 'PLANNED' }` — no longer type-checks:
+  `phase` is required. Write `episode: makeMockEpisode('planned')` (from `/testing`).
+- **If your plugin prepares content for planned episodes** (a bingo before the episode airs): branch on
+  `ctx.episode.phase` / `DisplaySnapshot.phase` rather than on `status`, and remember your backend's
+  `FeedAccess` now hands you `planned` episodes visitors cannot see — do not publish anything derived from one
+  where they can read it. To act on a release, register `ctx.onEpisodeReleased(...)` **and** reconcile by phase
+  in an `onSchedule` task; the event is best effort and is lost while your plugin is not running.
+- Java fixtures keep compiling on the 13-argument `DisplaySnapshot` constructor (phase `null`); a
+  `PluginContext` double of your own keeps compiling because `onEpisodeReleased` is a `default` method.
+
+On `0.16.x`? Do [0.16.x → 0.17.0](#016x--0170) first — it is only the bump — then this.
+
+---
+
+# 0.16.x → 0.17.0
 
 **0.16.x → 0.17.0: the bump is required, nothing else is.** `platformApi` matches on `major.minor`, so re-declare
 and rebuild:
