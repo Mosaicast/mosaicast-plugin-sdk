@@ -1,4 +1,22 @@
-# Migrating a plugin to `platformApi` 0.16.x
+# Migrating a plugin to `platformApi` 0.17.0
+
+**0.16.x → 0.17.0: the bump is required, nothing else is.** `platformApi` matches on `major.minor`, so re-declare
+and rebuild:
+
+```diff
+- "platformApi": "0.16.0",                           + "platformApi": "0.17.0",
+- implementation("dev.mosaicast:plugin-api:0.16.x")  + implementation("dev.mosaicast:plugin-api:0.17.0")
+- "@mosaicast/plugin-sdk": "^0.16.0"                 + "@mosaicast/plugin-sdk": "^0.17.0"
+```
+
+Every addition is optional to use: `DisplaySnapshot.feed`/`season`/`episodeNo` with `resolveSeasonScope`
+(Java `seasonScope()`) if you aggregate per season — drop any parsing of `ctx.episodeLabels` — and ZIP types in
+`declaredTypeFor`. Java fixtures keep compiling on the 10-argument `DisplaySnapshot` constructor. If you read
+`ctx.filter`, know it is still `{}` on core 0.7.5 and handle that as "unfiltered".
+
+---
+
+# 0.16.x patches
 
 **0.16.1 → 0.16.2 needs nothing either.** `plugin-api` now brings PF4J 3.16.0, matching core 0.7.5 — move your
 own `compileOnly`/`annotationProcessor("org.pf4j:pf4j:…")` lines to 3.16.0 with it. And if a component waits for

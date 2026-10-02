@@ -7,6 +7,36 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] — 2026-10-02
+
+Plugins can place an episode in its season and feed (#90, core#248). A **minor** bump although every change
+is additive: the new accessors live in the host's copy of `plugin-api`, which plugins load parent-first, so a
+plugin calling `snapshot.season()` on a 0.16 host would fail with `NoSuchMethodError` — the exact-`major.minor`
+match is what stops it loading there instead. **Core must pin `mosaicastSdk = "0.17.0"`** and fill the three
+fields from `EpisodeRef` when it hands a snapshot over (core#248) — resolved on read, never written into the
+stored snapshot, since they are identity and the snapshot is what a feed refetch overwrites.
+
+### Added
+
+- **`DisplaySnapshot.feed`, `.season`, `.episodeNo`** (TS optional fields; Java record components) — the
+  episode's place in the site, from the identity layer (§4.4), so a plugin aggregating per season (the stats
+  plugin's speaking shares) can tell which season an episode is in. Before, the numbers existed only inside
+  `ctx.episodeLabels`, a display string that also drops the season of an episode with no episode number. The
+  only authoritative part of the snapshot, and documented as such.
+- **`seasonScope(feed, n)` / `resolveSeasonScope(snapshot)`** (TS) and **`Scope.season(feedSlug, n)` /
+  `DisplaySnapshot.seasonScope()`** (Java), so nobody hand-builds the `"<feed>:<n>"` id.
+- **`declaredTypeFor` knows ZIP**: `.zip` → `application/zip`, and the non-standard types browsers report
+  (`application/x-zip-compressed` from Chrome on Windows, `application/x-zip`) are normalised to it, so a
+  ZIP is not refused on its declared type once core stores them (core#246).
+
+### Changed
+
+- **`ctx.filter` says what it does today**: through core 0.7.5 `current()` is always `{}` and `onChange`
+  never fires (core#248). The TSDoc says so and tells a plugin to treat an absent axis as unfiltered, so it
+  starts following the visitor's season when the host wires it, with no change.
+- The Java `DisplaySnapshot` gains a 13-component canonical constructor; the 10-argument one stays (fields
+  absent) for fixtures that never look at seasons, and the 9-argument one stays deprecated.
+
 ## [0.16.2] — 2026-09-29
 
 A patch release: one dependency moved to meet the host, and one guarantee reworded to match what the host

@@ -108,9 +108,35 @@ public record Scope(ScopeType type, String id) {
         return new Scope(ScopeType.FEED, id);
     }
 
-    /** Convenience factory for a {@link ScopeType#SEASON} scope. */
+    /**
+     * Convenience factory for a {@link ScopeType#SEASON} scope, from its raw id {@code "<feedSlug>:<n>"}.
+     * Prefer {@link #season(String, int)}, which builds that id for you.
+     */
     public static Scope season(String id) {
         return new Scope(ScopeType.SEASON, id);
+    }
+
+    /**
+     * A season scope from its two parts — the id the host resolves is {@code "<feedSlug>:<season>"}.
+     *
+     * <p>So a plugin never hand-builds the separator. The parts come from a {@link DisplaySnapshot}
+     * ({@link DisplaySnapshot#feed()}, {@link DisplaySnapshot#season()}), or use
+     * {@link DisplaySnapshot#seasonScope()} directly.
+     *
+     * @param feedSlug the feed's public slug; never {@code null} or blank
+     * @param season   the season number; not negative
+     * @return the season scope
+     * @throws IllegalArgumentException if {@code feedSlug} is blank or {@code season} is negative
+     * @since 0.17.0
+     */
+    public static Scope season(String feedSlug, int season) {
+        if (feedSlug == null || feedSlug.isBlank()) {
+            throw new IllegalArgumentException("feedSlug must not be blank");
+        }
+        if (season < 0) {
+            throw new IllegalArgumentException("season must not be negative, got " + season);
+        }
+        return new Scope(ScopeType.SEASON, feedSlug + ":" + season);
     }
 
     /** Convenience factory for a {@link ScopeType#EPISODE} scope. */

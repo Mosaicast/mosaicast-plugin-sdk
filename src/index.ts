@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.16.2' as const;
+export const PLATFORM_API_VERSION = '0.17.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -97,6 +97,9 @@ export const SELF_SCOPE_ID = 'me' as const;
  * Filter state lives in the URL and is defined by the host; **plugins consume it read-only** and never
  * define new axes. Known axes are typed; the index signature allows the host to add more without a
  * breaking change.
+ *
+ * **Every axis is optional, and absent means unfiltered.** Through core 0.7.5 the host fills none of them —
+ * see {@link PluginContext.filter} — so a component must render correctly from `{}`.
  */
 export interface FilterState {
   /** Selected season number, if the view is filtered by season. */
@@ -859,9 +862,12 @@ export interface BlobClient {
  *
  * Only the types the host's file storage accepts (§11.1) — SVG is deliberately absent, since it is never
  * storable, and guessing a type the host refuses outright would turn a clear refusal into a confusing
- * one. `jfif` is here because Windows still produces it for ordinary JPEGs.
+ * one. `jfif` is here because Windows still produces it for ordinary JPEGs. `zip` (since 0.17.0) is ahead
+ * of the host by design: core accepts ZIP archives once core#246 lands, and until then a ZIP is refused on
+ * its declared type exactly as it would have been, only now under its correct name.
  */
 const EXTENSION_MIME_TYPES: Readonly<Record<string, string>> = {
+  zip: 'application/zip',
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -869,6 +875,18 @@ const EXTENSION_MIME_TYPES: Readonly<Record<string, string>> = {
   webp: 'image/webp',
   gif: 'image/gif',
   avif: 'image/avif',
+};
+
+/**
+ * Non-standard types a browser or OS reports for a standard format → the registered type the host checks.
+ *
+ * Chrome on Windows reports a `.zip` as `application/x-zip-compressed` (the registry's association), other
+ * setups `application/x-zip`; the host matches the declared type against `application/zip` and refused both.
+ * Only aliases of one registered type belong here — this restores a claim, it never changes a format.
+ */
+const TYPE_ALIASES: Readonly<Record<string, string>> = {
+  'application/x-zip-compressed': 'application/zip',
+  'application/x-zip': 'application/zip',
 };
 
 /**
@@ -895,12 +913,17 @@ const EXTENSION_MIME_TYPES: Readonly<Record<string, string>> = {
  * sent before they commit to the upload.
  *
  * @param file the file or blob about to be uploaded
- * @returns the browser's `type` when it gave one, else the type its extension implies, else `''`
+ * Since 0.17.0 it also maps `.zip` → `application/zip` and rewrites the non-standard ZIP types some
+ * browsers report (`application/x-zip-compressed`, `application/x-zip`) to it — whether a plugin may store
+ * ZIPs at all is still its manifest's `blobs.mimeTypes` and the host's to decide.
+ *
+ * @returns the browser's `type` (with a known alias normalised) when it gave one, else the type its
+ *          extension implies, else `''`
  * @since 0.9.0
  */
 export function declaredTypeFor(file: File | Blob): string {
   if (file.type) {
-    return file.type;
+    return TYPE_ALIASES[file.type.toLowerCase()] ?? file.type;
   }
   const name = file instanceof File ? file.name : '';
   const dot = name.lastIndexOf('.');
@@ -1261,6 +1284,27 @@ export interface DisplaySnapshot {
   author?: string;
   /** A short episode subtitle (`itunes:subtitle`); absent if the feed declares none. */
   subtitle?: string;
+  /**
+   * The public slug of the feed this episode belongs to — the id of its `feed` {@link Scope}.
+   *
+   * **This and the next two are the exception to "not authoritative."** They are the episode's place in the
+   * site — the identity layer (`EpisodeRef`, ARCHITECTURE §4.4) — resolved by the host when it hands the
+   * snapshot over, never part of what a feed refetch overwrites. Optional only because a host older than
+   * core's 0.17 support does not send them. Build a season scope with {@link resolveSeasonScope}; never parse
+   * `ctx.episodeLabels`, which is presentation and drops the season of an unnumbered episode.
+   *
+   * @since 0.17.0
+   */
+  feed?: string;
+  /** The season number (`itunes:season`, as the host recorded it); absent when the episode has none. @since 0.17.0 */
+  season?: number;
+  /**
+   * The episode number within its season (`itunes:episode`); absent when it has none — a numbered season
+   * may still hold an unnumbered prologue, so do not infer `season` from this or the other way round.
+   *
+   * @since 0.17.0
+   */
+  episodeNo?: number;
 }
 
 /**
@@ -1275,6 +1319,46 @@ export interface DisplaySnapshot {
  */
 export function resolveArtwork(snapshot: DisplaySnapshot): string | undefined {
   return snapshot.imageUrl ?? snapshot.feedImageUrl;
+}
+
+/**
+ * A `season` {@link Scope} from its two parts: the id the host resolves is `"<feedSlug>:<season>"`, and a
+ * plugin should never hand-build the separator. Mirror of the Java `Scope.season(feedSlug, season)`.
+ *
+ * @param feed   the feed's public slug ({@link DisplaySnapshot.feed}); not blank
+ * @param season the season number; a non-negative integer
+ * @returns the season scope
+ * @throws Error if `feed` is blank or `season` is not a non-negative integer
+ * @since 0.17.0
+ */
+export function seasonScope(feed: string, season: number): Scope {
+  if (!feed || !feed.trim()) {
+    throw new Error('seasonScope: feed must not be blank');
+  }
+  if (!Number.isInteger(season) || season < 0) {
+    throw new Error(`seasonScope: season must be a non-negative integer, got ${season}`);
+  }
+  return { type: 'season', id: `${feed}:${season}` };
+}
+
+/**
+ * The season an episode belongs to, as a {@link Scope} — or `undefined` when it has no season number or
+ * the host sent no feed. Mirror of the Java `DisplaySnapshot.seasonScope()`.
+ *
+ * ```ts
+ * const snaps = await ctx.feeds.displayMany(ctx.episodes);
+ * for (const [slug, snap] of Object.entries(snaps)) {
+ *   const season = resolveSeasonScope(snap);
+ *   if (season) totals[season.id] = (totals[season.id] ?? 0) + minutesOf(slug);
+ * }
+ * ```
+ *
+ * @param snapshot the snapshot to place
+ * @returns the season scope, or `undefined`
+ * @since 0.17.0
+ */
+export function resolveSeasonScope(snapshot: DisplaySnapshot): Scope | undefined {
+  return snapshot.feed && snapshot.season != null ? seasonScope(snapshot.feed, snapshot.season) : undefined;
 }
 
 /**
@@ -2785,6 +2869,12 @@ export interface PluginContext {
    *
    * Plugins *consume* filters, they never define them: the axes (season, tags, sorting) belong to the
    * host and live in the URL. `onChange` returns an {@link Unsubscribe}.
+   *
+   * **Not wired yet.** Through core 0.7.5 `current()` always returns `{}` and `onChange` never fires — the
+   * shell does not hand its URL filter to plugins (core#248). Write against the contract anyway: treat a
+   * missing axis as "unfiltered", subscribe, and the component starts following the visitor's season the day
+   * the host fills it, with no change on your side. Do not read `location.search` yourself as a workaround:
+   * the axes are the host's, and their URL spelling is not part of the contract.
    */
   filter: { current(): FilterState; onChange(cb: (f: FilterState) => void): Unsubscribe };
   /**

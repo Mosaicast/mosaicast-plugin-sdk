@@ -357,6 +357,21 @@ const one = await ctx.feeds.display('kraken');   // null when absent or not visi
   or a teaser, or run it through `ctx.sanitize` (below). A Java backend putting show notes into an
   `OgMeta`, a `SearchHit` or a notification uses `descriptionText()` too.
 
+- **Where an episode sits — `feed`, `season`, `episodeNo` (since 0.17.0).** The one part of a snapshot that is
+  authoritative: the episode's place in the site, resolved by the host from the identity layer, not copied
+  from the feed. A plugin aggregating per season builds the scope with `resolveSeasonScope(snap)` (Java:
+  `snapshot.seasonScope()`), or `seasonScope(feed, n)` / `Scope.season(feed, n)` from parts — never by
+  parsing `ctx.episodeLabels`, which is presentation and drops the season of an unnumbered prologue. All
+  three are absent on a host without 0.17 support and when the episode has no number.
+
+  ```ts
+  const snaps = await ctx.feeds.displayMany(ctx.episodes);
+  for (const snap of Object.values(snaps)) {
+    const season = resolveSeasonScope(snap);           // { type: 'season', id: 'the-sample-cast:5' }
+    if (season) perSeason[season.id] = (perSeason[season.id] ?? 0) + 1;
+  }
+  ```
+
 Test it with `makeMockFeeds().withDisplay(slug, snapshot)`, mirroring the Java `FakeFeedAccess.withDisplay`.
 The double derives `descriptionText` from `description` when a fixture leaves it out.
 
