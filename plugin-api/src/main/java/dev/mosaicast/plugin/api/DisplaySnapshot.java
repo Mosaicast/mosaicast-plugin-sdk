@@ -24,6 +24,13 @@ import java.time.Instant;
  * a {@link SearchHit} excerpt, a notification, HTML of your own — should use {@link #descriptionText()},
  * which the host has already reduced to plain text. The frontend runs HTML through {@code ctx.sanitize}.
  *
+ * <p><strong>{@code feed}, {@code season} and {@code episodeNo} are the exception to "not authoritative"</strong>
+ * (since 0.17.0). They are not feed presentation but the episode's place in the site — the identity layer
+ * ({@code EpisodeRef}, ARCHITECTURE §4.4) — which the host resolves when it hands the snapshot over and never
+ * stores in it, so a feed refetch cannot move an episode to another season by overwriting a snapshot. They
+ * ride on this record because a plugin reading episodes already holds one; build a season scope from them
+ * with {@link #seasonScope()}, never by parsing {@code ctx.episodeLabels}.
+ *
  * @param title           the episode title from the feed; never {@code null}
  * @param description     the episode show notes as the feed published them — <strong>untrusted
  *                        HTML</strong>; never {@code null}, may be empty
@@ -42,6 +49,14 @@ import java.time.Instant;
  *                        collapsed — computed by the host; never {@code null} (a {@code null} argument
  *                        becomes {@code ""}), empty when the feed has no description
  *                        (since 0.16.0)
+ * @param feed         the public slug of the feed the episode belongs to — the id of its
+ *                     {@link Scope#feed(String) feed scope}; {@code null} only on a snapshot built without
+ *                     it (a host older than 0.17.0, or a test fixture on the shorter constructor) (since 0.17.0)
+ * @param season       the season number ({@code itunes:season}, as the host recorded it on the episode);
+ *                     {@code null} when the episode has none (since 0.17.0)
+ * @param episodeNo    the episode number within its season ({@code itunes:episode}); {@code null} when the
+ *                     episode has none — a numbered season may still hold an unnumbered prologue
+ *                     (since 0.17.0)
  */
 public record DisplaySnapshot(
         String title,
@@ -53,11 +68,40 @@ public record DisplaySnapshot(
         String feedImageUrl,
         String author,
         String subtitle,
-        String descriptionText) {
+        String descriptionText,
+        String feed,
+        Integer season,
+        Integer episodeNo) {
 
     /** Normalises an absent plain-text description to {@code ""}, so it is never {@code null}. */
     public DisplaySnapshot {
         descriptionText = descriptionText == null ? "" : descriptionText;
+    }
+
+    /**
+     * The 0.16 shape, without the episode's place in the site: {@link #feed()}, {@link #season()} and
+     * {@link #episodeNo()} are {@code null}.
+     *
+     * <p>Kept, and not deprecated, for test fixtures that never look at seasons. The host always uses the
+     * canonical constructor; a fixture for code that aggregates per season or feed must too.
+     *
+     * @param title           see the canonical constructor
+     * @param description     see the canonical constructor
+     * @param audioUrl        see the canonical constructor
+     * @param publishedAt     see the canonical constructor
+     * @param duration        see the canonical constructor
+     * @param imageUrl        see the canonical constructor
+     * @param feedImageUrl    see the canonical constructor
+     * @param author          see the canonical constructor
+     * @param subtitle        see the canonical constructor
+     * @param descriptionText see the canonical constructor
+     * @since 0.17.0
+     */
+    public DisplaySnapshot(String title, String description, String audioUrl, Instant publishedAt,
+                           Duration duration, String imageUrl, String feedImageUrl, String author,
+                           String subtitle, String descriptionText) {
+        this(title, description, audioUrl, publishedAt, duration, imageUrl, feedImageUrl, author, subtitle,
+                descriptionText, null, null, null);
     }
 
     /**
@@ -81,7 +125,22 @@ public record DisplaySnapshot(
     public DisplaySnapshot(String title, String description, String audioUrl, Instant publishedAt,
                            Duration duration, String imageUrl, String feedImageUrl, String author,
                            String subtitle) {
-        this(title, description, audioUrl, publishedAt, duration, imageUrl, feedImageUrl, author, subtitle, "");
+        this(title, description, audioUrl, publishedAt, duration, imageUrl, feedImageUrl, author, subtitle,
+                "", null, null, null);
+    }
+
+    /**
+     * The season scope this episode belongs to — {@code Scope.season(feed, season)} — or {@code null} when the
+     * episode has no season number or the snapshot carries no feed.
+     *
+     * <p>What a plugin aggregating per season needs, e.g. to pass to {@link FeedAccess#episodesIn(Scope)} or to
+     * key a per-season document. A derived convenience over {@link #feed()} and {@link #season()}.
+     *
+     * @return the season scope, or {@code null}
+     * @since 0.17.0
+     */
+    public Scope seasonScope() {
+        return feed == null || feed.isBlank() || season == null ? null : Scope.season(feed, season);
     }
 
     /**

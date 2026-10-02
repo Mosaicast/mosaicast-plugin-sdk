@@ -18,6 +18,8 @@ import {
   notifyText,
   PLATFORM_API_VERSION,
   resolveArtwork,
+  resolveSeasonScope,
+  seasonScope,
   SELF_SCOPE_ID,
   type DataScopeType,
   type DisplaySnapshot,
@@ -33,7 +35,7 @@ import { DEFAULT_THEME, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.16.2');
+    expect(PLATFORM_API_VERSION).toBe('0.17.0');
   });
 });
 
@@ -471,6 +473,41 @@ describe('declaredTypeFor', () => {
   it('handles a bare Blob, which carries no name at all', () => {
     expect(declaredTypeFor(new Blob(['x'], { type: 'image/png' }))).toBe('image/png');
     expect(declaredTypeFor(new Blob(['x']))).toBe('');
+  });
+
+  it('names a ZIP application/zip, whatever the browser called it (0.17.0)', () => {
+    expect(declaredTypeFor(fileNamed('export.zip', ''))).toBe('application/zip');
+    // Chrome on Windows reports the registry's association; the host checks the registered type.
+    expect(declaredTypeFor(fileNamed('export.zip', 'application/x-zip-compressed'))).toBe('application/zip');
+    expect(declaredTypeFor(fileNamed('export.zip', 'application/x-zip'))).toBe('application/zip');
+    expect(declaredTypeFor(fileNamed('export.zip', 'application/zip'))).toBe('application/zip');
+  });
+});
+
+describe('the season an episode belongs to (0.17.0)', () => {
+  const snap = (over: Partial<DisplaySnapshot>): DisplaySnapshot => ({
+    title: 't', description: '', descriptionText: '', ...over,
+  });
+
+  it('builds the season scope the host resolves, from the snapshot\'s placement', () => {
+    expect(resolveSeasonScope(snap({ feed: 'the-sample-cast', season: 5, episodeNo: 22 }))).toEqual({
+      type: 'season',
+      id: 'the-sample-cast:5',
+    });
+    // A prologue: a season but no episode number — the case a display label loses the season for.
+    expect(resolveSeasonScope(snap({ feed: 'the-sample-cast', season: 5 }))?.id).toBe('the-sample-cast:5');
+  });
+
+  it('has no season scope for an unnumbered episode, or from a host that sent no feed', () => {
+    expect(resolveSeasonScope(snap({ feed: 'the-sample-cast' }))).toBeUndefined();
+    expect(resolveSeasonScope(snap({ season: 2 }))).toBeUndefined();
+  });
+
+  it('refuses parts that cannot name a season', () => {
+    expect(() => seasonScope(' ', 1)).toThrow(/feed/);
+    expect(() => seasonScope('f', -1)).toThrow(/season/);
+    expect(() => seasonScope('f', 1.5)).toThrow(/season/);
+    expect(seasonScope('f', 0)).toEqual({ type: 'season', id: 'f:0' });
   });
 });
 
