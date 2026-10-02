@@ -1,5 +1,10 @@
 # Migrating a plugin to `platformApi` 0.16.x
 
+**0.16.1 → 0.16.2 needs nothing either.** `plugin-api` now brings PF4J 3.16.0, matching core 0.7.5 — move your
+own `compileOnly`/`annotationProcessor("org.pf4j:pf4j:…")` lines to 3.16.0 with it. And if a component waits for
+a key that another session or your backend writes later, do not rely on the client re-asking by itself within a
+page view: a remembered miss now lasts about 30 s (core 0.7.5), so re-read on your own cadence.
+
 **0.16.0 → 0.16.1 needs nothing.** A patch: `platformApi` 0.16.0 keeps loading. `ctx.sanitize` keeps
 `<ol start>` and table `align` now, and `sanitizeLikeHost` matches the host more closely — if a component test
 asserted that `<object>`/`<select>`/`<textarea>` text disappears, it was asserting something production never

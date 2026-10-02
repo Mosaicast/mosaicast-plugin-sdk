@@ -134,10 +134,12 @@ await ctx.docs.remove(ctx.scope, 'draft');                    // any Scope addre
   const docs = await ctx.docs.getMany<Highlight>('episode', ctx.episodes.slice(0, 20), ['highlight']);
   ```
 
-- **The client remembers for you (guaranteed since 0.16.0)**, per plugin and signed-in identity, for the
-  life of the page: identical `get`s in flight share one request; a miss is remembered (from `getMany`
-  too); your own `put`/`remove` forget the address they touched; hits are never cached; errors are never
-  remembered. So **delete any cache of misses you wrote yourself** — it is redundant — and keep a cache of
+- **The client remembers for you (guaranteed since 0.16.0)**, per plugin and signed-in identity: identical
+  `get`s in flight share one request; a miss is remembered **briefly** — about 30 s and never across a
+  navigation, `getMany` misses included (since core 0.7.5; it used to be the life of the page, which hid a
+  key your backend or another session wrote later until a reload); your own `put`/`remove` forget the
+  address they touched; hits are never cached; errors are never remembered. A UI that must notice a key
+  appearing while the visitor stays on one page re-reads it on its own cadence. So **delete any cache of misses you wrote yourself** — it is redundant — and keep a cache of
   hits, if at all, no longer than a render: it hides writes made in other sessions. Before this, 98% of
   one measured session's plugin requests were "not set", with one key asked 178 times.
 - **A malformed key throws at the call site**, with `DOC_KEY_PATTERN` in the message, instead of costing a

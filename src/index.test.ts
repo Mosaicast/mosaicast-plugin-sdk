@@ -33,7 +33,7 @@ import { DEFAULT_THEME, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.16.1');
+    expect(PLATFORM_API_VERSION).toBe('0.16.2');
   });
 });
 
