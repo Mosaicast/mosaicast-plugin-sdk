@@ -12,7 +12,7 @@ and rebuild:
 Every addition is optional to use: `DisplaySnapshot.feed`/`season`/`episodeNo` with `resolveSeasonScope`
 (Java `seasonScope()`) if you aggregate per season — drop any parsing of `ctx.episodeLabels` — and ZIP types in
 `declaredTypeFor`. Java fixtures keep compiling on the 10-argument `DisplaySnapshot` constructor. If you read
-`ctx.filter`, know it is still `{}` on core 0.7.5 and handle that as "unfiltered".
+`ctx.filter`: it is live from core 0.7.6, still `{}` on 0.7.5 and on page mounts — handle `{}` as "unfiltered".
 
 ---
 

@@ -27,13 +27,14 @@ stored snapshot, since they are identity and the snapshot is what a feed refetch
   `DisplaySnapshot.seasonScope()`** (Java), so nobody hand-builds the `"<feed>:<n>"` id.
 - **`declaredTypeFor` knows ZIP**: `.zip` → `application/zip`, and the non-standard types browsers report
   (`application/x-zip-compressed` from Chrome on Windows, `application/x-zip`) are normalised to it, so a
-  ZIP is not refused on its declared type once core stores them (core#246).
+  ZIP is not refused on its declared type; core stores them since 0.7.6 (core#246).
 
 ### Changed
 
-- **`ctx.filter` says what it does today**: through core 0.7.5 `current()` is always `{}` and `onChange`
-  never fires (core#248). The TSDoc says so and tells a plugin to treat an absent axis as unfiltered, so it
-  starts following the visitor's season when the host wires it, with no change.
+- **`ctx.filter` says what it does**: since core 0.7.6 (core#248) `current()` reflects the shell's `season`,
+  `tags` and `sort` filters and `onChange` fires on a change; on a page mount, and on core 0.7.5 and older, it
+  is `{}`. The TSDoc says so and tells a plugin to treat an absent axis as unfiltered, so one build works on
+  both.
 - The Java `DisplaySnapshot` gains a 13-component canonical constructor; the 10-argument one stays (fields
   absent) for fixtures that never look at seasons, and the 9-argument one stays deprecated.
 

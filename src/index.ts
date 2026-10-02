@@ -98,8 +98,9 @@ export const SELF_SCOPE_ID = 'me' as const;
  * define new axes. Known axes are typed; the index signature allows the host to add more without a
  * breaking change.
  *
- * **Every axis is optional, and absent means unfiltered.** Through core 0.7.5 the host fills none of them —
- * see {@link PluginContext.filter} — so a component must render correctly from `{}`.
+ * **Every axis is optional, and absent means unfiltered.** Since core 0.7.6 the host fills `season`
+ * (`?season=5`), `tags` (`?tag=x`) and `sort` (`?order=oldest`) from the shell's URL; core 0.7.5 and older
+ * fill none — see {@link PluginContext.filter} — so a component must render correctly from `{}`.
  */
 export interface FilterState {
   /** Selected season number, if the view is filtered by season. */
@@ -862,9 +863,9 @@ export interface BlobClient {
  *
  * Only the types the host's file storage accepts (§11.1) — SVG is deliberately absent, since it is never
  * storable, and guessing a type the host refuses outright would turn a clear refusal into a confusing
- * one. `jfif` is here because Windows still produces it for ordinary JPEGs. `zip` (since 0.17.0) is ahead
- * of the host by design: core accepts ZIP archives once core#246 lands, and until then a ZIP is refused on
- * its declared type exactly as it would have been, only now under its correct name.
+ * one. `jfif` is here because Windows still produces it for ordinary JPEGs. `zip` (since 0.17.0): core
+ * stores ZIP archives since 0.7.6 (core#246), for a plugin whose `blobs.mimeTypes` names `application/zip`;
+ * an older host refuses one on its declared type exactly as before, only now under its correct name.
  */
 const EXTENSION_MIME_TYPES: Readonly<Record<string, string>> = {
   zip: 'application/zip',
@@ -914,8 +915,9 @@ const TYPE_ALIASES: Readonly<Record<string, string>> = {
  *
  * @param file the file or blob about to be uploaded
  * Since 0.17.0 it also maps `.zip` → `application/zip` and rewrites the non-standard ZIP types some
- * browsers report (`application/x-zip-compressed`, `application/x-zip`) to it — whether a plugin may store
- * ZIPs at all is still its manifest's `blobs.mimeTypes` and the host's to decide.
+ * browsers report (`application/x-zip-compressed`, `application/x-zip`) to it, as core 0.7.6 does on its side
+ * too — whether a plugin may store ZIPs at all is still its manifest's `blobs.mimeTypes` and the host's to
+ * decide.
  *
  * @returns the browser's `type` (with a known alias normalised) when it gave one, else the type its
  *          extension implies, else `''`
@@ -2870,11 +2872,12 @@ export interface PluginContext {
    * Plugins *consume* filters, they never define them: the axes (season, tags, sorting) belong to the
    * host and live in the URL. `onChange` returns an {@link Unsubscribe}.
    *
-   * **Not wired yet.** Through core 0.7.5 `current()` always returns `{}` and `onChange` never fires — the
-   * shell does not hand its URL filter to plugins (core#248). Write against the contract anyway: treat a
-   * missing axis as "unfiltered", subscribe, and the component starts following the visitor's season the day
-   * the host fills it, with no change on your side. Do not read `location.search` yourself as a workaround:
-   * the axes are the host's, and their URL spelling is not part of the contract.
+   * **Live since core 0.7.6** (core#248): `current()` reflects what the visitor filtered the list by, and
+   * `onChange` fires when that changes — including for a listener that subscribed through an earlier `ctx`.
+   * On a page mount (`/p/<id>/…`) it stays `{}`, because a page's query string is the plugin's own
+   * ({@link PluginRoute.query}). Core 0.7.5 and older always return `{}` and never fire, so treat a missing
+   * axis as "unfiltered" and the same code works on both. Do not read `location.search` yourself: the axes
+   * are the host's, and their URL spelling is not part of the contract.
    */
   filter: { current(): FilterState; onChange(cb: (f: FilterState) => void): Unsubscribe };
   /**
