@@ -10,6 +10,7 @@ import {
   makeMockConsent,
   makeMockCtx,
   makeMockDocs,
+  makeMockEpisode,
   makeMockFeeds,
   makeMockSchema,
   makeMockNotify,
@@ -471,6 +472,48 @@ describe('makeMockFeeds', () => {
   it('is wired into makeMockCtx by default, empty', async () => {
     const ctx = makeMockCtx();
     expect(await ctx.feeds.display('anything')).toBeNull();
+  });
+
+  it('moves a snapshot between phases and drops the announcement once it is released', async () => {
+    const feeds = makeMockFeeds().withDisplay('kraken', {
+      ...kraken,
+      phase: 'planned',
+      announceAt: '2026-10-09T18:00:00Z',
+    });
+
+    feeds.withPhase('kraken', 'upcoming');
+    expect(await feeds.display('kraken')).toMatchObject({ phase: 'upcoming', announceAt: '2026-10-09T18:00:00Z' });
+
+    feeds.withPhase('kraken', 'released');
+    const released = await feeds.display('kraken');
+    expect(released).toMatchObject({ title: 'The Kraken', phase: 'released' });
+    expect(released).not.toHaveProperty('announceAt');
+  });
+
+  it('refuses a phase for an episode it was never given', () => {
+    expect(() => makeMockFeeds().withPhase('gated', 'released')).toThrow(/gated/);
+  });
+});
+
+describe('makeMockEpisode', () => {
+  it('derives the stored status from the phase', () => {
+    expect(makeMockEpisode('planned')).toEqual({ status: 'PLANNED', phase: 'planned' });
+    expect(makeMockEpisode('upcoming', '2026-10-09T18:00:00Z')).toEqual({
+      status: 'PLANNED',
+      phase: 'upcoming',
+      announceAt: '2026-10-09T18:00:00Z',
+    });
+    expect(makeMockEpisode('released')).toEqual({ status: 'PUBLISHED', phase: 'released' });
+    expect(makeMockEpisode('withdrawn')).toEqual({ status: 'WITHDRAWN', phase: 'withdrawn' });
+  });
+
+  it('keeps an announcement only on the two planned phases', () => {
+    expect(makeMockEpisode('released', '2026-10-09T18:00:00Z')).not.toHaveProperty('announceAt');
+  });
+
+  it('goes on an episode-scoped mock context', () => {
+    const ctx = makeMockCtx({ scope: { type: 'episode', id: 'kraken' }, episode: makeMockEpisode('planned') });
+    expect(ctx.episode?.phase).toBe('planned');
   });
 });
 

@@ -7,6 +7,40 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] — 2026-10-02
+
+Plugins can tell where an episode stands in its release, and hear when a planned one is released (#94). A
+**minor** bump: `PluginContext.onEpisodeReleased` and the new snapshot accessors live in the host's copy of
+`plugin-api`, so a 0.18 plugin on a 0.17 host would fail with `NoSuchMethodError`. **Core must pin
+`mosaicastSdk = "0.18.0"`**, fill `phase`/`announceAt` on read (never into the stored snapshot), fill
+`ctx.episode.status`, and call release listeners after the binding commit. The core release that pins it ships
+the planned-episode feature.
+
+### Added
+
+- **`EpisodePhase`** (Java enum `PLANNED | UPCOMING | RELEASED | WITHDRAWN`; TS `'planned' | 'upcoming' |
+  'released' | 'withdrawn'`) and the TS **`EpisodeStatus`** type. The phase is derived by the host from the
+  stored status, the announcement instant and the clock; `planned` is visible to podcasters and admins only.
+- **`DisplaySnapshot.phase` and `.announceAt`** (TS optional fields; Java record components) — identity like
+  `feed`/`season`/`episodeNo`, added on read and never stored.
+- **`ctx.episode`** gains `phase` and `announceAt?`; `status` is now filled by the host (core 0.7.6 left it
+  empty).
+- **`PluginContext.onEpisodeReleased(Consumer<String>)`** — a `default` no-op method the host overrides.
+  Called once per release after the commit, with the slug, best effort: not durable or replayed, so a plugin
+  must reconcile by phase on its schedule as well. Not called for an episode that arrives already released.
+- **Test kit:** `FakeFeedAccess.withPhase(...)`, `FakePluginContext.fireEpisodeReleased(...)` /
+  `episodeReleasedListenerCount()`; TS `makeMockEpisode(phase, announceAt?)` and
+  `MockFeedsClient.withPhase(...)`.
+
+### Changed
+
+- **Documented visibility:** a `planned` episode is absent from `ctx.episodes`, `ctx.feeds.display` and the
+  scope-episodes surface below podcaster; a backend's `FeedAccess` sees it with its phase.
+- The Java `DisplaySnapshot` gains a 15-component canonical constructor; the 13-argument one stays (phase
+  absent) for fixtures that never look at the phase.
+- **`ctx.episode` is typed `{ status, phase, announceAt? }`**, with `phase` required — a test that set
+  `episode: { status: 'PLANNED' }` needs a phase; `makeMockEpisode('planned')` writes it.
+
 ## [0.17.0] — 2026-10-02
 
 Plugins can place an episode in its season and feed (#90, core#248). A **minor** bump although every change

@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.17.0' as const;
+export const PLATFORM_API_VERSION = '0.18.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -1234,6 +1234,33 @@ function routeSegments(path: string): string[] {
 }
 
 /**
+ * The stored lifecycle of an episode — the `EpisodeRef` status (ARCHITECTURE §4.1). It does not say whether
+ * a planned episode is announced; {@link EpisodePhase} does.
+ *
+ * @since 0.18.0
+ */
+export type EpisodeStatus = 'PLANNED' | 'PUBLISHED' | 'WITHDRAWN';
+
+/**
+ * Where an episode stands in its release, derived by the host at read time from the {@link EpisodeStatus},
+ * the announcement instant and the clock (ARCHITECTURE §4.3) — mirror of the Java `EpisodePhase` enum, in
+ * lower case. Never stored: a planned episode becomes `upcoming` the moment its announcement passes, with
+ * nothing written.
+ *
+ * | phase | meaning | who sees the episode |
+ * |---|---|---|
+ * | `planned` | `PLANNED`, not announced yet (no `announceAt`, or one in the future) | podcasters and admins |
+ * | `upcoming` | `PLANNED`, announced (`announceAt` has passed) | everyone, as an "Upcoming" card |
+ * | `released` | `PUBLISHED` — the feed item arrived and bound, possibly before `announceAt` | everyone |
+ * | `withdrawn` | `WITHDRAWN` | as withdrawn episodes always were |
+ *
+ * Branch on this, not on the status, for anything a visitor sees.
+ *
+ * @since 0.18.0
+ */
+export type EpisodePhase = 'planned' | 'upcoming' | 'released' | 'withdrawn';
+
+/**
  * The presentation layer of an episode — the feed-derived snapshot the core UI shows (ARCHITECTURE §4.2),
  * mirrored from the Java `dev.mosaicast.plugin.api.DisplaySnapshot` record.
  *
@@ -1307,6 +1334,24 @@ export interface DisplaySnapshot {
    * @since 0.17.0
    */
   episodeNo?: number;
+  /**
+   * Where the episode stands in its release. Identity, like {@link feed}: the host derives it on read and
+   * never stores it in the snapshot. Optional in the type only because a fixture may leave it out; a host
+   * that loads a 0.18 plugin always sends it.
+   *
+   * A visitor below podcaster never receives a `planned` snapshot — {@link FeedsClient.display} answers
+   * `null` for it — so on the frontend `planned` means the viewer is a podcaster or an admin.
+   *
+   * @since 0.18.0
+   */
+  phase?: EpisodePhase;
+  /**
+   * When a `PLANNED` episode is (or was) announced to everyone, as an ISO-8601 instant; absent when it has no
+   * scheduled announcement, and once it is released or withdrawn.
+   *
+   * @since 0.18.0
+   */
+  announceAt?: string;
 }
 
 /**
@@ -1496,9 +1541,10 @@ export interface FeedsClient {
    * The display snapshot for one episode.
    *
    * @param slug the episode's public slug — one of {@link PluginContext.episodes}
-   * @returns the snapshot, or **`null`** when the host has none or the caller may not see it. The two
-   *          are deliberately indistinguishable: telling them apart would confirm the existence of an
-   *          episode this visitor was not shown
+   * @returns the snapshot, or **`null`** when the host has none or the caller may not see it — which
+   *          includes a `planned` episode for anyone below podcaster (since 0.18.0). The two are
+   *          deliberately indistinguishable: telling them apart would confirm the existence of an episode
+   *          this visitor was not shown
    */
   display(slug: string): Promise<DisplaySnapshot | null>;
   /**
@@ -2691,6 +2737,9 @@ export interface PluginContext {
   /**
    * The episode ids in scope, resolved (and access-filtered) by the host — the public **slugs** (the same
    * values used in URLs and doc-store paths). Pair with {@link episodeLabels} for display.
+   *
+   * A `planned` episode ({@link EpisodePhase}) is in this list only for a podcaster or an admin; the backend's
+   * `FeedAccess` sees it regardless.
    */
   episodes: string[];
   /**
@@ -2699,8 +2748,21 @@ export interface PluginContext {
    * Optional: absent (or partial) when the host does not provide a label for a given episode.
    */
   episodeLabels?: Record<string, string>;
-  /** Present on the `episode` scope: lifecycle status of the current episode. */
-  episode?: { status: 'PLANNED' | 'PUBLISHED' | 'WITHDRAWN' };
+  /**
+   * Present on the `episode` scope: where the current episode stands in its release.
+   *
+   * - `status` — the stored lifecycle ({@link EpisodeStatus}).
+   * - `phase` — what to branch on ({@link EpisodePhase}). A component only ever sees `planned` when the
+   *   viewer is a podcaster or an admin: nobody else can open a planned episode's page.
+   * - `announceAt` — ISO-8601; present while `PLANNED` with a scheduled announcement.
+   *
+   * There is no release event on the frontend. The shell hands the component a new `ctx` when the phase
+   * changes, so render from this and let {@link defineMosaicastElement} re-render you.
+   *
+   * Since 0.18.0 `phase` and `announceAt` are new and `status` is filled by the host; before, the member was
+   * declared but core left it empty.
+   */
+  episode?: { status: EpisodeStatus; phase: EpisodePhase; announceAt?: string };
   /**
    * The signed-in user, or `null` for anonymous visitors.
    *

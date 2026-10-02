@@ -19,6 +19,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -28,7 +29,8 @@ import java.util.function.Supplier;
  * <p>Typical flow: build the fake context, call {@code plugin.register(ctx)}, then assert against the
  * doc store. {@code onSchedule} runs the task <strong>synchronously</strong> and immediately, so
  * scheduled work is exercised deterministically within the test; {@link #runScheduled()} ticks it again
- * and {@link #scheduledPeriods()} re-reads what period each task would run at now.
+ * and {@link #scheduledPeriods()} re-reads what period each task would run at now. Release listeners are
+ * kept, not called, until a test fires one with {@link #fireEpisodeReleased(String)}.
  *
  * <p>By default {@link #schema()} returns {@code null} (no schema declared, like most plugins); pass a
  * {@link SchemaStore} to the full constructor to test a schema-declaring plugin. Not thread-safe.
@@ -51,6 +53,7 @@ public final class FakePluginContext implements PluginContext {
     private Locales locales = FakeLocales.englishOnly();
     private Translation translation;
     private final List<ScheduledTask> scheduled = new ArrayList<>();
+    private final List<Consumer<String>> releaseListeners = new ArrayList<>();
 
     /** Creates a context with an empty doc store, empty config, empty feeds, no schema and no blobs. */
     public FakePluginContext() {
@@ -393,6 +396,58 @@ public final class FakePluginContext implements PluginContext {
      */
     public void runScheduled() {
         scheduled.forEach(t -> t.task().run());
+    }
+
+    /**
+     * Keeps the listener for {@link #fireEpisodeReleased(String)}. Nothing calls it on its own: the host only
+     * does when a planned episode binds to its feed item, and in a test that moment is yours to pick.
+     *
+     * @param listener called with the released episode's slug; never {@code null}
+     * @throws NullPointerException if {@code listener} is {@code null}
+     * @since 0.18.0
+     */
+    @Override
+    public void onEpisodeReleased(Consumer<String> listener) {
+        releaseListeners.add(Objects.requireNonNull(listener, "listener"));
+    }
+
+    /**
+     * Calls every listener registered through {@link #onEpisodeReleased(Consumer)}, in registration order, as
+     * the host does once a planned episode has been released.
+     *
+     * <p>Like the host, it catches what a listener throws, logs it at {@code ERROR} on {@link #logger()} and
+     * goes on to the next, so a test sees the same outcome a failing listener has in production: a log line,
+     * not a crash. Assert on {@code ctx.logger().events(Level.ERROR)} when that is the point.
+     *
+     * <p>Pair it with {@link FakeFeedAccess#withPhase(String, dev.mosaicast.plugin.api.EpisodePhase)} so the
+     * episode reads {@code RELEASED} when the listener looks it up — the host commits the binding before it
+     * calls. And test the scheduled reconciliation too, without firing anything: the event is best effort and
+     * a real plugin misses it whenever it was not running.
+     *
+     * @param slug the released episode's slug; never {@code null}
+     * @throws NullPointerException if {@code slug} is {@code null}
+     * @since 0.18.0
+     */
+    public void fireEpisodeReleased(String slug) {
+        Objects.requireNonNull(slug, "slug");
+        for (Consumer<String> listener : List.copyOf(releaseListeners)) {
+            try {
+                listener.accept(slug);
+            } catch (RuntimeException e) {
+                logger.error("episode-released listener failed for {}", slug, e);
+            }
+        }
+    }
+
+    /**
+     * The number of listeners registered through {@link #onEpisodeReleased(Consumer)} — for asserting a plugin
+     * subscribed at all.
+     *
+     * @return the count of release listeners
+     * @since 0.18.0
+     */
+    public int episodeReleasedListenerCount() {
+        return releaseListeners.size();
     }
 
     /** One registered task and the supplier the host would re-read before each of its ticks. */
