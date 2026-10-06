@@ -13,11 +13,12 @@ Documentation only — no contract change, no version bump.
 
 ### Changed
 
-- **`docs/ARCHITECTURE.md`** synced from mosaicast-core c60421c (core 0.7.8 / 0.8.0): the 0.19.0 contract in
+- **`docs/ARCHITECTURE.md`** synced from mosaicast-core f8dd752 (core 0.7.8 – 0.8.1): the 0.19.0 contract in
   §4.3, §7.2, §7.4, §7.5 and §7.6, and the new §12.8.1 on the GDPR data export.
 - **`onEpisodePhaseChanged` docs** match what core ships: phase `null` means the episode no longer exists — a
-  cancelled plan, *or* the duplicate a manual match or a confirmed suggestion removed. Deleting a whole feed
-  fires nothing per episode.
+  cancelled plan, the duplicate a manual match or a confirmed suggestion removed, or every episode of a
+  deleted feed (core 0.8.1). Each event runs on its own thread, so many can arrive at once in no guaranteed
+  order; the docs say to coalesce an expensive listener behind a `ReentrantLock`.
 
 ## [0.19.0] — 2026-10-06
 

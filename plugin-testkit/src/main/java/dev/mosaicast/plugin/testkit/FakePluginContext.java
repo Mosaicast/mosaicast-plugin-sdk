@@ -468,7 +468,11 @@ public final class FakePluginContext implements PluginContext {
      * Calls every listener registered through {@link #onEpisodePhaseChanged(BiConsumer)}, in registration
      * order, as the host does after a write changed an episode's phase — an {@code announceAt} moved into the
      * future ({@link EpisodePhase#PLANNED}), an announcement ({@link EpisodePhase#UPCOMING}), a withdrawal, or
-     * a cancellation or a removed duplicate ({@code null}).
+     * an episode that no longer exists — cancelled, a removed duplicate, or in a deleted feed ({@code null}).
+     *
+     * <p>It calls the listeners one after another on the test's thread. The host does not: it runs each event
+     * on its own thread, so a deleted feed arrives as many concurrent calls. To test a coalescing listener,
+     * fire the events from several threads yourself.
      *
      * <p>Only the phase listeners: a release proper — a planned episode binding to its feed item — is
      * {@link #fireEpisodeReleased(String)}, which calls both kinds. Firing {@link EpisodePhase#RELEASED} here
@@ -479,8 +483,8 @@ public final class FakePluginContext implements PluginContext {
      * when the listener looks it up.
      *
      * @param slug  the episode's slug; never {@code null}
-     * @param phase its new phase, or {@code null} for an episode that no longer exists — cancelled, or
-     *              removed as a matched duplicate
+     * @param phase its new phase, or {@code null} for an episode that no longer exists — cancelled, removed
+     *              as a matched duplicate, or in a deleted feed
      * @throws NullPointerException if {@code slug} is {@code null}
      * @since 0.19.0
      */

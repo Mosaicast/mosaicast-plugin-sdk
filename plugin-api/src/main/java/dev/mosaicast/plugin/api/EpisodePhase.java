@@ -13,8 +13,8 @@ package dev.mosaicast.plugin.api;
  * moment its announcement passes.
  *
  * <p>A <em>write</em> that changes the phase — announcing, an {@code announceAt} edit, a release, a withdrawal,
- * a cancellation or a removed duplicate — is reported to {@link PluginContext#onEpisodePhaseChanged(java.util.function.BiConsumer)}
- * (since 0.19.0). The clock moving a phase is not.
+ * a cancellation, a removed duplicate, a deleted feed — is reported to
+ * {@link PluginContext#onEpisodePhaseChanged(java.util.function.BiConsumer)} (since 0.19.0). The clock moving a phase is not.
  *
  * <p>Branch on the phase, not on the status, for anything a visitor sees: a {@code PLANNED} episode is either
  * hidden or announced, and only the phase says which.
