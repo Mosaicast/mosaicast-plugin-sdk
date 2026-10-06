@@ -8,12 +8,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.mosaicast.plugin.api.ExportFile;
 import dev.mosaicast.plugin.api.PageRouteProvider;
 import dev.mosaicast.plugin.api.Role;
 import dev.mosaicast.plugin.api.SearchHit;
 import dev.mosaicast.plugin.api.SearchProvider;
 import dev.mosaicast.plugin.api.Tags;
 import dev.mosaicast.plugin.api.UserDataHandler;
+import dev.mosaicast.plugin.api.UserExport;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -161,6 +164,82 @@ class HarnessTest {
         harness.eraseTwice("u-1");
 
         assertEquals(List.of("u-1", "u-1"), erased);
+    }
+
+    @Test
+    void exportFilesWrapsAMapOnlyHandlerAsDataJson() {
+        UserDataHandler mapOnly = new UserDataHandler() {
+            @Override
+            public void eraseUser(String userId) {
+                // no-op
+            }
+
+            @Override
+            public Optional<Map<String, Object>> exportUser(String userId) {
+                return Optional.of(Map.of("pages", List.of("kraken")));
+            }
+        };
+
+        UserExport part = new UserDataHandlerHarness(mapOnly).exportFiles("u-1").orElseThrow();
+
+        assertEquals(1, part.files().size());
+        ExportFile file = part.files().get(0);
+        assertEquals("data.json", file.path());
+        assertEquals("application/json", file.mediaType());
+        assertEquals("{\"pages\":[\"kraken\"]}", new String(file.bytes(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void exportFilesPrefersTheHandlersOwnFiles() {
+        UserDataHandler own = new UserDataHandler() {
+            @Override
+            public void eraseUser(String userId) {
+                // no-op
+            }
+
+            @Override
+            public Optional<UserExport> exportFiles(String userId) {
+                return Optional.of(UserExport.of(
+                        ExportFile.text("cards.json", "application/json", "{\"format\":\"mosaicast-bingo/1\"}"),
+                        ExportFile.text("cards.csv", "text/csv", "episode,line\nep-7,3\n")));
+            }
+
+            @Override
+            public Optional<Map<String, Object>> exportUser(String userId) {
+                throw new AssertionError("not consulted when exportFiles answers");
+            }
+        };
+
+        UserExport part = new UserDataHandlerHarness(own).exportFiles("u-1").orElseThrow();
+
+        assertEquals(List.of("cards.json", "cards.csv"), part.files().stream().map(ExportFile::path).toList());
+    }
+
+    @Test
+    void exportFilesIsEmptyWhenTheHandlerHoldsNothing() {
+        UserDataHandler eraseOnly = userId -> { };
+
+        assertEquals(Optional.empty(), new UserDataHandlerHarness(eraseOnly).exportFiles("u-1"));
+    }
+
+    @Test
+    void exportFilesFailsAPartTheHostWouldRefuseForSize() {
+        UserDataHandler huge = new UserDataHandler() {
+            @Override
+            public void eraseUser(String userId) {
+                // no-op
+            }
+
+            @Override
+            public Optional<UserExport> exportFiles(String userId) {
+                return Optional.of(UserExport.of(new ExportFile("dump.bin", "application/octet-stream",
+                        new byte[(int) UserExport.MAX_BYTES + 1])));
+            }
+        };
+
+        AssertionError failure =
+                assertThrows(AssertionError.class, () -> new UserDataHandlerHarness(huge).exportFiles("u-1"));
+        assertTrue(failure.getMessage().contains("records the part as failed"));
     }
 
     @Test

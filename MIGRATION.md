@@ -1,4 +1,39 @@
-# Migrating a plugin to `platformApi` 0.18.0
+# Migrating a plugin to `platformApi` 0.19.0
+
+**0.18.x → 0.19.0: the bump is required; one test assertion may need to change.** `platformApi` matches on
+`major.minor`, so re-declare and rebuild:
+
+```diff
+- "platformApi": "0.18.0",                           + "platformApi": "0.19.0",
+- implementation("dev.mosaicast:plugin-api:0.18.0")  + implementation("dev.mosaicast:plugin-api:0.19.0")
+- "@mosaicast/plugin-sdk": "^0.18.0"                 + "@mosaicast/plugin-sdk": "^0.19.0"
+```
+
+- **`ctx.feeds.displayMany` no longer clamps at 200** — it splits and merges. If you slice `ctx.episodes` into
+  chunks of `DISPLAY_BATCH_LIMIT` by hand, you can delete that. A test asserting
+  `makeMockFeeds().requested` stops at 200 now sees every slug; assert on `batches` for the split.
+- **If some of your doc-store keys should be less public than the rest** — bookkeeping that names a quiet
+  planned episode, an admin-only setting — declare them instead of moving them:
+  `"keyFloors": [{ "keys": ["import:*"], "readableBy": "podcaster" }]`. A fan's listing then simply leaves
+  them out. To tell the new 403 from the other two, compare `e.problem?.type` with `PROBLEM_TYPES.keyFloor`.
+- **If your schema rows should be less public than your doc store** (per-user inputs behind an anonymous tile):
+  `"storage": { "schema": { … }, "schemaReadableBy": "podcaster" }`.
+- **If your backend publishes anything about episodes on a schedule** (an index, a count, a teaser), register
+  `ctx.onEpisodePhaseChanged(...)` and republish when an episode goes back to `PLANNED`, is withdrawn, or is
+  cancelled (phase `null`) — otherwise it stays named to anonymous readers until your next tick. Keep the
+  scheduled reconciliation; the event is best effort.
+- **If you implement `UserDataHandler.exportUser`**, nothing changes: the host exports your map as `data.json`.
+  Implement `exportFiles` instead when your data has a format of its own, and test it with
+  `UserDataHandlerHarness.exportFiles(userId)`.
+- `DocStore.BACKEND_OWNED_PATTERN` still compiles; `KEY_SELECTOR_PATTERN` is the same value under the name new
+  code should use. A `PluginContext` double of your own keeps compiling — `onEpisodePhaseChanged` is a `default`
+  method.
+
+On `0.17.x`? Do [0.17.x → 0.18.0](#017x--0180) first, then this.
+
+---
+
+# 0.17.x → 0.18.0
 
 **0.17.x → 0.18.0: the bump is required; one test fixture shape may need a phase.** `platformApi` matches on
 `major.minor`, so re-declare and rebuild:

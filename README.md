@@ -144,8 +144,8 @@ await ctx.docs.remove(ctx.scope, 'draft');                    // any Scope addre
   one measured session's plugin requests were "not set", with one key asked 178 times.
 - **A malformed key throws at the call site**, with `DOC_KEY_PATTERN` in the message, instead of costing a
   400 round-trip whose body you then have to read.
-- Everything else is unchanged and still the host's: both access floors, `backendOwned`, the 400 on an
-  unknown scope, the 401 on an anonymous `user` request.
+- Everything else is unchanged and still the host's: both access floors, `backendOwned`, `keyFloors`, the 400
+  on an unknown scope, the 401 on an anonymous `user` request.
 
 ### Typed failures — `PluginApiError` (since 0.9.0)
 
@@ -154,18 +154,24 @@ rejection was untyped, so the only way to survive a 404 was `catch(() => undefin
 the 500, the 403 and the network failure, and showed the visitor an empty widget for all four:
 
 ```ts
-import { isPluginApiError } from '@mosaicast/plugin-sdk';
+import { PROBLEM_TYPES, isPluginApiError } from '@mosaicast/plugin-sdk';
 
 try {
-  await ctx.docs.put('site', 'stats', computed);
+  await ctx.docs.put('site', 'bundles', edited);
 } catch (e) {
   if (isPluginApiError(e) && e.status === 403) {
-    ctx.log('warn', e.problem?.detail ?? 'refused');  // backendOwned, or the write floor
-    return;
+    switch (e.problem?.type) {
+      case PROBLEM_TYPES.keyFloor:        return notice('Only an admin can change bundles.');  // since 0.19.0
+      case PROBLEM_TYPES.backendOwnedKey: return notice('This value is computed by the plugin.');
+      default:                            return notice('You cannot edit this.');              // the write floor
+    }
   }
   throw e;                                            // a real failure — surface it
 }
 ```
+
+The three doc-store 403s carry stable problem types (`PROBLEM_TYPES`, since 0.19.0), so tell them apart by
+`type` rather than by the English `detail`.
 
 Use `isPluginApiError`, not `instanceof`: the error is constructed by the host and crosses a bundle
 boundary, so it does not share a constructor with anything in your plugin.
@@ -227,11 +233,43 @@ If your backend authors a key, **declare it**:
 }
 ```
 
-- Each entry is an exact key, a prefix ending in `*`, or the bare `*` (the whole store is computed) — `DocStore.BACKEND_OWNED_PATTERN` = `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$`. A `*` in the middle, or an empty entry, is rejected at load. A pattern can never be a key, since `*` is not in `KEY_PATTERN`.
+- Each entry is an exact key, a prefix ending in `*`, or the bare `*` (the whole store is computed) — `DocStore.KEY_SELECTOR_PATTERN` (alias `BACKEND_OWNED_PATTERN`; TS `DOC_KEY_SELECTOR_PATTERN`) = `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$`. A `*` in the middle, or an empty entry, is rejected at load. A pattern can never be a key, since `*` is not in `KEY_PATTERN`.
 - A client `PUT`/`DELETE` to a matching key is **403**, worded differently from the role-floor 403 so you can tell which rule refused you. **Reads are untouched** and still governed by `readableBy`. `ctx.store()` — the backend — is unaffected, which is the whole point.
 - **Write those keys in `register()` too, not only on a schedule.** The declaration refuses *new* client writes; it does not remove a value forged before it existed, so otherwise a bogus document survives until the next tick.
 - It is **ignored for `user` scopes**: the backend cannot write a partition at all, so even a bare `*` leaves those to their owner.
 - `PluginDataDeclaration` in the TS SDK types this block (documentation only — the host validates it), and `InMemoryDocStore.withBackendOwned(...)` enforces it in tests, so you can prove the forged `PUT` fails without a running host.
+
+### Per-key floors (since 0.19.0) — some keys less public than the rest
+
+`readableBy` / `writableBy` cover every key, and `backendOwned` only narrows a *write* to "backend only". A
+plugin whose numbers are public but whose bookkeeping is not — the stats plugin's `import:*` jobs name a file
+and the slug of an episode that may still be a quiet planned one — or whose site-wide settings are admin's,
+declares which keys:
+
+```json
+"data": {
+  "readableBy": "anonymous", "writableBy": "podcaster",
+  "backendOwned": ["stats", "import:*", "staged:*"],
+  "keyFloors": [
+    { "keys": ["import:*", "staged:*"], "readableBy": "podcaster" },
+    { "keys": ["bundles"], "writableBy": "admin" }
+  ]
+}
+```
+
+- **Raise only.** A key floor below the plugin's own, an entry with no `keys` or one raising neither floor is
+  rejected at load. Several matching entries combine to the **strictest**, per direction; a `backendOwned` key
+  stays unwritable by clients whatever its write floor says.
+- **Below the floor, a key is simply not there for you** in a listing (`ctx.docs.list` leaves it out) or a
+  batch (`getMany` leaves it absent, like a miss). A single `get`, `put` or `remove` of it is a **403** with
+  the problem type `PROBLEM_TYPES.keyFloor` — the third doc-store 403, worded apart from the other two.
+- Not for `user` scopes, and not for the backend: `ctx.store()` reads and writes every key.
+- A host before 0.19.0 ignored unknown manifest keys and would have served these at the plugin floor — which
+  is why this shipped in a minor: a plugin declaring it only loads where it is enforced.
+
+Test it on both sides: `InMemoryDocStore.withKeyFloor("import:*", "podcaster", null)` with
+`store.asAnonymous()` / `store.asUser(id, Role.PODCASTER)` in Java, and
+`makeMockDocs(seed, { data, viewer: 'fan' })` in TypeScript, which answers with the same problem types.
 
 **No request-time server logic.** A write is plain persistence — no plugin code runs on the request. Anything derived, validated or aggregated server-side is **precomputed** in `register`/`onSchedule` and read back from the store.
 
@@ -320,7 +358,9 @@ const n   = await ctx.schema.count('page');
   the only writer — a frontend that must write puts a document in the doc store and the backend ingests it
   on its schedule, which makes such a write eventually consistent.
 - An undeclared entity is a 404, an undeclared field or a `search` on a field that is not `:fulltext` a
-  400. Access is the same `data.readableBy` floor as the doc surface — one rule, both surfaces.
+  400. Access is the `data.readableBy` floor of the doc surface, unless the storage block declares its own
+  (since 0.19.0): `"storage": { "schema": { … }, "schemaReadableBy": "podcaster" }` keeps per-user rows from
+  anonymous visitors while the plugin's documents stay public. Your backend's `SchemaStore` is unaffected.
 
 Test it with `makeMockSchema({ page: [...] })` from `/testing`, which records every query. Its `search` is
 a substring match with the same caveat as `FakeSchemaStore`'s.
@@ -333,7 +373,7 @@ schedule — a backend, a scheduled ingest, a `backendOwned` key and a copy that
 fields the host already has.
 
 ```ts
-const cards = await ctx.feeds.displayMany(ctx.episodes.slice(0, 20));   // one request, not N
+const cards = await ctx.feeds.displayMany(ctx.episodes.slice(0, 20));   // one call, not N
 for (const slug of ctx.episodes) {
   const snap = cards[slug];
   if (!snap) continue;                       // filtered out for this visitor — normal, not an error
@@ -350,7 +390,9 @@ const one = await ctx.feeds.display('kraken');   // null when absent or not visi
   `ctx.links` makes.
 - **Not authoritative.** The snapshot is overwritten on every feed refetch — that is the feature, and the
   reason to read it live. Cache per render, never per install.
-- `displayMany` **clamps** at 200 slugs rather than erroring, so check what came back.
+- `displayMany` takes any number of slugs (since 0.19.0): past `DISPLAY_BATCH_LIMIT` (200) the client splits
+  the call into several requests and merges them, as `ctx.docs.getMany` does. Before, it clamped — everything
+  past the 200th slug of a long-running show was silently missing.
 
 - **`description` is untrusted third-party HTML** — whatever the podcast host put in the feed, unsanitized.
   Never assign it to `innerHTML` as it stands. Show `descriptionText` (plain text, since 0.16.0) for a card
@@ -359,7 +401,9 @@ const one = await ctx.feeds.display('kraken');   // null when absent or not visi
 
 - **Where an episode sits — `feed`, `season`, `episodeNo` (since 0.17.0).** The one part of a snapshot that is
   authoritative: the episode's place in the site, resolved by the host from the identity layer, not copied
-  from the feed. A plugin aggregating per season builds the scope with `resolveSeasonScope(snap)` (Java:
+  from the feed. `season` and `episodeNo` are the feed's `itunes:*` values unless a podcaster set them by hand
+  (core 0.7.7) — then the hand-set value wins, survives feed polls, and may be `0` (a prologue Apple's
+  `itunes:episode` cannot number). A plugin aggregating per season builds the scope with `resolveSeasonScope(snap)` (Java:
   `snapshot.seasonScope()`), or `seasonScope(feed, n)` / `Scope.season(feed, n)` from parts — never by
   parsing `ctx.episodeLabels`, which is presentation and drops the season of an unnumbered prologue. All
   three are absent on a host without 0.17 support and when the episode has no number.
@@ -971,6 +1015,25 @@ which one is a person. Handlers run *before* the account row goes, and **must be
 deletion is retried. `UserDataHandlerHarness.eraseTwice(userId)` is that test, and it is the one authors
 skip: the second call is the one that throws, during a retry, when the alternative is a half-done deletion.
 
+The same handler answers a person's **data export** (GDPR Art. 15/20). Core bundles every plugin's part into
+one ZIP, each under `plugins/<id>/`. Since 0.19.0 a plugin hands over **files in its own format** — a card its
+import reads back, a CSV, an upload:
+
+```java
+@Override
+public Optional<UserExport> exportFiles(String userId) {
+    List<Card> cards = cards.of(userId);                       // this person's own rows only
+    return cards.isEmpty() ? Optional.empty()
+            : Optional.of(UserExport.of(ExportFile.text("cards.json", "application/json", toBingoV1(cards))));
+}
+```
+
+Read-only; at most `UserExport.MAX_BYTES` (32 MiB) within `UserExport.TIMEOUT` (60 s), or the part is recorded
+as failed — never truncated. Paths are relative (`ExportFile.PATH_PATTERN`). A plugin that implements only
+`exportUser(userId)` keeps working: the host exports its map as `data.json`. Test with
+`new UserDataHandlerHarness(handler).exportFiles(userId)`, which asks the way the host does and fails on the
+limits.
+
 **`PageRouteProvider`** (since 0.9.1) is how a plugin's unknown subpaths become real 404s. Declare a `page`
 slot and *every* subpath under `/p/<id>/` answers `200` — a page never written, a mistyped slug, the URL of
 a page deleted last year — each rendering your not-found view inside a `200 OK`. §6.6 rules that soft-404
@@ -1059,7 +1122,7 @@ short periods to a floor it owns.
 supplier on demand, so a test changes `MapPluginConfig` and sees the new period — a plugin that captured a
 `Duration` at `register()` keeps reporting the old one and fails the assertion.
 
-## Planned episodes — the release phase and `ctx.onEpisodeReleased(...)` (since 0.18.0)
+## Planned episodes — the release phase, `ctx.onEpisodeReleased(...)` (since 0.18.0) and `ctx.onEpisodePhaseChanged(...)` (since 0.19.0)
 
 A podcaster can create an episode before it is in the RSS, and plugin data attaches to it at once — a bingo
 on `episode/<slug>` set up while the episode is still being recorded. The host derives a **phase** on read:
@@ -1095,8 +1158,30 @@ is not optional. It never fires for an episode that arrives already released wit
 nor when a planned episode becomes `upcoming`. There is no frontend event — the shell reassigns `ctx` when
 the phase changes, so render from `ctx.episode.phase`.
 
-Test kit: `FakeFeedAccess.withPhase(slug, phase)` and `FakePluginContext.fireEpisodeReleased(slug)` (it
-catches and logs like the host); in TypeScript `makeMockEpisode('upcoming', at)` for `ctx.episode` and
+**The other direction — `ctx.onEpisodePhaseChanged(...)` (since 0.19.0).** A podcaster who moves an announced
+episode's `announceAt` into the future makes it `planned` again: hidden from visitors at once, while whatever
+your backend *published* on its schedule — an index, a count, a teaser — keeps naming it until the next tick.
+Being late to show an episode is harmless; being late to hide one is a leak. So the host reports every *write*
+that changes a phase:
+
+```java
+ctx.onEpisodePhaseChanged((slug, phase) -> {
+    if (phase == null || phase == EpisodePhase.PLANNED || phase == EpisodePhase.WITHDRAWN) {
+        republishIndex();                                     // phase null: the episode was cancelled
+    }
+});
+```
+
+It fires for announcing, an `announceAt` edit either way, a release (after the `onEpisodeReleased`
+listeners), a withdrawal, a withdrawn episode returning, and a cancellation — with phase `null`, since the
+episode no longer exists. The clock turning `planned` into `upcoming` writes nothing and fires nothing.
+Delivery is the release hook's: after commit, best effort, so keep reconciling on your schedule too. Anything
+you compute per request (sitemap, OpenGraph, `hasRoute`, search) needs none of this — it already asks
+`display(slug).phase()`.
+
+Test kit: `FakeFeedAccess.withPhase(slug, phase)`, `FakePluginContext.fireEpisodeReleased(slug)` (it calls the
+release listeners, then the phase listeners with `RELEASED`) and `fireEpisodePhaseChanged(slug, phase)` — both
+catch and log like the host; in TypeScript `makeMockEpisode('upcoming', at)` for `ctx.episode` and
 `makeMockFeeds().withPhase(slug, phase)`.
 
 ## Surviving a new `ctx` — `MosaicastHandle` (since 0.15.0)

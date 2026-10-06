@@ -45,7 +45,7 @@ import java.util.Optional;
  * }
  * }</pre>
  *
- * <p>Each entry is an exact key or a prefix ending in {@code *}, matching {@link #BACKEND_OWNED_PATTERN}.
+ * <p>Each entry is an exact key or a prefix ending in {@code *}, matching {@link #KEY_SELECTOR_PATTERN}.
  * A client {@code PUT} or {@code DELETE} to a matching key is refused (HTTP 403, distinct from the
  * role-floor refusal); this store — the backend's — is unaffected, which is the point. Reads are
  * untouched and still governed by {@code readableBy}.
@@ -56,6 +56,41 @@ import java.util.Optional;
  * a schedule</strong> — otherwise a forged value survives until the next tick. And the declaration is
  * ignored for {@link ScopeType#USER} scopes, where the backend cannot write at all; a partition stays
  * writable by its owner even under a bare {@code "*"}.
+ *
+ * <p><strong>Per-key floors</strong> (since 0.19.0). {@code readableBy} / {@code writableBy} cover every key,
+ * and {@code backendOwned} can only narrow a write to "backend only". When some keys need a stricter floor
+ * than the rest — private bookkeeping beside public numbers, an admin-only setting — declare it:
+ *
+ * <pre>{@code
+ * "data": {
+ *   "readableBy": "anonymous", "writableBy": "podcaster",
+ *   "backendOwned": ["stats", "import:*", "staged:*"],
+ *   "keyFloors": [
+ *     { "keys": ["import:*", "staged:*"], "readableBy": "podcaster" },
+ *     { "keys": ["bundles"], "writableBy": "admin" }
+ *   ]
+ * }
+ * }</pre>
+ *
+ * <p>Each {@code keys} entry uses the {@link #KEY_SELECTOR_PATTERN} grammar. What the host enforces, on its
+ * HTTP surface only:
+ * <ul>
+ *   <li>A key floor can only <strong>raise</strong> the plugin's floor, never lower it; a manifest that tries
+ *       is rejected at load, as is an entry with no {@code keys} or with neither floor.</li>
+ *   <li>When several entries match a key, the <strong>strictest</strong> floor wins, per direction. A key
+ *       floor and {@code backendOwned} combine: a backend-owned key stays unwritable by clients whatever its
+ *       write floor says.</li>
+ *   <li>A listing leaves out the keys below the reader's floor rather than failing the page; a batch read
+ *       leaves such a key absent, exactly like a miss. A single {@code GET}, {@code PUT} or {@code DELETE} of
+ *       such a key is a 403 with its own problem type, worded apart from the plugin-floor and
+ *       {@code backendOwned} refusals.</li>
+ *   <li>Ignored for {@link ScopeType#USER} scopes, as both other rules are.</li>
+ * </ul>
+ *
+ * <p><strong>This store is unaffected</strong>, as with {@code backendOwned}: a key floor binds HTTP clients,
+ * and your backend reads and writes every key it owns. On a host older than 0.19.0 the declaration would be
+ * ignored and every key served at the plugin floor — which is why it shipped in a {@code platformApi} minor,
+ * so a plugin that declares one only ever loads on a host that enforces it.
  *
  * <p><strong>This is the plugin's sole persistence path</strong> (unless the manifest declares a
  * {@link SchemaStore schema}), and it is shared with the plugin's frontend: the host exposes a fixed,
@@ -90,7 +125,8 @@ public interface DocStore {
     String KEY_PATTERN = "^[A-Za-z0-9._:-]{1,200}$";
 
     /**
-     * The grammar of one {@code data.backendOwned} entry in the manifest: {@value}.
+     * The grammar of one key selector in the manifest's {@code data} block — a {@code backendOwned} entry,
+     * or one of a {@code keyFloors[].keys} entry: {@value}.
      *
      * <p>An exact key, a {@link #KEY_PATTERN}-legal prefix followed by a single trailing {@code *}, or the
      * bare {@code *} meaning every key. Nothing else: no {@code *} in the middle, no empty entry, and the
@@ -101,14 +137,26 @@ public interface DocStore {
      * match. The host rejects a malformed entry when the plugin loads; the test kit rejects it when you
      * declare it, so a typo in a security declaration fails in your tests.
      *
-     * <p>A bare {@code *} is deliberately legal here, unlike in {@code consent.storage[]}: it means "the
-     * whole doc store is authored by my backend, clients read only", which is a coherent thing for a
-     * plugin whose data is entirely computed. Note what it does <em>not</em> cover — a
-     * {@link ScopeType#USER} partition stays writable by its owner, since the backend cannot write one.
+     * <p>A bare {@code *} is deliberately legal here, unlike in {@code consent.storage[]}: under
+     * {@code backendOwned} it means "the whole doc store is authored by my backend, clients read only", which
+     * is a coherent thing for a plugin whose data is entirely computed. Note what it does <em>not</em> cover —
+     * a {@link ScopeType#USER} partition stays writable by its owner, since the backend cannot write one, and
+     * no key floor reaches a {@code USER} partition either.
+     *
+     * @since 0.19.0
+     */
+    String KEY_SELECTOR_PATTERN = "^(\\*|[A-Za-z0-9._:-]{1,200}\\*?)$";
+
+    /**
+     * The grammar of one {@code data.backendOwned} entry in the manifest — the same as
+     * {@link #KEY_SELECTOR_PATTERN}, under the name it shipped with.
+     *
+     * <p>Kept as an alias since {@code data.keyFloors} (0.19.0) uses the same grammar; prefer
+     * {@link #KEY_SELECTOR_PATTERN} in new code. Both always hold the same value.
      *
      * @since 0.6.0
      */
-    String BACKEND_OWNED_PATTERN = "^(\\*|[A-Za-z0-9._:-]{1,200}\\*?)$";
+    String BACKEND_OWNED_PATTERN = KEY_SELECTOR_PATTERN;
 
     /**
      * Reads a value and deserializes it to the requested type.

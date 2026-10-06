@@ -18,7 +18,7 @@ import {
   makeMockTranslation,
   makeMockUsers,
 } from './testing.js';
-import { isPluginApiError } from './index.js';
+import { PROBLEM_TYPES, isPluginApiError, type PluginDataDeclaration } from './index.js';
 
 describe('makeMockCtx', () => {
   it('produces a full context with sensible defaults', () => {
@@ -461,12 +461,24 @@ describe('makeMockFeeds', () => {
     expect('gated' in many).toBe(false);
   });
 
-  it('clamps an oversized batch instead of rejecting it', async () => {
-    const feeds = makeMockFeeds();
-    const slugs = Array.from({ length: 250 }, (_, i) => `ep-${i}`);
+  it('splits an oversized batch and merges the answers instead of clamping it', async () => {
+    const slugs = Array.from({ length: 450 }, (_, i) => `ep-${i}`);
+    const feeds = makeMockFeeds({ 'ep-0': kraken, 'ep-449': kraken });
 
-    await expect(feeds.displayMany(slugs)).resolves.toEqual({});
-    expect(feeds.requested).toHaveLength(200); // DISPLAY_BATCH_LIMIT — clamped, not an error
+    const many = await feeds.displayMany(slugs);
+
+    // Past the 200th slug is answered too — the bug a long-running show hit before 0.19.0 (#97).
+    expect(Object.keys(many)).toEqual(['ep-0', 'ep-449']);
+    expect(feeds.requested).toHaveLength(450);
+    expect(feeds.batches.map((b) => b.length)).toEqual([200, 200, 50]); // DISPLAY_BATCH_LIMIT per request
+  });
+
+  it('records one request per display and none for an empty batch', async () => {
+    const feeds = makeMockFeeds({ kraken });
+    await feeds.display('kraken');
+    await feeds.displayMany([]);
+
+    expect(feeds.batches).toEqual([['kraken']]);
   });
 
   it('is wired into makeMockCtx by default, empty', async () => {
@@ -810,6 +822,103 @@ describe('makeMockDocs', () => {
     await docs.remove('self', 'marks');
     await expect(docs.remove('self', 'marks')).resolves.toBeUndefined();
     expect(docs.stored['data/user/me/marks']).toBeUndefined();
+  });
+});
+
+describe('makeMockDocs with access (0.19.0)', () => {
+  // The stats plugin's case: public numbers beside private import bookkeeping, and admin-only bundles.
+  const data: PluginDataDeclaration = {
+    readableBy: 'anonymous',
+    writableBy: 'podcaster',
+    backendOwned: ['stats', 'import:*'],
+    keyFloors: [
+      { keys: ['import:*', 'staged:*'], readableBy: 'podcaster' },
+      { keys: ['bundles'], writableBy: 'admin' },
+    ],
+  };
+  const seed = {
+    'data/site/main/stats': { episodes: 42 },
+    'data/site/main/import:1': { file: 'ep-7.zip', slug: 'quiet-planned-episode' },
+    'data/site/main/bundles': ['default'],
+    'data/episode/kraken/import:1': { file: 'k.zip' },
+  };
+
+  it('leaves keys below the viewer\'s floor out of a listing, counts included', async () => {
+    const fan = makeMockDocs(seed, { data, viewer: 'fan' });
+    const podcaster = makeMockDocs(seed, { data, viewer: 'podcaster' });
+
+    const page = await fan.list('site');
+    expect(page.items.map((i) => i.key)).toEqual(['bundles', 'stats']);
+    expect(page.totalElements).toBe(2);
+    expect((await podcaster.list('site')).items.map((i) => i.key)).toEqual(['bundles', 'import:1', 'stats']);
+  });
+
+  it('leaves such a key absent from a batch, like a miss', async () => {
+    const fan = makeMockDocs(seed, { data, viewer: 'anonymous' });
+
+    expect(await fan.getMany('site', ['main'], ['stats', 'import:1'])).toEqual({ main: { stats: { episodes: 42 } } });
+  });
+
+  it('refuses a single read of it with the key-floor problem type', async () => {
+    const fan = makeMockDocs(seed, { data, viewer: 'fan' });
+
+    const refused = await fan.get('site', 'import:1').catch((e: unknown) => e);
+    expect(isPluginApiError(refused)).toBe(true);
+    expect(refused).toMatchObject({ status: 403, problem: { type: PROBLEM_TYPES.keyFloor } });
+    expect(await fan.get('site', 'stats')).toEqual({ episodes: 42 });
+  });
+
+  it('words the three 403s apart on a write', async () => {
+    const fan = makeMockDocs(seed, { data, viewer: 'fan' });
+    const podcaster = makeMockDocs(seed, { data, viewer: 'podcaster' });
+    const admin = makeMockDocs(seed, { data, viewer: 'admin' });
+
+    await expect(fan.put('site', 'note', 1)).rejects.toMatchObject({ problem: { type: PROBLEM_TYPES.forbidden } });
+    await expect(podcaster.put('site', 'stats', 1)).rejects.toMatchObject({
+      problem: { type: PROBLEM_TYPES.backendOwnedKey },
+    });
+    await expect(podcaster.remove('site', 'bundles')).rejects.toMatchObject({
+      problem: { type: PROBLEM_TYPES.keyFloor },
+    });
+    await admin.put('site', 'bundles', ['default', 'season-2']);
+    expect(admin.stored['data/site/main/bundles']).toEqual(['default', 'season-2']);
+  });
+
+  it('applies the plugin read floor to the whole call', async () => {
+    const strict = makeMockDocs(seed, { data: { readableBy: 'fan', writableBy: 'podcaster' }, viewer: 'anonymous' });
+
+    await expect(strict.list('site')).rejects.toMatchObject({ status: 403, problem: { type: PROBLEM_TYPES.forbidden } });
+    await expect(strict.getMany('episode', ['kraken'], ['import:1'])).rejects.toMatchObject({ status: 403 });
+    expect(await strict.getMany('episode', [], ['import:1'])).toEqual({});
+  });
+
+  it('never binds the caller\'s own partition, and has none for an anonymous caller', async () => {
+    const all: PluginDataDeclaration = { ...data, keyFloors: [{ keys: ['*'], readableBy: 'admin', writableBy: 'admin' }] };
+    const fan = makeMockDocs({}, { data: all, viewer: 'fan' });
+    const anonymous = makeMockDocs({}, { data: all, viewer: 'anonymous' });
+
+    await fan.put('self', 'mark:kraken:b3', true);
+    expect(await fan.get('self', 'mark:kraken:b3')).toBe(true);
+    await expect(anonymous.get('self', 'marks')).rejects.toMatchObject({
+      status: 401,
+      problem: { type: PROBLEM_TYPES.unauthorized },
+    });
+  });
+
+  it('refuses a declaration the host rejects at load', () => {
+    const bad = (d: PluginDataDeclaration) => () => makeMockDocs({}, { data: d, viewer: 'fan' });
+
+    expect(bad({ ...data, keyFloors: [{ keys: ['import:*:x'], readableBy: 'admin' }] })).toThrow(/does not match/);
+    expect(bad({ ...data, keyFloors: [{ keys: [], readableBy: 'admin' }] })).toThrow(/names no keys/);
+    expect(bad({ ...data, keyFloors: [{ keys: ['x'] }] })).toThrow(/raises neither/);
+    expect(bad({ readableBy: 'fan', writableBy: 'podcaster', keyFloors: [{ keys: ['x'], readableBy: 'anonymous' }] }))
+      .toThrow(/lowers the plugin's read floor/);
+    expect(bad({ ...data, backendOwned: ['a*b'] })).toThrow(/does not match/);
+  });
+
+  it('enforces nothing without an access argument, as before', async () => {
+    const open = makeMockDocs(seed);
+    expect((await open.list('site')).items).toHaveLength(3);
   });
 });
 

@@ -18,7 +18,10 @@ public enum ScopeType {
     /** One RSS/source feed. */
     FEED,
 
-    /** All episodes of a feed with a given {@code itunes:season} (§4.4). */
+    /**
+     * All episodes of a feed with a given season number — the feed's {@code itunes:season} unless a podcaster
+     * set it by hand (§4.4).
+     */
     SEASON,
 
     /** A single episode, identified by its {@code EpisodeRef} ID. */
