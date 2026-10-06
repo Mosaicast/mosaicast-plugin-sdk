@@ -7,6 +7,18 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Documentation only — no contract change, no version bump.
+
+### Changed
+
+- **`docs/ARCHITECTURE.md`** synced from mosaicast-core c60421c (core 0.7.8 / 0.8.0): the 0.19.0 contract in
+  §4.3, §7.2, §7.4, §7.5 and §7.6, and the new §12.8.1 on the GDPR data export.
+- **`onEpisodePhaseChanged` docs** match what core ships: phase `null` means the episode no longer exists — a
+  cancelled plan, *or* the duplicate a manual match or a confirmed suggestion removed. Deleting a whole feed
+  fires nothing per episode.
+
 ## [0.19.0] — 2026-10-06
 
 Per-key floors in the doc store, a read floor for the schema surface, a hook for an episode going quiet again,

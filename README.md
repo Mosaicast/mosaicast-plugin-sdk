@@ -1167,14 +1167,15 @@ that changes a phase:
 ```java
 ctx.onEpisodePhaseChanged((slug, phase) -> {
     if (phase == null || phase == EpisodePhase.PLANNED || phase == EpisodePhase.WITHDRAWN) {
-        republishIndex();                                     // phase null: the episode was cancelled
+        republishIndex();                                     // phase null: the episode is gone
     }
 });
 ```
 
 It fires for announcing, an `announceAt` edit either way, a release (after the `onEpisodeReleased`
-listeners), a withdrawal, a withdrawn episode returning, and a cancellation — with phase `null`, since the
-episode no longer exists. The clock turning `planned` into `upcoming` writes nothing and fires nothing.
+listeners), a withdrawal, a withdrawn episode returning, and an episode that no longer exists — phase `null`:
+a cancelled plan, or the duplicate a manual match or confirmed suggestion removed. Deleting a whole feed fires
+nothing per episode. The clock turning `planned` into `upcoming` writes nothing and fires nothing.
 Delivery is the release hook's: after commit, best effort, so keep reconciling on your schedule too. Anything
 you compute per request (sitemap, OpenGraph, `hasRoute`, search) needs none of this — it already asks
 `display(slug).phase()`.

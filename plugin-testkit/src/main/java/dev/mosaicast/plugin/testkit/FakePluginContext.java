@@ -453,7 +453,8 @@ public final class FakePluginContext implements PluginContext {
      * {@link #fireEpisodeReleased(String)}. Nothing calls it on its own: the host only does when a write
      * changes an episode's phase, and in a test that moment is yours to pick.
      *
-     * @param listener called with the episode's slug and new phase ({@code null} for a cancelled episode);
+     * @param listener called with the episode's slug and new phase ({@code null} for an episode that no longer
+     *                 exists);
      *                 never {@code null}
      * @throws NullPointerException if {@code listener} is {@code null}
      * @since 0.19.0
@@ -467,7 +468,7 @@ public final class FakePluginContext implements PluginContext {
      * Calls every listener registered through {@link #onEpisodePhaseChanged(BiConsumer)}, in registration
      * order, as the host does after a write changed an episode's phase — an {@code announceAt} moved into the
      * future ({@link EpisodePhase#PLANNED}), an announcement ({@link EpisodePhase#UPCOMING}), a withdrawal, or
-     * a cancellation ({@code null}).
+     * a cancellation or a removed duplicate ({@code null}).
      *
      * <p>Only the phase listeners: a release proper — a planned episode binding to its feed item — is
      * {@link #fireEpisodeReleased(String)}, which calls both kinds. Firing {@link EpisodePhase#RELEASED} here
@@ -478,7 +479,8 @@ public final class FakePluginContext implements PluginContext {
      * when the listener looks it up.
      *
      * @param slug  the episode's slug; never {@code null}
-     * @param phase its new phase, or {@code null} for a cancelled episode that no longer exists
+     * @param phase its new phase, or {@code null} for an episode that no longer exists — cancelled, or
+     *              removed as a matched duplicate
      * @throws NullPointerException if {@code slug} is {@code null}
      * @since 0.19.0
      */

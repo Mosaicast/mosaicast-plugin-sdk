@@ -20,8 +20,8 @@
   `"storage": { "schema": { … }, "schemaReadableBy": "podcaster" }`.
 - **If your backend publishes anything about episodes on a schedule** (an index, a count, a teaser), register
   `ctx.onEpisodePhaseChanged(...)` and republish when an episode goes back to `PLANNED`, is withdrawn, or is
-  cancelled (phase `null`) — otherwise it stays named to anonymous readers until your next tick. Keep the
-  scheduled reconciliation; the event is best effort.
+  removed (phase `null`: a cancelled plan, or a duplicate a match removed) — otherwise it stays named to
+  anonymous readers until your next tick. Keep the scheduled reconciliation; the event is best effort.
 - **If you implement `UserDataHandler.exportUser`**, nothing changes: the host exports your map as `data.json`.
   Implement `exportFiles` instead when your data has a format of its own, and test it with
   `UserDataHandlerHarness.exportFiles(userId)`.
