@@ -59,11 +59,15 @@ import java.time.Instant;
  * @param feed         the public slug of the feed the episode belongs to — the id of its
  *                     {@link Scope#feed(String) feed scope}; {@code null} only on a snapshot built without
  *                     it (a host older than 0.17.0, or a test fixture on the shorter constructor) (since 0.17.0)
- * @param season       the season number ({@code itunes:season}, as the host recorded it on the episode);
- *                     {@code null} when the episode has none (since 0.17.0)
- * @param episodeNo    the episode number within its season ({@code itunes:episode}); {@code null} when the
- *                     episode has none — a numbered season may still hold an unnumbered prologue
- *                     (since 0.17.0)
+ * @param season       the season number <em>as the site places the episode</em>: the feed's
+ *                     {@code itunes:season} unless a podcaster set it by hand, in which case the hand-set value
+ *                     wins and survives feed polls; may be {@code 0}; {@code null} when the episode has none.
+ *                     Identity — never re-derive it from the feed or a title (since 0.17.0)
+ * @param episodeNo    the episode number within its season, <em>as the site places it</em>: the feed's
+ *                     {@code itunes:episode} unless a podcaster set it by hand — a prologue the show calls
+ *                     episode {@code 0}, which Apple's {@code itunes:episode} cannot carry, is the case that
+ *                     exists for; may be {@code 0}; {@code null} when the episode has none — a numbered season
+ *                     may still hold an unnumbered prologue (since 0.17.0)
  * @param phase        where the episode stands in its release, derived by the host on read; {@code null}
  *                     only on a snapshot built without it (a test fixture on a shorter constructor — a host
  *                     that loads a 0.18 plugin always sends it) (since 0.18.0)

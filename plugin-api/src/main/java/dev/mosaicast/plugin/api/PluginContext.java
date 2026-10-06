@@ -5,6 +5,7 @@ package dev.mosaicast.plugin.api;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
@@ -87,11 +88,17 @@ public interface PluginContext {
      * <p><strong>The floors say who, not which key.</strong> Authorization on this surface is per plugin,
      * not per document, so <em>every</em> caller above {@code writableBy} can overwrite or delete
      * <em>any</em> shared-scope key — a value your backend computed included. {@code backendOwned} is the
-     * exception: an exact key or a {@code *}-terminated prefix ({@link DocStore#BACKEND_OWNED_PATTERN})
+     * exception: an exact key or a {@code *}-terminated prefix ({@link DocStore#KEY_SELECTOR_PATTERN})
      * whose documents this store still writes freely while a client {@code PUT}/{@code DELETE} is refused
      * with a 403 the host words differently from the role-floor one, so an author can tell which rule
      * turned them down. Reads are untouched. See {@link DocStore} for what it does not do — it neither
      * removes a value forged before the declaration nor applies to {@code USER} partitions.
+     *
+     * <p>{@code keyFloors} (since 0.19.0) raises the read or write floor for the keys it names — private
+     * bookkeeping beside public numbers, an admin-only setting — with the same selector grammar; a listing
+     * omits a key the reader may not see, and a single read or write of it is a 403 of its own type. Like
+     * {@code backendOwned} it binds HTTP clients only: this store reads and writes every key. See
+     * {@link DocStore} for the rules.
      *
      * <p><strong>Neither floor applies to the {@code USER} scope.</strong> {@code readableBy} does not, in
      * either direction: no floor makes somebody else's partition readable, and none stands between a caller
@@ -406,11 +413,66 @@ public interface PluginContext {
      * test double of your own — keeps compiling. The host overrides it. There is no frontend event: the shell
      * hands a component a new {@code ctx} when the phase changes.
      *
+     * <p>A release is also a phase change, so {@link #onEpisodePhaseChanged(BiConsumer)} listeners hear it too,
+     * after this one's.
+     *
      * @param listener called with the released episode's slug; never {@code null}
      * @throws NullPointerException if {@code listener} is {@code null}
      * @since 0.18.0
      */
     default void onEpisodeReleased(Consumer<String> listener) {
+        Objects.requireNonNull(listener, "listener");
+    }
+
+    /**
+     * Registers a listener the host calls when a <strong>write</strong> changes an episode's
+     * {@link EpisodePhase} (ARCHITECTURE §4.3).
+     *
+     * <p>{@link #onEpisodeReleased(Consumer)} covers one direction. This covers the one that leaks: an episode
+     * becoming <em>less</em> visible. A podcaster moves an announced episode's {@code announceAt} into the
+     * future and it is {@link EpisodePhase#PLANNED} again — hidden from everyone below podcaster at once, while
+     * whatever your backend <em>published</em> on its schedule (a site-scope index, a count, a teaser) keeps
+     * naming it to anonymous readers until the next tick. Anything you compute per request (a sitemap,
+     * OpenGraph, {@link PageRouteProvider#hasRoute(String)}, search) is already right, because it asks
+     * {@link FeedAccess#display(String)} each time; this hook is for what you stored.
+     *
+     * <pre>{@code
+     * ctx.onEpisodePhaseChanged((slug, phase) -> {
+     *     if (phase == null || phase == EpisodePhase.PLANNED || phase == EpisodePhase.WITHDRAWN) {
+     *         republishIndex();          // drop it from what anonymous readers see, now
+     *     }
+     * });
+     * }</pre>
+     *
+     * <p><strong>When it fires.</strong> The host compares the phase derived just before a write with the one
+     * just after, at the same instant, and calls this only when they differ: announcing, an
+     * {@code announceAt} edit in either direction, a release, a withdrawal, a withdrawn episode coming back,
+     * and a cancellation. The listener receives the slug and the new phase — or {@code null} when the
+     * episode was <strong>cancelled</strong> and no longer exists; its episode-scoped documents are gone with
+     * it, but anything your other scopes say about it is yours to drop.
+     *
+     * <p><strong>The clock never fires it.</strong> A planned episode becoming {@link EpisodePhase#UPCOMING}
+     * because its announcement instant passed involves no write, so there is no event. That direction only
+     * makes an episode <em>more</em> visible, and being late there is harmless; reconcile it on your schedule.
+     *
+     * <p><strong>Delivery is the release hook's:</strong> once per change, after the transaction commits, on a
+     * host thread; an exception the listener throws is caught and logged against this plugin. Best effort,
+     * not durable, not replayed — keep reconciling by phase on a schedule, and keep the listener idempotent.
+     * On a release the host calls {@link #onEpisodeReleased(Consumer)} listeners first, then this one with
+     * {@link EpisodePhase#RELEASED}.
+     *
+     * <p>The phase handed over is the one right after the write. Read
+     * {@link FeedAccess#display(String)} again if you act later: the clock may have moved it since.
+     *
+     * <p>A {@code default} method that does nothing, so an existing {@code PluginContext} implementation keeps
+     * compiling. The host overrides it.
+     *
+     * @param listener called with the episode's slug and its new phase, which is {@code null} for a cancelled
+     *                 episode; never {@code null} itself
+     * @throws NullPointerException if {@code listener} is {@code null}
+     * @since 0.19.0
+     */
+    default void onEpisodePhaseChanged(BiConsumer<String, EpisodePhase> listener) {
         Objects.requireNonNull(listener, "listener");
     }
 }

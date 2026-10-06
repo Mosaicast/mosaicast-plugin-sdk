@@ -10,6 +10,8 @@ import {
   defineManifest,
   defineMosaicastElement,
   DOC_KEY_PATTERN,
+  DOC_KEY_SELECTOR_PATTERN,
+  PROBLEM_TYPES,
   FRONTEND_ENTRY_PATTERN,
   iconCss,
   iconMask,
@@ -26,6 +28,8 @@ import {
   type PluginBlobsDeclaration,
   type PluginContext,
   type PluginDataDeclaration,
+  type PluginKeyFloorDeclaration,
+  type PluginManifest,
   type PluginRoute,
   type SchemaPage,
   type SchemaPredicate,
@@ -36,7 +40,7 @@ import { DEFAULT_THEME, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.18.0');
+    expect(PLATFORM_API_VERSION).toBe('0.19.0');
   });
 });
 
@@ -55,6 +59,42 @@ describe('the data declaration', () => {
     // @ts-expect-error a write floor of `anonymous` is rejected by the host at load.
     const bad: PluginDataDeclaration = { writableBy: 'anonymous' };
     expect(bad.writableBy).toBe('anonymous');
+  });
+
+  it('types per-key floors beside backendOwned (0.19.0)', () => {
+    const data: PluginDataDeclaration = {
+      readableBy: 'anonymous',
+      writableBy: 'podcaster',
+      backendOwned: ['stats', 'import:*'],
+      keyFloors: [
+        { keys: ['import:*', 'staged:*'], readableBy: 'podcaster' },
+        { keys: ['bundles'], writableBy: 'admin' },
+      ],
+    };
+    expect(data.keyFloors?.flatMap((f) => f.keys).every((k) => DOC_KEY_SELECTOR_PATTERN.test(k))).toBe(true);
+
+    // @ts-expect-error a key's write floor can no more be `anonymous` than the plugin's.
+    const bad: PluginKeyFloorDeclaration = { keys: ['x'], writableBy: 'anonymous' };
+    expect(bad.keys).toEqual(['x']);
+  });
+
+  it('names the three doc-store 403s by stable problem type', () => {
+    expect(PROBLEM_TYPES.forbidden).toBe('https://mosaicast.dev/problems/forbidden');
+    expect(PROBLEM_TYPES.backendOwnedKey).toBe('https://mosaicast.dev/problems/backend-owned-key');
+    expect(PROBLEM_TYPES.keyFloor).toBe('https://mosaicast.dev/problems/key-floor');
+    expect(new Set(Object.values(PROBLEM_TYPES)).size).toBe(Object.keys(PROBLEM_TYPES).length);
+    expect(Object.isFrozen(PROBLEM_TYPES)).toBe(true);
+  });
+});
+
+describe('DOC_KEY_SELECTOR_PATTERN', () => {
+  it('accepts an exact key, a prefix and the bare star — the backendOwned grammar', () => {
+    for (const ok of ['stats', 'agg:*', '*', 'agg:']) {
+      expect(DOC_KEY_SELECTOR_PATTERN.test(ok), ok).toBe(true);
+    }
+    for (const bad of ['', 'agg:*:total', '**', 'stats/*', '*x', `${'x'.repeat(201)}*`]) {
+      expect(DOC_KEY_SELECTOR_PATTERN.test(bad), bad).toBe(false);
+    }
   });
 });
 
@@ -99,6 +139,14 @@ describe('the schema client', () => {
     // @ts-expect-error the operators are a closed vocabulary mirroring the Java `Criteria.Op`.
     const bad: SchemaPredicate = { field: 'title', op: 'contains', value: 'x' };
     expect(bad.op).toBe('contains');
+  });
+
+  it('takes an optional read floor of its own on the storage block (0.19.0)', () => {
+    const manifest: PluginManifest['storage'] = {
+      schema: { vote: { userId: 'string:indexed', choice: 'string' } },
+      schemaReadableBy: 'podcaster',
+    };
+    expect(typeof manifest === 'object' && manifest.schemaReadableBy).toBe('podcaster');
   });
 
   it('pages in the same envelope as the doc surface', async () => {

@@ -5,6 +5,7 @@ package dev.mosaicast.plugin.testkit;
 
 import dev.mosaicast.plugin.api.CrossUserStore;
 import dev.mosaicast.plugin.api.DocStore;
+import dev.mosaicast.plugin.api.EpisodePhase;
 import dev.mosaicast.plugin.api.FeedAccess;
 import dev.mosaicast.plugin.api.Locales;
 import dev.mosaicast.plugin.api.Notifier;
@@ -19,6 +20,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -29,8 +31,9 @@ import java.util.function.Supplier;
  * <p>Typical flow: build the fake context, call {@code plugin.register(ctx)}, then assert against the
  * doc store. {@code onSchedule} runs the task <strong>synchronously</strong> and immediately, so
  * scheduled work is exercised deterministically within the test; {@link #runScheduled()} ticks it again
- * and {@link #scheduledPeriods()} re-reads what period each task would run at now. Release listeners are
- * kept, not called, until a test fires one with {@link #fireEpisodeReleased(String)}.
+ * and {@link #scheduledPeriods()} re-reads what period each task would run at now. Release and phase
+ * listeners are kept, not called, until a test fires one with {@link #fireEpisodeReleased(String)} or
+ * {@link #fireEpisodePhaseChanged(String, EpisodePhase)}.
  *
  * <p>By default {@link #schema()} returns {@code null} (no schema declared, like most plugins); pass a
  * {@link SchemaStore} to the full constructor to test a schema-declaring plugin. Not thread-safe.
@@ -54,6 +57,7 @@ public final class FakePluginContext implements PluginContext {
     private Translation translation;
     private final List<ScheduledTask> scheduled = new ArrayList<>();
     private final List<Consumer<String>> releaseListeners = new ArrayList<>();
+    private final List<BiConsumer<String, EpisodePhase>> phaseListeners = new ArrayList<>();
 
     /** Creates a context with an empty doc store, empty config, empty feeds, no schema and no blobs. */
     public FakePluginContext() {
@@ -424,6 +428,10 @@ public final class FakePluginContext implements PluginContext {
      * calls. And test the scheduled reconciliation too, without firing anything: the event is best effort and
      * a real plugin misses it whenever it was not running.
      *
+     * <p>A release is a phase change too, so this then calls every
+     * {@link #onEpisodePhaseChanged(BiConsumer) phase listener} with {@link EpisodePhase#RELEASED} — release
+     * listeners first, as the host orders them (since 0.19.0).
+     *
      * @param slug the released episode's slug; never {@code null}
      * @throws NullPointerException if {@code slug} is {@code null}
      * @since 0.18.0
@@ -435,6 +443,67 @@ public final class FakePluginContext implements PluginContext {
                 listener.accept(slug);
             } catch (RuntimeException e) {
                 logger.error("episode-released listener failed for {}", slug, e);
+            }
+        }
+        firePhaseListeners(slug, EpisodePhase.RELEASED);
+    }
+
+    /**
+     * Keeps the listener for {@link #fireEpisodePhaseChanged(String, EpisodePhase)} and
+     * {@link #fireEpisodeReleased(String)}. Nothing calls it on its own: the host only does when a write
+     * changes an episode's phase, and in a test that moment is yours to pick.
+     *
+     * @param listener called with the episode's slug and new phase ({@code null} for a cancelled episode);
+     *                 never {@code null}
+     * @throws NullPointerException if {@code listener} is {@code null}
+     * @since 0.19.0
+     */
+    @Override
+    public void onEpisodePhaseChanged(BiConsumer<String, EpisodePhase> listener) {
+        phaseListeners.add(Objects.requireNonNull(listener, "listener"));
+    }
+
+    /**
+     * Calls every listener registered through {@link #onEpisodePhaseChanged(BiConsumer)}, in registration
+     * order, as the host does after a write changed an episode's phase — an {@code announceAt} moved into the
+     * future ({@link EpisodePhase#PLANNED}), an announcement ({@link EpisodePhase#UPCOMING}), a withdrawal, or
+     * a cancellation ({@code null}).
+     *
+     * <p>Only the phase listeners: a release proper — a planned episode binding to its feed item — is
+     * {@link #fireEpisodeReleased(String)}, which calls both kinds. Firing {@link EpisodePhase#RELEASED} here
+     * is a withdrawn episode coming back, which is not a release of a planned one.
+     *
+     * <p>Like the host, it catches what a listener throws and logs it at {@code ERROR} on {@link #logger()}.
+     * Pair it with {@link FakeFeedAccess#withPhase(String, EpisodePhase)} so the episode reads its new phase
+     * when the listener looks it up.
+     *
+     * @param slug  the episode's slug; never {@code null}
+     * @param phase its new phase, or {@code null} for a cancelled episode that no longer exists
+     * @throws NullPointerException if {@code slug} is {@code null}
+     * @since 0.19.0
+     */
+    public void fireEpisodePhaseChanged(String slug, EpisodePhase phase) {
+        Objects.requireNonNull(slug, "slug");
+        firePhaseListeners(slug, phase);
+    }
+
+    /**
+     * The number of listeners registered through {@link #onEpisodePhaseChanged(BiConsumer)} — for asserting a
+     * plugin subscribed at all.
+     *
+     * @return the count of phase listeners
+     * @since 0.19.0
+     */
+    public int episodePhaseListenerCount() {
+        return phaseListeners.size();
+    }
+
+    private void firePhaseListeners(String slug, EpisodePhase phase) {
+        for (BiConsumer<String, EpisodePhase> listener : List.copyOf(phaseListeners)) {
+            try {
+                listener.accept(slug, phase);
+            } catch (RuntimeException e) {
+                logger.error("episode-phase listener failed for {} ({})", slug, phase, e);
             }
         }
     }

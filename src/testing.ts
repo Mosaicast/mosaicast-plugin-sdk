@@ -16,6 +16,7 @@ import type {
   BlobPage,
   BlobQuota,
   ConsentApi,
+  DataAccessRole,
   DisplaySnapshot,
   DocClient,
   DocTarget,
@@ -28,6 +29,7 @@ import type {
   PluginApiClient,
   PluginApiError,
   PluginContext,
+  PluginDataDeclaration,
   PluginRoute,
   NotifyClient,
   NotifyMessage,
@@ -46,7 +48,14 @@ import type {
   UserDirectory,
   UserRef,
 } from './index.js';
-import { DISPLAY_BATCH_LIMIT, DOC_KEY_PATTERN, FEED_HTML_POLICY, declaredTypeFor } from './index.js';
+import {
+  DISPLAY_BATCH_LIMIT,
+  DOC_KEY_PATTERN,
+  DOC_KEY_SELECTOR_PATTERN,
+  FEED_HTML_POLICY,
+  PROBLEM_TYPES,
+  declaredTypeFor,
+} from './index.js';
 
 /** One recorded {@link PluginContext.log} call. */
 export interface LogRecord {
@@ -494,6 +503,13 @@ export interface MockFeedsClient extends FeedsClient {
   withPhase(slug: string, phase: EpisodePhase): MockFeedsClient;
   /** Every slug asked for, in order — batched calls contribute each slug separately. */
   readonly requested: string[];
+  /**
+   * The slugs of each request the host's client would send, in order: one entry per `display`, and one per
+   * chunk of at most {@link DISPLAY_BATCH_LIMIT} for `displayMany`. Assert the split against this.
+   *
+   * @since 0.19.0
+   */
+  readonly batches: string[][];
 }
 
 /**
@@ -522,9 +538,11 @@ export function makeMockFeeds(snapshots: Record<string, DisplaySnapshotFixture> 
     stored[slug] = completeSnapshot(snapshot);
   }
   const requested: string[] = [];
+  const batches: string[][] = [];
 
   const client: MockFeedsClient = {
     requested,
+    batches,
     withDisplay(slug, snapshot) {
       stored[slug] = completeSnapshot(snapshot);
       return client;
@@ -540,12 +558,16 @@ export function makeMockFeeds(snapshots: Record<string, DisplaySnapshotFixture> 
     },
     display: (slug) => {
       requested.push(slug);
+      batches.push([slug]);
       return Promise.resolve(stored[slug] ?? null);
     },
     displayMany: (slugs) => {
-      // Clamped, not rejected — the host's behaviour past the batch ceiling.
-      const asked = slugs.slice(0, DISPLAY_BATCH_LIMIT);
+      // Split and merged, never clamped — the host's client since 0.19.0 (core#269).
+      const asked = [...new Set(slugs)];
       requested.push(...asked);
+      for (let i = 0; i < asked.length; i += DISPLAY_BATCH_LIMIT) {
+        batches.push(asked.slice(i, i + DISPLAY_BATCH_LIMIT));
+      }
       const result: Record<string, DisplaySnapshot> = {};
       for (const slug of asked) {
         const snapshot = stored[slug];
@@ -1062,6 +1084,19 @@ export interface DocCallRecord {
   keys: string[];
 }
 
+/**
+ * Who is looking, and what the manifest declares — the second argument of {@link makeMockDocs}, which makes
+ * the double enforce the doc store's access rules the way the host does.
+ *
+ * @since 0.19.0
+ */
+export interface MockDocAccess {
+  /** The manifest's `data` block: its floors, `backendOwned` and `keyFloors`. */
+  data: PluginDataDeclaration;
+  /** The caller's role — usually `ctx.user?.role ?? 'anonymous'`. */
+  viewer: DataAccessRole;
+}
+
 /** A {@link DocClient} storing in memory, keyed by resolved partition path. @since 0.9.0 */
 export interface MockDocClient extends DocClient {
   /** What is currently stored, keyed `"<partition>/<key>"` — e.g. `"data/user/me/marks"`. */
@@ -1103,20 +1138,49 @@ function requireDocKey(key: string): string {
  * expect(docs.stored['data/user/me/marks']).toEqual({ b3: true, b4: true });
  * ```
  *
+ * ## Access, when the test is about it (since 0.19.0)
+ *
+ * Without a second argument the double lets every call through, as it always has. Pass the manifest's
+ * `data` block and the viewer's role and it answers the way the host does — so "a fan doesn't see the
+ * import bookkeeping" is a component test:
+ *
+ * ```ts
+ * const data = { readableBy: 'anonymous', writableBy: 'podcaster',
+ *                keyFloors: [{ keys: ['import:*'], readableBy: 'podcaster' }] } as const;
+ * const docs = makeMockDocs({ 'data/site/main/import:1': job }, { data, viewer: 'fan' });
+ *
+ * expect((await docs.list('site')).items).toEqual([]);                       // left out of the page
+ * await expect(docs.get('site', 'import:1')).rejects.toMatchObject({          // a single read is a 403
+ *   status: 403, problem: { type: PROBLEM_TYPES.keyFloor } });
+ * ```
+ *
+ * What it enforces, on every partition but `'self'`: the read floor (`readableBy`, else `writableBy`) and the
+ * write floor as 403 {@link PROBLEM_TYPES}`.forbidden`; a write to a `backendOwned` key as 403
+ * `backendOwnedKey`; and `keyFloors` — left out of `list`, absent from `getMany`, 403 `keyFloor` on `get`,
+ * `put` and `remove`. `'self'` is the caller's own whatever the floors say, and a 401 `unauthorized` for an
+ * anonymous viewer. Seed documents through `initial` — they are not writes and pass no check. A declaration
+ * the host would reject at load (a malformed selector, a key floor below the plugin's, an anonymous write
+ * floor) throws here.
+ *
  * @param initial documents to start with, keyed `"<partition>/<key>"`
+ * @param access  the manifest's `data` block and the viewer's role, to enforce access as the host does;
+ *                omit to allow everything
  * @returns a doc client double with an inspectable `stored` map
  * @since 0.9.0
  */
-export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClient {
+export function makeMockDocs(initial: Record<string, unknown> = {}, access?: MockDocAccess): MockDocClient {
   const stored: Record<string, unknown> = { ...initial };
   const calls: DocCallRecord[] = [];
+  const guard = access ? docGuard(access) : undefined;
 
   return {
     stored,
     calls,
     get: async (target, key) => {
       calls.push({ method: 'get', partitions: [docPath(target)], keys: [key] });
-      return (stored[`${docPath(target)}/${requireDocKey(key)}`] ?? null) as never;
+      requireDocKey(key);
+      guard?.read(target, key, 'get');
+      return (stored[`${docPath(target)}/${key}`] ?? null) as never;
     },
     getMany: async (type, ids, keys) => {
       keys.forEach(requireDocKey);
@@ -1125,9 +1189,12 @@ export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClie
       if (keys.length === 0) {
         return answer;
       }
+      // The plugin floor rejects the whole call; a key floor only hides that key.
+      if (ids.length > 0) guard?.read({ type, id: ids[0] }, undefined, 'getMany');
       for (const id of ids) {
         const found: Record<string, never> = {};
         for (const key of keys) {
+          if (guard?.hidden({ type, id }, key)) continue;
           const value = stored[`${docPath({ type, id })}/${key}`];
           // Absent, not null: a miss is simply not a key in the answer, as the host sends it.
           if (value !== undefined) found[key] = value as never;
@@ -1138,15 +1205,20 @@ export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClie
     },
     put: async (target, key, value) => {
       calls.push({ method: 'put', partitions: [docPath(target)], keys: [key] });
-      stored[`${docPath(target)}/${requireDocKey(key)}`] = value;
+      requireDocKey(key);
+      guard?.write(target, key, 'put');
+      stored[`${docPath(target)}/${key}`] = value;
     },
     list: async (target, opts) => {
       calls.push({ method: 'list', partitions: [docPath(target)], keys: [] });
+      guard?.read(target, undefined, 'list');
       const prefix = `${docPath(target)}/`;
       const items = Object.entries(stored)
         .filter(([path]) => path.startsWith(prefix))
         .map(([path, value]) => ({ key: path.slice(prefix.length), value }))
         .filter((entry) => entry.key.startsWith(opts?.prefix ?? ''))
+        // Below the reader's key floor: left out of the page, not a failed page — counts included.
+        .filter((entry) => !guard?.hidden(target, entry.key))
         .sort((a, b) => a.key.localeCompare(b.key));
       const size = opts?.size ?? 50;
       const page = opts?.page ?? 0;
@@ -1161,8 +1233,90 @@ export function makeMockDocs(initial: Record<string, unknown> = {}): MockDocClie
     },
     remove: async (target, key) => {
       calls.push({ method: 'remove', partitions: [docPath(target)], keys: [key] });
+      requireDocKey(key);
+      guard?.write(target, key, 'remove');
       // Idempotent, like the host: removing what is gone resolves rather than rejecting.
-      delete stored[`${docPath(target)}/${requireDocKey(key)}`];
+      delete stored[`${docPath(target)}/${key}`];
+    },
+  };
+}
+
+/** The manifest's role scale: a floor is met by its own role and every one above it. */
+const ROLE_RANK: Record<DataAccessRole, number> = { anonymous: 0, fan: 1, podcaster: 2, admin: 3 };
+
+/** Whether a selector — exact key, `prefix*` or bare `*` — covers a key. */
+function selects(selector: string, key: string): boolean {
+  return selector.endsWith('*') ? key.startsWith(selector.slice(0, -1)) : selector === key;
+}
+
+/**
+ * The doc store's access rules, checked as the host checks them: the plugin floors, `backendOwned`, and
+ * `keyFloors`. The `user` partition is exempt from all three. Throws on a declaration the host rejects at load.
+ */
+function docGuard({ data, viewer }: MockDocAccess) {
+  const write = ROLE_RANK[data.writableBy];
+  const read = ROLE_RANK[data.readableBy ?? data.writableBy];
+  const rank = ROLE_RANK[viewer];
+  if (write === 0) throw new Error('data.writableBy may not be anonymous — the host rejects the manifest');
+  for (const selector of [...(data.backendOwned ?? []), ...(data.keyFloors ?? []).flatMap((f) => f.keys)]) {
+    if (!DOC_KEY_SELECTOR_PATTERN.test(selector)) {
+      throw new Error(`key selector ${JSON.stringify(selector)} does not match ${DOC_KEY_SELECTOR_PATTERN.source}`);
+    }
+  }
+  for (const floor of data.keyFloors ?? []) {
+    const label = JSON.stringify(floor.keys);
+    if (floor.keys.length === 0) throw new Error('a keyFloors entry names no keys — the host rejects the manifest');
+    if (!floor.readableBy && !floor.writableBy) throw new Error(`keyFloors ${label} raises neither floor`);
+    if (floor.readableBy && ROLE_RANK[floor.readableBy] < read) {
+      throw new Error(`keyFloors ${label}: readableBy '${floor.readableBy}' lowers the plugin's read floor`);
+    }
+    if (floor.writableBy && ROLE_RANK[floor.writableBy] < write) {
+      throw new Error(`keyFloors ${label}: writableBy '${floor.writableBy}' lowers the plugin's write floor`);
+    }
+  }
+
+  /** The strictest key floor matching `key` in one direction, or 0 when none raises it. */
+  const keyFloor = (key: string, direction: 'readableBy' | 'writableBy'): number =>
+    Math.max(
+      0,
+      ...(data.keyFloors ?? [])
+        .filter((f) => f[direction] && f.keys.some((sel) => selects(sel, key)))
+        .map((f) => ROLE_RANK[f[direction] as DataAccessRole]),
+    );
+
+  const refuse = (status: number, type: string, method: string, target: DocTarget, key: string | undefined) => {
+    const path = key === undefined ? docPath(target) : `${docPath(target)}/${key}`;
+    return toApiError(apiError(status, { type, detail: `${viewer} refused` }), method, path);
+  };
+
+  /** Throws the 401 for an anonymous `user` call; answers whether the call is exempt (it is `'self'`). */
+  const self = (target: DocTarget, method: string, key: string | undefined): boolean => {
+    if (target !== 'self') return false;
+    if (rank === 0) throw refuse(401, PROBLEM_TYPES.unauthorized, method, target, key);
+    return true;
+  };
+
+  return {
+    /** A read: the plugin floor always; a single key's floor when `key` is given. */
+    read(target: DocTarget, key: string | undefined, method: string): void {
+      if (self(target, method, key)) return;
+      if (rank < read) throw refuse(403, PROBLEM_TYPES.forbidden, method, target, key);
+      if (key !== undefined && rank < keyFloor(key, 'readableBy')) {
+        throw refuse(403, PROBLEM_TYPES.keyFloor, method, target, key);
+      }
+    },
+    /** A write: the plugin floor, then `backendOwned`, then the key's own floor. */
+    write(target: DocTarget, key: string, method: string): void {
+      if (self(target, method, key)) return;
+      if (rank < write) throw refuse(403, PROBLEM_TYPES.forbidden, method, target, key);
+      if ((data.backendOwned ?? []).some((sel) => selects(sel, key))) {
+        throw refuse(403, PROBLEM_TYPES.backendOwnedKey, method, target, key);
+      }
+      if (rank < keyFloor(key, 'writableBy')) throw refuse(403, PROBLEM_TYPES.keyFloor, method, target, key);
+    },
+    /** Whether a key is below the viewer's read floor — left out of a listing or a batch, not refused. */
+    hidden(target: DocTarget, key: string): boolean {
+      return target !== 'self' && rank < keyFloor(key, 'readableBy');
     },
   };
 }

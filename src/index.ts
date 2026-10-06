@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.18.0' as const;
+export const PLATFORM_API_VERSION = '0.19.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -274,6 +274,11 @@ export interface PagedDocs<T = unknown> {
  * you. Reads are unaffected. It does not apply to `user` partitions, and it does not remove a value forged
  * before it was declared — see {@link PluginDataDeclaration}.
  *
+ * **`keyFloors` raises the floor for the keys it names** (since 0.19.0) — private bookkeeping beside public
+ * numbers, an admin-only setting. A listing simply leaves out the keys below your floor, a batch read leaves
+ * them absent like a miss, and a single `GET`, `PUT` or `DELETE` of one answers **403** with a third problem
+ * type of its own. See {@link PluginDataDeclaration.keyFloors} and {@link PROBLEM_TYPES}.
+ *
  * A write is plain persistence: no plugin code runs at request time, so anything derived or validated
  * server-side must be precomputed in the backend's `register`/`onSchedule` and read back from the store.
  *
@@ -360,18 +365,23 @@ export interface ProblemDetail {
  * The status is the point. Without it a plugin cannot tell the 403 that means *the manifest's read floor
  * refused you* from the 403 that means *this key is `backendOwned`* — the contract words those two
  * differently on purpose, and an untyped rejection throws that distinction away. Nor can it tell either
- * of them from a 500, which is the failure a plugin should surface rather than swallow.
+ * of them from a 500, which is the failure a plugin should surface rather than swallow. Since 0.19.0 there is
+ * a third 403 on the doc store, a key's own floor (`keyFloors`); the problem `type` names which of the three
+ * it is ({@link PROBLEM_TYPES}).
  *
  * Test it with {@link isPluginApiError} rather than `instanceof`: the error crosses a bundle boundary
  * from the host, so it is not guaranteed to share a constructor with anything in your plugin.
  *
  * ```ts
  * try {
- *   await ctx.api.put(`data/site/main/stats`, computed);
+ *   await ctx.docs.put('site', 'bundles', edited);
  * } catch (e) {
  *   if (isPluginApiError(e) && e.status === 403) {
- *     ctx.log('warn', e.problem?.detail ?? 'refused');   // backendOwned, or the write floor
- *     return;
+ *     switch (e.problem?.type) {
+ *       case PROBLEM_TYPES.keyFloor:        return showNotice('Only an admin can change bundles.');
+ *       case PROBLEM_TYPES.backendOwnedKey: return showNotice('This value is computed by the plugin.');
+ *       default:                            return showNotice('You cannot edit this.');   // the write floor
+ *     }
  *   }
  *   throw e;                                            // a real failure — do not swallow it
  * }
@@ -402,6 +412,32 @@ export function isPluginApiError(e: unknown): e is PluginApiError {
 }
 
 /**
+ * The stable RFC 7807 `type` URIs the host puts on the doc store's refusals — compare
+ * {@link ProblemDetail.type} against these instead of matching the English `detail`.
+ *
+ * The three 403s are worded apart on purpose, because each has a different fix:
+ *
+ * - **`forbidden`** — the plugin's own floor (`data.readableBy` / `writableBy`) refused the caller.
+ * - **`backendOwnedKey`** — the key is in `data.backendOwned`: only the plugin's backend writes it.
+ * - **`keyFloor`** — the key's own floor in `data.keyFloors` is above the caller's role (since 0.19.0).
+ *
+ * `unauthorized` is the 401 of an anonymous `user`-scope request. A plain `===` comparison is enough: the host
+ * sends these strings verbatim.
+ *
+ * @since 0.19.0
+ */
+export const PROBLEM_TYPES = Object.freeze({
+  /** 401 — no session; e.g. an anonymous request for `data/user/me/…`. */
+  unauthorized: 'https://mosaicast.dev/problems/unauthorized',
+  /** 403 — the plugin's `data` floor refused the caller's role. */
+  forbidden: 'https://mosaicast.dev/problems/forbidden',
+  /** 403 — a client write to a `data.backendOwned` key. */
+  backendOwnedKey: 'https://mosaicast.dev/problems/backend-owned-key',
+  /** 403 — a single read or write of a key whose `data.keyFloors` floor is above the caller's role. */
+  keyFloor: 'https://mosaicast.dev/problems/key-floor',
+} as const);
+
+/**
  * The pattern every doc-store key must match — mirror of the Java `DocStore.KEY_PATTERN`.
  *
  * Note what is **not** in it: `/`. A key travels as the final path segment verbatim, so structure one
@@ -410,6 +446,18 @@ export function isPluginApiError(e: unknown): e is PluginApiError {
  * @since 0.9.0
  */
 export const DOC_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+
+/**
+ * The grammar of one key selector in the manifest's `data` block — a `backendOwned` entry, or one of a
+ * `keyFloors[].keys` entry. Mirror of the Java `DocStore.KEY_SELECTOR_PATTERN`.
+ *
+ * An exact key, a {@link DOC_KEY_PATTERN}-legal prefix followed by one trailing `*`, or the bare `*` for
+ * every key. No `*` in the middle, no empty entry. The host rejects a manifest whose selector does not match,
+ * at load.
+ *
+ * @since 0.19.0
+ */
+export const DOC_KEY_SELECTOR_PATTERN = /^(\*|[A-Za-z0-9._:-]{1,200}\*?)$/;
 
 /**
  * The most scope ids, and the most keys, one {@link DocClient.getMany} request carries — the host's
@@ -460,8 +508,8 @@ export type DocTarget = Scope | 'self' | 'site';
  *
  * A key that fails {@link DOC_KEY_PATTERN} **throws at the call site**, with the pattern in the message,
  * instead of costing a 400 round-trip you then have to read the body of. Everything else is the host's
- * to enforce and is unchanged — the `readableBy`/`writableBy` floors, `backendOwned`, the 400 on an
- * unknown scope, the 401 on an anonymous `user` request. See {@link PluginApiClient} for all of it;
+ * to enforce and is unchanged — the `readableBy`/`writableBy` floors, `backendOwned`, `keyFloors`, the 400 on
+ * an unknown scope, the 401 on an anonymous `user` request. See {@link PluginApiClient} for all of it;
  * that client stays available as the escape hatch for anything this does not cover.
  *
  * ## What it remembers for you (guaranteed since 0.16.0)
@@ -516,7 +564,8 @@ export interface DocClient {
    * The answer maps scope id → key → value, and **a miss is simply absent**: no `null`, no error — an
    * id with nothing set may be missing entirely or map to `{}`. Every access rule of {@link get} applies
    * per id: the same read floor, and an id the caller may not address rejects the whole call with a
-   * {@link PluginApiError} rather than being quietly skipped.
+   * {@link PluginApiError} rather than being quietly skipped. A **key** below its `keyFloors` floor is the
+   * exception: it is simply absent from every id, exactly like a miss (since 0.19.0).
    *
    * More than {@link DOC_BATCH_LIMIT} ids or keys is **split** into several requests and merged, so you
    * never see the host's per-request ceiling. An empty `ids` or `keys` resolves `{}` without a request.
@@ -541,6 +590,8 @@ export interface DocClient {
   put<T = unknown>(target: DocTarget, key: string, value: T): Promise<void>;
   /**
    * One page of documents in a partition, each carrying its key.
+   *
+   * Keys below the caller's `keyFloors` floor are left out rather than failing the page (since 0.19.0).
    *
    * @param target which partition
    * @param opts   `prefix` filters by key prefix; `page` is zero-based and `size` defaults to 50 (the
@@ -658,8 +709,19 @@ export interface SchemaPage<T = Record<string, unknown>> {
  *
  * ## What the host enforces
  *
- * The same `data.readableBy` floor as the doc surface — one rule to learn, and a plugin that already
- * declares one is already covered. Beyond that, **a plugin cannot express the wrong question**: entity and
+ * The read floor is `storage.schemaReadableBy` when the manifest declares one (since 0.19.0), and the
+ * `data.readableBy` floor of the doc surface otherwise — so a plugin that already declares `data` is covered,
+ * and one whose tile must be anonymous can still keep its rows (per-user inputs, say) from anonymous
+ * visitors:
+ *
+ * ```json
+ * "data":    { "readableBy": "anonymous", "writableBy": "podcaster" },
+ * "storage": { "schema": { "vote": { "userId": "string:indexed", "choice": "string" } },
+ *              "schemaReadableBy": "podcaster" }
+ * ```
+ *
+ * Every endpoint below is gated by it alike. It governs HTTP reads only: the backend's `SchemaStore` is
+ * unaffected. Beyond that, **a plugin cannot express the wrong question**: entity and
  * field names are resolved against your own manifest and the host builds the statement, so another
  * plugin's tables (or core's) are not so much blocked as unnameable. An entity you did not declare is a
  * 404; a field you did not declare, an unreadable value, or `search` on a field that is not `:fulltext` is
@@ -1332,11 +1394,20 @@ export interface DisplaySnapshot {
    * @since 0.17.0
    */
   feed?: string;
-  /** The season number (`itunes:season`, as the host recorded it); absent when the episode has none. @since 0.17.0 */
+  /**
+   * The season number **as the site places the episode**: the feed's `itunes:season` unless a podcaster set
+   * it by hand, in which case the hand-set value wins and survives feed polls. May be `0`; absent when the
+   * episode has none. Identity — never re-derive it from the feed or a title.
+   *
+   * @since 0.17.0
+   */
   season?: number;
   /**
-   * The episode number within its season (`itunes:episode`); absent when it has none — a numbered season
-   * may still hold an unnumbered prologue, so do not infer `season` from this or the other way round.
+   * The episode number within its season, **as the site places it**: the feed's `itunes:episode` unless a
+   * podcaster set it by hand. A prologue the show calls episode `0` is the case that exists for — Apple's
+   * `itunes:episode` cannot carry a 0, so hosts such as Acast drop it. May be `0`; absent when it has none —
+   * a numbered season may still hold an unnumbered prologue, so do not infer `season` from this or the other
+   * way round.
    *
    * @since 0.17.0
    */
@@ -1416,10 +1487,11 @@ export function resolveSeasonScope(snapshot: DisplaySnapshot): Scope | undefined
 }
 
 /**
- * The most slugs {@link FeedsClient.displayMany} will resolve in one call.
+ * The most slugs one {@link FeedsClient.displayMany} **request** carries — the host's per-request ceiling.
  *
- * Matching the host's existing clamp on its scope-episodes endpoint. Asking for more is not an error —
- * the extras are simply not in the answer, so check what came back rather than assuming.
+ * Since 0.19.0 the client splits a larger call into requests of at most this many and merges the answers, as
+ * {@link DocClient.getMany} does with {@link DOC_BATCH_LIMIT}; so this is for sizing, not a limit you have to
+ * enforce. (Before 0.19.0 a larger call was clamped: everything past the 200th slug was silently missing.)
  *
  * @since 0.9.0
  */
@@ -1560,7 +1632,12 @@ export interface FeedsClient {
    * Use this whenever you are drawing more than one card — the N-request version is the thing this
    * surface exists to prevent.
    *
-   * @param slugs the episode slugs; more than {@link DISPLAY_BATCH_LIMIT} is **clamped**, not rejected
+   * More than {@link DISPLAY_BATCH_LIMIT} slugs is **split** into several requests and merged (since
+   * 0.19.0), so `displayMany(ctx.episodes)` answers for every episode of a long-running show. If any one of
+   * those requests fails the whole call rejects — a partial answer would look exactly like "not visible". An
+   * empty list resolves `{}` without a request.
+   *
+   * @param slugs the episode slugs — any number
    * @returns a map from slug to snapshot, containing only the episodes the caller may see — so a missing
    *          key is normal and must not be treated as a failure
    */
@@ -2074,7 +2151,7 @@ export interface PluginDataDeclaration {
    * Keys your backend authors, which clients may read but never `PUT` or `DELETE` (403).
    *
    * Each entry is an exact key, a prefix ending in `*`, or the bare `*` for "the whole store is computed"
-   * — matching `^(\*|[A-Za-z0-9._:-]{1,200}\*?)$`, mirrored from the Java `DocStore.BACKEND_OWNED_PATTERN`.
+   * — matching {@link DOC_KEY_SELECTOR_PATTERN}, mirrored from the Java `DocStore.KEY_SELECTOR_PATTERN`.
    * A `*` in the middle, or an empty entry, is rejected when the plugin loads.
    *
    * Declare a key here **and write it in your backend's `register`**, not only on a schedule: the
@@ -2098,6 +2175,56 @@ export interface PluginDataDeclaration {
    * @since 0.16.0
    */
   readsAllUsers?: boolean;
+  /**
+   * Stricter floors for some keys — the per-key half of {@link readableBy} / {@link writableBy}.
+   *
+   * Those two cover every key, and {@link backendOwned} can only narrow a write to "backend only". A plugin
+   * with public numbers beside private bookkeeping, or an admin-only setting beside podcaster-editable
+   * ones, needs to say *which key*:
+   *
+   * ```json
+   * "keyFloors": [
+   *   { "keys": ["import:*", "staged:*"], "readableBy": "podcaster" },
+   *   { "keys": ["bundles"], "writableBy": "admin" }
+   * ]
+   * ```
+   *
+   * What the host enforces, and rejects at load:
+   *
+   * - A key floor can only **raise** the plugin's floor, never lower it. An entry below {@link readableBy}
+   *   or {@link writableBy}, one with no `keys`, or one raising neither floor rejects the manifest.
+   * - Several entries matching one key combine to the **strictest**, per direction. A `backendOwned` key
+   *   stays client-unwritable whatever its write floor.
+   * - **Reads below the floor:** {@link DocClient.list} leaves the key out; {@link DocClient.getMany} leaves
+   *   it absent, like a miss; a single {@link DocClient.get} rejects with a 403 whose problem type is
+   *   `PROBLEM_TYPES.keyFloor` ({@link PROBLEM_TYPES}). **Writes below it** (`put`, `remove`) reject the
+   *   same way.
+   * - Not for the `user` scope, like `backendOwned`. And not for your backend: `ctx.store()` reads and
+   *   writes every key.
+   *
+   * Each `keys` entry matches {@link DOC_KEY_SELECTOR_PATTERN}, the `backendOwned` grammar. A host older
+   * than 0.19.0 would ignore the block and serve these keys at the plugin floor, which is why it shipped in
+   * a `platformApi` minor: a plugin declaring it only loads on a host that enforces it.
+   *
+   * @since 0.19.0
+   */
+  keyFloors?: PluginKeyFloorDeclaration[];
+}
+
+/**
+ * One entry of {@link PluginDataDeclaration.keyFloors}: the keys it covers and the floor it raises them to.
+ *
+ * Declare at least one of the two floors; each may only be above the plugin's own.
+ *
+ * @since 0.19.0
+ */
+export interface PluginKeyFloorDeclaration {
+  /** The keys: exact keys, `prefix*`, or the bare `*` — each matching {@link DOC_KEY_SELECTOR_PATTERN}. */
+  keys: string[];
+  /** The lowest role that may read a matching key. Absent: the plugin's {@link PluginDataDeclaration.readableBy}. */
+  readableBy?: DataAccessRole;
+  /** The lowest role that may write one. Absent: the plugin's {@link PluginDataDeclaration.writableBy}. */
+  writableBy?: Exclude<DataAccessRole, 'anonymous'>;
 }
 
 /**
@@ -2617,8 +2744,14 @@ export interface PluginManifest {
   slots?: PluginSlotDeclaration[];
   /** Entrances in the host's menu, for a plugin with a `page` placement. */
   nav?: PluginNavDeclaration[];
-  /** `"doc"` for the generic JSON store, or a schema declaration for provisioned tables (§7.6). */
-  storage?: 'doc' | { schema: Record<string, Record<string, string>> };
+  /**
+   * `"doc"` for the generic JSON store, or a schema declaration for provisioned tables (§7.6).
+   *
+   * `schemaReadableBy` (since 0.19.0) is the read floor of the schema surface (`ctx.schema` and
+   * `GET /api/plugins/{id}/schema/*`); absent, it is {@link PluginDataDeclaration.readableBy}. Any of the four
+   * roles — see {@link SchemaClient}.
+   */
+  storage?: 'doc' | { schema: Record<string, Record<string, string>>; schemaReadableBy?: DataAccessRole };
   /** Who may read and write the doc store, and which keys only the backend writes. */
   data?: PluginDataDeclaration;
   /** Opt-in file storage. Absent means no file storage at all. */

@@ -63,7 +63,7 @@ public interface UserDataHandler extends ExtensionPoint {
     void eraseUser(String userId);
 
     /**
-     * Everything this plugin holds about a user, for a data export.
+     * Everything this plugin holds about a user, for a data export, as one JSON document.
      *
      * <p>Read-only, and called independently of {@link #eraseUser(String)} — an export is a request in its
      * own right, and an export missing the plugin half is an incomplete answer to a legal one.
@@ -71,10 +71,64 @@ public interface UserDataHandler extends ExtensionPoint {
      * <p>Defaults to nothing, for plugins whose erasure is a hard delete of rows they would rather not
      * describe. The map is serialised by the host, so use plain JSON-shaped values.
      *
+     * <p>Since 0.19.0 this is the short form of {@link #exportFiles(String)}: a plugin that implements only
+     * this has its map exported as {@code data.json}. Implement {@code exportFiles} instead when your data has
+     * a format of its own.
+     *
      * @param userId the user's id; never {@code null}
      * @return this plugin's data for that user, or {@link Optional#empty()} if it exports none
      */
     default Optional<Map<String, Object>> exportUser(String userId) {
+        return Optional.empty();
+    }
+
+    /**
+     * This plugin's part of a person's data export, as files in the plugin's own format (ARCHITECTURE §12.8,
+     * GDPR Art. 15 and 20).
+     *
+     * <p>The host bundles every plugin's part into one ZIP for the person, each under
+     * {@code plugins/<pluginId>/}, beside what core holds. A {@code Map} serialised to JSON was the only shape
+     * {@link #exportUser(String)} could take; portability is better served by a file another tool can read back
+     * — a bingo card in the format its own import reads, a CSV, the photo the person uploaded.
+     *
+     * <pre>{@code
+     * @Override
+     * public Optional<UserExport> exportFiles(String userId) {
+     *     List<Card> cards = cardsOf(userId);
+     *     if (cards.isEmpty()) return Optional.empty();
+     *     return Optional.of(UserExport.of(
+     *             ExportFile.text("cards.json", "application/json", toBingoV1(cards))));
+     * }
+     * }</pre>
+     *
+     * <h4>What the host expects</h4>
+     * <ul>
+     *   <li><strong>Only this person's data.</strong> Never another user's rows, even ones that mention them
+     *       — a leaderboard the person appears on is not theirs to receive. This is the property the host
+     *       cannot check.</li>
+     *   <li><strong>Read-only.</strong> The export may be retried, and a person may ask again tomorrow; a call
+     *       must change nothing it reads.</li>
+     *   <li><strong>Bounded.</strong> At most {@link UserExport#MAX_BYTES} over all files, answered within
+     *       {@link UserExport#TIMEOUT}. A larger part or a slower answer is recorded as failed for this plugin
+     *       — never truncated — and the person is told their export is incomplete.</li>
+     *   <li><strong>Throwing is not silent</strong>, as with erasure: the host records an outcome per plugin,
+     *       so throw when you could not finish rather than returning a partial answer.</li>
+     * </ul>
+     *
+     * <p><strong>The default, and the order the host asks in.</strong> The host calls this first. A value is
+     * the plugin's part. {@link Optional#empty()} — what the default returns — makes it ask
+     * {@link #exportUser(String)} and write a non-empty map as {@code data.json}; empty there too means the
+     * plugin holds nothing on this person. So a plugin written against the {@code Map} form keeps exporting
+     * unchanged, and a plugin that implements this one leaves {@code exportUser} at its default. The host
+     * does the {@code data.json} wrapping rather than this method, so the contract never serialises JSON
+     * itself.
+     *
+     * @param userId the user's id; never {@code null}
+     * @return the files for that person, or {@link Optional#empty()} for nothing (or, by default, for "use
+     *         {@link #exportUser(String)}")
+     * @since 0.19.0
+     */
+    default Optional<UserExport> exportFiles(String userId) {
         return Optional.empty();
     }
 }

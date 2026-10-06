@@ -7,6 +7,66 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] — 2026-10-06
+
+Per-key floors in the doc store, a read floor for the schema surface, a hook for an episode going quiet again,
+file-based GDPR exports, and `displayMany` that no longer drops episodes past the 200th. A **minor** bump, and
+for a security reason as much as a linking one: core ignores unknown manifest keys, so a 0.18 host would load a
+plugin declaring `keyFloors` or `schemaReadableBy` and **serve those keys and rows at the plugin floor** while
+the plugin believes they are private. The exact `major.minor` match is what guarantees a plugin relying on them
+only loads where they are enforced. The new Java types and methods (`UserExport`, `ExportFile`,
+`onEpisodePhaseChanged`) would also fail to link on a 0.18 host. **Core must pin `mosaicastSdk = "0.19.0"`** and
+ship core#259 (key floors), core#261 (schema read floor), core#263 (GDPR export), core#269 (`displayMany` split)
+and core#270 (phase hook) in the release that pins it.
+
+### Added
+
+- **`data.keyFloors`** (#104, core#259): `[{ keys, readableBy?, writableBy? }]` raises the read or write floor
+  of the keys it names — private bookkeeping beside public numbers, an admin-only setting. Raise-only (a
+  manifest that lowers a floor is rejected at load), strictest match wins per direction, not for the `user`
+  scope, and the backend's `ctx.store()` is unaffected. A listing leaves such a key out, `getMany` leaves it
+  absent, and a single `get`/`put`/`remove` is a 403 with its own problem type. TS:
+  `PluginDataDeclaration.keyFloors`, `PluginKeyFloorDeclaration`.
+- **`PROBLEM_TYPES`** (TS): the stable RFC 7807 `type` URIs of the doc store's refusals — `forbidden` (the plugin
+  floor), `backendOwnedKey`, the new `keyFloor`, and `unauthorized` — so a plugin tells the three 403s apart
+  without matching English.
+- **`DocStore.KEY_SELECTOR_PATTERN`** (Java) / **`DOC_KEY_SELECTOR_PATTERN`** (TS): the selector grammar
+  `backendOwned` and `keyFloors[].keys` share. `BACKEND_OWNED_PATTERN` stays, as an alias with the same value.
+- **`storage.schemaReadableBy`** (#99, core#261): the schema surface's own read floor, defaulting to
+  `data.readableBy`, so a plugin whose tile is anonymous can keep per-user rows from anonymous visitors. TS
+  manifest type only; `SchemaStore` is the backend's and is unaffected.
+- **`PluginContext.onEpisodePhaseChanged(BiConsumer<String, EpisodePhase>)`** (#98, core#270): called when a
+  *write* changes an episode's phase — announce, an `announceAt` edit either way, release, withdrawal, a
+  withdrawn episode returning, and cancellation (phase `null`). The clock moving PLANNED → UPCOMING does not
+  fire it. Delivery as `onEpisodeReleased`: after commit, best effort, not replayed; on a release the release
+  listeners run first. A `default` no-op the host overrides.
+- **`UserDataHandler.exportFiles(String)`**, **`UserExport`** and **`ExportFile`** (#102, core#263): a plugin's
+  part of the GDPR export ZIP as files in its own format, packed under `plugins/<id>/`. Paths follow
+  `ExportFile.PATH_PATTERN` (relative, no `.`/`..`); at most `UserExport.MAX_BYTES` (32 MiB) per plugin,
+  answered within `UserExport.TIMEOUT` (60 s). The default returns empty, and the host then asks `exportUser`
+  and writes its map as `data.json` — so `Map`-form plugins keep exporting, and the contract never serialises
+  JSON itself (#28).
+- **Test kit (Java):** `InMemoryDocStore.withKeyFloor(pattern, readableBy, writableBy)`, `asUser(UUID, Role)`
+  and `asAnonymous()` (a USER scope there is the host's 401); `FakePluginContext.onEpisodePhaseChanged`,
+  `fireEpisodePhaseChanged(slug, phase)` and `episodePhaseListenerCount()`;
+  `UserDataHandlerHarness.exportFiles(userId)`, which asks the way the host does and fails on the size and
+  time limits.
+- **Test kit (TS):** `makeMockDocs(initial, { data, viewer })` enforces the plugin floors, `backendOwned` and
+  `keyFloors` as the host does, rejecting with the matching `PROBLEM_TYPES`; `MockFeedsClient.batches` records
+  each request the host's client would send.
+
+### Changed
+
+- **`ctx.feeds.displayMany` splits instead of clamping** (#97, core#269): more than `DISPLAY_BATCH_LIMIT` slugs
+  is sent as several requests and merged, the guarantee `ctx.docs.getMany` already gives, so
+  `displayMany(ctx.episodes)` — the `resolveSeasonScope` example — answers for every episode of a long show. A
+  failed chunk rejects the whole call. `DISPLAY_BATCH_LIMIT` is now the per-request ceiling. `makeMockFeeds`
+  follows; a test asserting the old clamp at 200 must change.
+- **`DisplaySnapshot.season` / `.episodeNo`** are documented as the episode's place *as the site places it*:
+  the feed's `itunes:*` value unless a podcaster set it by hand (core#264, core 0.7.7), which wins, survives
+  feed polls and may be `0` (#103). No signature change.
+- `InMemoryDocStore.asUser(UUID)` is a `FAN` view; that only matters once a key floor is declared.
+
 ## [0.18.0] — 2026-10-02
 
 Plugins can tell where an episode stands in its release, and hear when a planned one is released (#94). A
