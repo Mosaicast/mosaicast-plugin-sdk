@@ -447,19 +447,29 @@ public interface PluginContext {
      * <p><strong>When it fires.</strong> The host compares the phase derived just before a write with the one
      * just after, at the same instant, and calls this only when they differ: announcing, an
      * {@code announceAt} edit in either direction, a release, a withdrawal, a withdrawn episode coming back,
-     * and a cancellation. The listener receives the slug and the new phase — or {@code null} when the
-     * episode was <strong>cancelled</strong> and no longer exists; its episode-scoped documents are gone with
-     * it, but anything your other scopes say about it is yours to drop.
+     * and an episode ceasing to exist. The listener receives the slug and the new phase — or {@code null}
+     * when the episode <strong>no longer exists</strong>: a cancelled plan, the duplicate a manual match or a
+     * confirmed suggestion removed when a plan took over its feed item, or every episode of a deleted feed. Its
+     * episode-scoped documents are gone with it, but anything your other scopes say about that slug is yours to
+     * drop.
      *
      * <p><strong>The clock never fires it.</strong> A planned episode becoming {@link EpisodePhase#UPCOMING}
      * because its announcement instant passed involves no write, so there is no event. That direction only
      * makes an episode <em>more</em> visible, and being late there is harmless; reconcile it on your schedule.
      *
-     * <p><strong>Delivery is the release hook's:</strong> once per change, after the transaction commits, on a
-     * host thread; an exception the listener throws is caught and logged against this plugin. Best effort,
-     * not durable, not replayed — keep reconciling by phase on a schedule, and keep the listener idempotent.
-     * On a release the host calls {@link #onEpisodeReleased(Consumer)} listeners first, then this one with
+     * <p><strong>Delivery is the release hook's:</strong> once per change, after the transaction commits; an
+     * exception the listener throws is caught and logged against this plugin. Best effort, not durable, not
+     * replayed — keep reconciling by phase on a schedule, and keep the listener idempotent. On a release the
+     * host calls {@link #onEpisodeReleased(Consumer)} listeners first, then this one with
      * {@link EpisodePhase#RELEASED}.
+     *
+     * <p><strong>Expect concurrent calls.</strong> Each event is its own task on its own thread, so a write
+     * touching many episodes — deleting a feed is the large case — reaches your listener as many calls at once,
+     * in no guaranteed order, and every one of them already sees every episode gone. A listener that
+     * republishes something expensive should coalesce: let one pass run and the rest mark it dirty, rather than
+     * recomputing per slug. Guard that with a {@link java.util.concurrent.locks.ReentrantLock}, not
+     * {@code synchronized} — the host's threads are virtual, and on Java 21 a virtual thread waiting on a
+     * monitor pins its carrier.
      *
      * <p>The phase handed over is the one right after the write. Read
      * {@link FeedAccess#display(String)} again if you act later: the clock may have moved it since.
@@ -467,8 +477,9 @@ public interface PluginContext {
      * <p>A {@code default} method that does nothing, so an existing {@code PluginContext} implementation keeps
      * compiling. The host overrides it.
      *
-     * @param listener called with the episode's slug and its new phase, which is {@code null} for a cancelled
-     *                 episode; never {@code null} itself
+     * @param listener called with the episode's slug and its new phase, which is {@code null} for an episode
+     *                 that no longer exists (cancelled, removed as a matched duplicate, or in a deleted feed);
+     *                 never {@code null} itself
      * @throws NullPointerException if {@code listener} is {@code null}
      * @since 0.19.0
      */
