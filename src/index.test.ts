@@ -40,7 +40,7 @@ import { DEFAULT_THEME, makeMockCtx, makeMockSchema } from './testing.js';
 
 describe('PLATFORM_API_VERSION', () => {
   it('is the mirrored SemVer anchor', () => {
-    expect(PLATFORM_API_VERSION).toBe('0.19.0');
+    expect(PLATFORM_API_VERSION).toBe('0.19.1');
   });
 });
 
@@ -855,15 +855,25 @@ describe('the i18n formatting helpers', () => {
     expect(en.duration(-5)).toBe('');
   });
 
-  it('formats bytes in decimal units with the locale\'s own separator', () => {
+  it('formats bytes in binary units, as core labels quotas, with the locale\'s own separator', () => {
     const en = createPluginI18n({}, handle('en'));
     const de = createPluginI18n({}, handle('de'));
 
-    // Decimal, so the number agrees with what the visitor's file manager showed them.
-    expect(en.bytes(5_242_880)).toMatch(/^5\.2 MB$/);
-    expect(en.bytes(512)).toMatch(/^512 (byte|B)/);
+    // One quota, one number: core's admin shows 268 435 456 bytes as 256 MiB, and so does this (wiki#29).
+    expect(en.bytes(268_435_456)).toBe('256 MiB');
+    expect(en.bytes(32 * 1024 * 1024)).toBe('32 MiB');
+    expect(en.bytes(1536)).toBe('1.5 KiB');
+    expect(en.bytes(5_242_880)).toBe('5 MiB');
+    expect(en.bytes(3 * 1024 ** 3)).toBe('3 GiB');
+    // Just under a unit rounds up into it, not to "1,024 KiB".
+    expect(en.bytes(1024 * 1024 - 1)).toBe('1 MiB');
+    // Plain counts in the locale's words, plural included — not "0 byte".
+    expect(en.bytes(0)).toBe('0 bytes');
+    expect(en.bytes(1)).toBe('1 byte');
+    expect(en.bytes(512)).toBe('512 bytes');
+    expect(de.bytes(512)).toBe('512 Byte');
     // The `de` bug in the sample plugin: a hardcoded `.` is simply wrong here.
-    expect(de.bytes(5_242_880)).toContain('5,2');
-    expect(de.bytes(5_242_880)).not.toContain('5.2');
+    expect(de.bytes(1_572_864)).toBe('1,5 MiB');
+    expect(en.bytes(Number.NaN)).toBe('');
   });
 });

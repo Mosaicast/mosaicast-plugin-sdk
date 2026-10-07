@@ -7,11 +7,18 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.19.1] — 2026-10-07
 
-Documentation only — no contract change, no version bump.
+A patch: `platformApi` 0.19.0 keeps loading — core matches `major.minor`. One helper changes its output, and
+the docs catch up with core 0.7.8 – 0.8.1.
 
 ### Changed
+
+- **`i18n.bytes` uses binary units, labelled KiB / MiB / GiB / TiB** (1 KiB = 1024 B), the convention core's
+  admin already uses for plugin quotas and the contract uses for `UserExport.MAX_BYTES`. One quota no longer
+  shows two numbers: 268 435 456 bytes is `256 MiB` in the plugin and in Admin → Plugins, where the plugin used
+  to say `268.4 MB` (wiki#29). Below 1 KiB the count uses the locale's own word and plural — `0 bytes`, not
+  `0 byte`. A test asserting the old decimal output must change.
 
 - **`docs/ARCHITECTURE.md`** synced from mosaicast-core f8dd752 (core 0.7.8 – 0.8.1): the 0.19.0 contract in
   §4.3, §7.2, §7.4, §7.5 and §7.6, and the new §12.8.1 on the GDPR data export.
