@@ -798,7 +798,7 @@ i18n.plural('moments', n);                 // catalog keys: moments.one / moment
 i18n.n(1234.5);                            // 1.234,5 in de
 i18n.date(snapshot.publishedAt!);          // takes the ISO instants the contract hands over
 i18n.duration(snapshot.duration!);         // 'PT1H2M3S' → 1:02:03; also takes plain seconds
-i18n.bytes(quota.usedBytes);               // decimal units, locale separator — 5,2 MB in de
+i18n.bytes(quota.usedBytes);               // binary units, as core's admin shows them — 1,5 MiB in de
 ```
 
 - **`plural` uses `Intl.PluralRules`.** A catalog could not express "1 highlight" / "5 highlights" at all,
@@ -807,7 +807,10 @@ i18n.bytes(quota.usedBytes);               // decimal units, locale separator �
   interpolated for you.
 - **`duration` and `bytes` are contract-adjacent**: `DisplaySnapshot.duration` *is* an ISO-8601 string and
   `BlobQuota` *is* three raw byte counts. The SDK produces both, so it may as well render them — and the
-  hand-rolled byte formatter hardcodes `.` as the decimal separator, which is simply wrong in `de`.
+  hand-rolled byte formatter hardcodes `.` as the decimal separator, which is simply wrong in `de`. Since
+  0.19.1 `bytes` uses **binary units labelled KiB/MiB/GiB**, the platform's one convention: core's admin sets
+  quotas in MiB, so a 256 MiB quota reads `256 MiB` in both places rather than `268.4 MB` in yours. Below
+  1 KiB it says `0 bytes` / `1 byte` in the locale's words.
 
 ## Which languages the site has — `ctx.locale.available()` / `.content()` (since 0.10.0)
 

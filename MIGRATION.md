@@ -1,4 +1,16 @@
-# Migrating a plugin to `platformApi` 0.19.0
+# Migrating a plugin to `platformApi` 0.19.1
+
+## 0.19.0 → 0.19.1
+
+**Nothing to re-declare.** A patch: `platformApi` stays `"0.19.0"` and keeps loading; take the npm/Maven
+`0.19.1` when convenient. One visible change: `i18n.bytes` now formats in **binary units labelled KiB/MiB/GiB**,
+matching core's admin (`256 MiB`, where it used to say `268.4 MB`), and says `0 bytes` rather than `0 byte`. A
+component test that pinned the decimal output (`'5.2 MB'`) wants the binary one (`'5 MiB'`). If you
+hand-rolled a binary formatter to agree with core, `bytes` now does it.
+
+---
+
+# 0.18.x → 0.19.0
 
 **0.18.x → 0.19.0: the bump is required; one test assertion may need to change.** `platformApi` matches on
 `major.minor`, so re-declare and rebuild:

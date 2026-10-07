@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.19.0' as const;
+export const PLATFORM_API_VERSION = '0.19.1' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -3484,11 +3484,19 @@ export interface PluginI18n {
   /**
    * Formats a byte count for the active locale — for showing a `BlobQuota` to a podcaster.
    *
-   * **Decimal units** (1 kB = 1000 B), so the number agrees with what the visitor's own file manager
-   * showed them. Locale-correct throughout, including the decimal separator — the hand-rolled version
-   * hardcodes `.`, which is simply wrong in `de`.
+   * **Binary units, labelled as such** (1 KiB = 1024 B; KiB, MiB, GiB, TiB), since 0.19.1 — the platform's
+   * one convention. Core's admin sets and shows plugin quotas in MiB, and the contract's own limits are binary
+   * (`UserExport.MAX_BYTES` is 32 MiB), so a 268 435 456-byte quota reads `256 MiB` here and in the admin
+   * alike. Before 0.19.1 this used decimal units and showed the same quota as `268.4 MB`: one limit, two
+   * numbers.
+   *
+   * Below 1 KiB it counts bytes in the locale's own words, plural included (`0 bytes`, `1 byte`, `512 Byte`
+   * in `de`). Above, one decimal at most (`1.5 MiB`, `256 MiB`), with the locale's separator — the
+   * hand-rolled version hardcodes `.`, which is simply wrong in `de`. The IEC symbols are the same in every
+   * language.
    *
    * @param value a size in bytes
+   * @returns the formatted size, or `''` for a value that is not a finite number
    * @since 0.9.0
    */
   bytes(value: number): string;
@@ -3506,14 +3514,8 @@ export interface PluginI18n {
 
 const SOURCE_LOCALE = 'en';
 
-/** The decimal byte units, largest last — `bytes` walks this from the bottom. */
-const BYTE_UNITS: ReadonlyArray<[string, string]> = [
-  ['byte', 'B'],
-  ['kilobyte', 'kB'],
-  ['megabyte', 'MB'],
-  ['gigabyte', 'GB'],
-  ['terabyte', 'TB'],
-];
+/** The binary (IEC) byte units above a plain byte count, smallest first — `bytes` walks up this list. */
+const BINARY_BYTE_UNITS: readonly string[] = ['KiB', 'MiB', 'GiB', 'TiB'];
 
 /** `PT1H2M3S` → seconds. Returns `null` for anything that is not an ISO-8601 duration. */
 function parseIsoDuration(value: string): number | null {
@@ -3612,29 +3614,39 @@ export function createPluginI18n(
       if (!Number.isFinite(value)) {
         return '';
       }
-      // Decimal units so the number matches what the visitor's file manager told them.
-      let index = 0;
+      // Binary units, labelled KiB/MiB/…: core's admin works in MiB, and one quota must read the same in both.
+      let index = -1;
       let scaled = Math.abs(value);
-      while (scaled >= 1000 && index < BYTE_UNITS.length - 1) {
-        scaled /= 1000;
+      const step = () => {
+        scaled /= 1024;
         index++;
+      };
+      while (scaled >= 1024 && index < BINARY_BYTE_UNITS.length - 1) {
+        step();
+      }
+      // 1023.97 KiB would round to "1,024 KiB"; say 1 MiB instead.
+      const digits = index < 0 ? 0 : 1;
+      if (Number(scaled.toFixed(digits)) >= 1024 && index < BINARY_BYTE_UNITS.length - 1) {
+        step();
       }
       const signed = value < 0 ? -scaled : scaled;
-      const [unit, symbol] = BYTE_UNITS[index]!;
-      // Whole bytes read oddly as `1.5 B`; everything above keeps one decimal.
-      const digits = index === 0 ? 0 : 1;
-      try {
-        return new Intl.NumberFormat(active, {
-          style: 'unit',
-          unit,
-          unitDisplay: 'short',
-          maximumFractionDigits: digits,
-        }).format(signed);
-      } catch {
-        // `style: 'unit'` is widely supported but not universal; the separator still has to be right.
-        const number = new Intl.NumberFormat(active, { maximumFractionDigits: digits }).format(signed);
-        return `${number} ${symbol}`;
+      if (index < 0) {
+        // A plain count, in the locale's own words and plural: `0 bytes`, `1 byte`, `512 Byte`.
+        try {
+          return new Intl.NumberFormat(active, {
+            style: 'unit',
+            unit: 'byte',
+            unitDisplay: 'long',
+            maximumFractionDigits: 0,
+          }).format(signed);
+        } catch {
+          // `style: 'unit'` is widely supported but not universal; the separator still has to be right.
+          const number = new Intl.NumberFormat(active, { maximumFractionDigits: 0 }).format(signed);
+          return `${number} B`;
+        }
       }
+      const number = new Intl.NumberFormat(active, { maximumFractionDigits: digits }).format(signed);
+      return `${number} ${BINARY_BYTE_UNITS[index]}`;
     },
   };
 }
