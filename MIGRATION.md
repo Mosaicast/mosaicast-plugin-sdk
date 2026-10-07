@@ -2,8 +2,10 @@
 
 ## 0.19.0 → 0.19.1
 
-**Nothing to re-declare.** A patch: `platformApi` stays `"0.19.0"` and keeps loading; take the npm/Maven
-`0.19.1` when convenient. One visible change: `i18n.bytes` now formats in **binary units labelled KiB/MiB/GiB**,
+**Nothing has to change.** A patch: core matches `platformApi` on `major.minor` only, so `"0.19.0"` and
+`"0.19.1"` both load; take the npm/Maven `0.19.1` when convenient. If your manifest test compares `platformApi`
+with `PLATFORM_API_VERSION` (which is `'0.19.1'` now), write `"0.19.1"` in `plugin.json` too — one string in
+every place, as with 0.16.1. One visible change: `i18n.bytes` now formats in **binary units labelled KiB/MiB/GiB**,
 matching core's admin (`256 MiB`, where it used to say `268.4 MB`), and says `0 bytes` rather than `0 byte`. A
 component test that pinned the decimal output (`'5.2 MB'`) wants the binary one (`'5 MiB'`). If you
 hand-rolled a binary formatter to agree with core, `bytes` now does it.
