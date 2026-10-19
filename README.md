@@ -48,7 +48,7 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
 - **Java (plugin backend)** — three ways to obtain the artifacts:
   - Composite build (nicest during parallel dev): `includeBuild("../mosaicast-plugin-sdk")`.
   - Local: `./gradlew publishToMavenLocal`, then depend on `dev.mosaicast:plugin-api:<version>`.
-  - Released: from **GitHub Packages** (see below).
+  - Released: from **Maven Central** — no repository block beyond `mavenCentral()`, no token (see below).
   ```kotlin
   dependencies {
       compileOnly("dev.mosaicast:plugin-api:0.14.0")           // contract, provided by the host
@@ -59,8 +59,20 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
 - **TypeScript (plugin frontend):** `npm install @mosaicast/plugin-sdk` (published on npm), or `npm link` / a tarball for local dev. `.d.ts` + TSDoc give IDE hover docs.
 - **The source of truth for signatures** is this built SDK + its docs.
 
-### Consuming released Java artifacts (GitHub Packages)
-GitHub Packages requires authentication even for public reads. In the consumer's `build.gradle.kts`:
+### Consuming released Java artifacts (Maven Central)
+`dev.mosaicast:plugin-api` and `dev.mosaicast:plugin-testkit` are on Maven Central from the first release
+published there (see the CHANGELOG), signed, with sources and Javadoc. A plugin build needs nothing more than:
+```kotlin
+repositories {
+    mavenCentral()
+}
+```
+No credentials and no PAT — which also retires the GitHub Packages trap where a missing token surfaces as
+`Username must not be null!` or a 401. A freshly published version can take 10–30 minutes to appear on
+Central after a release.
+
+**GitHub Packages (transitional).** Releases are still pushed there too, for a release or two, so a plugin can
+move at its own pace — and older versions only exist there. It requires authentication even for public reads:
 ```kotlin
 repositories {
     mavenCentral()
@@ -73,7 +85,8 @@ repositories {
     }
 }
 ```
-The token is any GitHub PAT with `read:packages`. (Anonymous-pull via Maven Central is a possible future move.)
+The token is any GitHub PAT with `read:packages`. Drop this block (and the PAT) once your SDK version is on
+Central.
 
 ## Plugin data access (v1) — plugins do not define HTTP routes
 
@@ -1362,7 +1375,18 @@ Publishing is automated and fires on a **published GitHub Release**, not on PR m
 3. Draft a **GitHub Release** with tag `v<version>` and publish it.
 4. The release workflow verifies the tag equals the anchor, rebuilds + tests, then publishes
    `@mosaicast/plugin-sdk` to npm (OIDC trusted publishing, with provenance) and the Java artifacts to
-   GitHub Packages. A tag/anchor mismatch fails the release before anything is published.
+   GitHub Packages and **Maven Central**. A tag/anchor mismatch fails the release before anything is published.
+5. **Maven Central is a manual release.** The workflow uploads a signed, validated deployment and stops
+   (`automaticRelease = false`); open [Deployments](https://central.sonatype.com/publishing/deployments) on the
+   Central Portal, check both artifacts and **Publish** — or **Drop** a bad one. A Central release is
+   **permanent**: it can never be deleted or overwritten, which is why a person presses the button. Allow
+   10–30 minutes before it resolves, and a few minutes for npm.
+
+Secrets the workflow needs (repository secrets; Gradle reads them as `ORG_GRADLE_PROJECT_*` properties):
+`ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME` / `…PASSWORD` (a Central Portal **user token**, not the login) and
+`ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY` / `…KEYID` / `…KEYPASSWORD` (the armored export of the CI **signing
+subkey** only — `gpg --armor --export-secret-subkeys <SUBKEY_FPR>!` — its last 8 hex digits, and its
+passphrase). Locally, `publishToMavenLocal` needs none of them: signing is only required on the way to Central.
 
 ## Test kit — mini examples
 

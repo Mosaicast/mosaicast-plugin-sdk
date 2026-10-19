@@ -16,6 +16,7 @@ Java 21 (Gradle, multi-module) · TypeScript (tsc)
 - `plugin-testkit/` — Java test doubles (`dev.mosaicast.plugin.testkit.*`), separate artifact (`testImplementation`).
 - `src/index.ts` — `@mosaicast/plugin-sdk`; `src/testing.ts` — `/testing` subpath. Tests: `src/*.test.ts` (Vitest).
 - Version = one SemVer anchor mirrored in `build.gradle.kts`, `package.json`, `PlatformApi.VERSION`, `PLATFORM_API_VERSION`; CI job `version-parity` enforces it.
+- Releases (`release.yml`, on a published GitHub Release): npm, GitHub Packages (transitional) and Maven Central via `com.vanniktech.maven.publish`. Central is a **manual** release in the Portal and **permanent** — never publish there without the user's go.
 
 ## Commands
 ```

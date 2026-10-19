@@ -3,7 +3,9 @@
 # Flow: draft a Release with a tag like `v0.1.0`. This workflow verifies the tag matches the version
 # anchor mirrored in all four sources, rebuilds + tests both stacks, then publishes:
 #   - @mosaicast/plugin-sdk → npm (OIDC trusted publishing, with provenance)
-#   - plugin-api + plugin-testkit → GitHub Packages (Maven)
+#   - plugin-api + plugin-testkit → Maven Central (Central Portal), signed; the deployment waits in the
+#     Portal for a person to publish it (manual release — a Central release is permanent)
+#   - plugin-api + plugin-testkit → GitHub Packages (Maven), kept while plugins move to mavenCentral()
 #
 # The version anchor is the source of truth; the tag must equal it. Bump with scripts/set-version.sh.
 name: Release
@@ -81,12 +83,14 @@ jobs:
           fi
 
   publish-maven:
-    name: Publish Java artifacts to GitHub Packages
+    name: Publish Java artifacts to Maven Central and GitHub Packages
     needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write   # required to push to GitHub Packages
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -100,28 +104,56 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           # See ci.yml: v6 caching is a proprietary component under Gradle's Terms of Use, and it is not
-          # loaded when caching is disabled. This job publishes with `packages: write`, so it is the last
-          # place to add a dependency we haven't chosen deliberately.
+          # loaded when caching is disabled. This job holds the signing key and the Central token, so it is
+          # the last place to add a dependency we haven't chosen deliberately.
           cache-disabled: true
 
-      - name: Build, test, publish (skip publish if this version is already on GitHub Packages)
+      - name: Build + test
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Publish to GitHub Packages (skip if this version is already there)
+        # First, so the channel plugins use today does not depend on the newer Central path.
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -euo pipefail
           # GitHub Packages rejects re-publishing an existing release version (409), so a re-run of a
-          # partially-succeeded release would fail. Guard: if both artifacts already exist, build+test
-          # for a green gate but don't re-publish.
+          # partially-succeeded release would fail. Guard: if both artifacts already exist, skip.
           published() {
             gh api "/orgs/Mosaicast/packages/maven/dev.mosaicast.$1/versions" -q '.[].name' 2>/dev/null \
               | grep -qx "$VERSION"
           }
           if published plugin-api && published plugin-testkit; then
-            echo "Java $VERSION already on GitHub Packages — building/testing only (idempotent)."
-            ./gradlew build --no-daemon --stacktrace
+            echo "Java $VERSION already on GitHub Packages — skipping (idempotent)."
           else
-            ./gradlew build publishMavenPublicationToGitHubPackagesRepository --no-daemon --stacktrace
+            ./gradlew publishAllPublicationsToGitHubPackagesRepository --no-daemon --stacktrace
           fi
+
+      - name: Upload to Maven Central (skip if this version is already on Central)
+        env:
+          # GitHub stores secret names upper-cased; Gradle reads ORG_GRADLE_PROJECT_<property> case-sensitively.
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYID }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYPASSWORD }}
+        run: |
+          set -euo pipefail
+          # A Central release is permanent: a version that is already there is never uploaded again.
+          on_central() {
+            curl -sfI "https://repo1.maven.org/maven2/dev/mosaicast/$1/${VERSION}/$1-${VERSION}.pom" >/dev/null
+          }
+          if on_central plugin-api && on_central plugin-testkit; then
+            echo "Java ${VERSION} already on Maven Central — skipping the upload (idempotent)."
+            exit 0
+          fi
+          # Uploads and validates a deployment, signed; it is NOT released (automaticRelease = false).
+          ./gradlew publishToMavenCentral --no-daemon --stacktrace
+          {
+            echo "### Maven Central: deployment uploaded, waiting for you"
+            echo "plugin-api and plugin-testkit ${VERSION} are uploaded and validated but **not published**."
+            echo "Check them at https://central.sonatype.com/publishing/deployments, then **Publish** or **Drop**."
+            echo "Publishing is permanent; Central takes 10–30 minutes to serve the files afterwards."
+          } >> "$GITHUB_STEP_SUMMARY"
