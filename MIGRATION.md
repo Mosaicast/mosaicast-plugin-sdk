@@ -1,4 +1,26 @@
-# Migrating a plugin to `platformApi` 0.19.1
+# Migrating a plugin to `platformApi` 0.19.2
+
+## 0.19.1 → 0.19.2: drop the GitHub Packages block
+
+**No code changes.** A patch, and both `platformApi` spellings load, as on 0.19.1. What changes is where the
+Java artifacts come from: 0.19.2 is the first release on **Maven Central**, so a plugin's Gradle build can
+drop the GitHub Packages repository and the `read:packages` PAT:
+
+```diff
+ repositories {
+     mavenCentral()
+-    maven {
+-        url = uri("https://maven.pkg.github.com/Mosaicast/mosaicast-plugin-sdk")
+-        credentials { … }
+-    }
+ }
+-compileOnly("dev.mosaicast:plugin-api:0.19.1")          +compileOnly("dev.mosaicast:plugin-api:0.19.2")
+-testImplementation("dev.mosaicast:plugin-testkit:0.19.1") +testImplementation("dev.mosaicast:plugin-testkit:0.19.2")
+```
+
+Remove the `GPR_*` / PAT secrets from your CI once nothing references them. Older SDK versions remain on GitHub
+Packages only, so keep the block if you pin one of those. A new version can take 10–30 minutes to appear on
+Central after the release.
 
 ## 0.19.0 → 0.19.1
 

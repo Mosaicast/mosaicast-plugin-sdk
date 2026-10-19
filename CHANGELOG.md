@@ -7,6 +7,20 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.2] — 2026-10-19
+
+The first release on **Maven Central**. No contract or API change; `platformApi` 0.19 keeps loading.
+
+### Changed
+
+- **The Java artifacts are published to Maven Central** (`dev.mosaicast:plugin-api`, `dev.mosaicast:plugin-testkit`),
+  signed, with sources and Javadoc and a complete POM (name, description, URL, Apache-2.0, developers, SCM). A
+  plugin build needs only `mavenCentral()` — no GitHub Packages repository block and no `read:packages` PAT. The
+  build moves from plain `maven-publish` to `com.vanniktech.maven.publish` (0.37.0), which speaks the Central
+  Portal API. Central uploads are released by hand in the Portal; a Central release is permanent.
+- GitHub Packages still receives every release for now, so plugins can switch at their own pace.
+- Signing is required only for a Central upload; `publishToMavenLocal` keeps working without a key.
+
 ## [0.19.1] — 2026-10-07
 
 A patch: `platformApi` 0.19.0 keeps loading — core matches `major.minor`. One helper changes its output, and
