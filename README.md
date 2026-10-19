@@ -60,8 +60,8 @@ npm ci && npm run build               # TypeScript: src → dist (.js + .d.ts)
 - **The source of truth for signatures** is this built SDK + its docs.
 
 ### Consuming released Java artifacts (Maven Central)
-`dev.mosaicast:plugin-api` and `dev.mosaicast:plugin-testkit` are on Maven Central from the first release
-published there (see the CHANGELOG), signed, with sources and Javadoc. A plugin build needs nothing more than:
+`dev.mosaicast:plugin-api` and `dev.mosaicast:plugin-testkit` are on Maven Central from **0.19.2**, signed,
+with sources and Javadoc. A plugin build needs nothing more than:
 ```kotlin
 repositories {
     mavenCentral()

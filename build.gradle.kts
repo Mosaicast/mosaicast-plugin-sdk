@@ -40,7 +40,7 @@ subprojects {
     apply(plugin = "com.vanniktech.maven.publish.base")
 
     group = "dev.mosaicast"
-    version = "0.19.1"
+    version = "0.19.2"
 
     repositories {
         mavenCentral()

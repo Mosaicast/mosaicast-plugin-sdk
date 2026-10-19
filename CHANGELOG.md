@@ -7,7 +7,9 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.19.2] — 2026-10-19
+
+The first release on **Maven Central**. No contract or API change; `platformApi` 0.19 keeps loading.
 
 ### Changed
 
