@@ -284,9 +284,23 @@ Test it on both sides: `InMemoryDocStore.withKeyFloor("import:*", "podcaster", n
 `store.asAnonymous()` / `store.asUser(id, Role.PODCASTER)` in Java, and
 `makeMockDocs(seed, { data, viewer: 'fan' })` in TypeScript, which answers with the same problem types.
 
-**No request-time server logic.** A write is plain persistence — no plugin code runs on the request. Anything derived, validated or aggregated server-side is **precomputed** in `register`/`onSchedule` and read back from the store.
+### Backend-private keys (since 0.20.0) — state no client reads
 
-> Roadmap: custom plugin-defined server routes may arrive in a later `platformApi` version; plugins use the doc store.
+`backendOwned` protects writes and leaves reads to the floor; the highest key floor is still `admin`. State a
+plugin keeps between calls but shows nobody as stored — a game in progress, who was invited — is declared
+`backendPrivate`:
+
+```json
+"data": { "readableBy": "fan", "writableBy": "podcaster", "backendPrivate": ["game:*", "invites:*"] }
+```
+
+No client reaches such a key, admins included: a single `get` / `put` / `remove` is a **403**
+`PROBLEM_TYPES.backendPrivateKey`, a listing leaves it out before paging, a batch leaves it absent. Only
+`ctx.store()` reads and writes it; the browser learns what an [action](#realtime--actions-channels--timers-since-0200)
+chooses to answer. Same selector grammar, not for `user` scopes. Test with
+`InMemoryDocStore.withBackendPrivate("game:*")` and `makeMockDocs(seed, { data, viewer })`.
+
+**Request-time server logic is opt-in.** A doc-store write is plain persistence — no plugin code runs on it. Anything derived or aggregated from such writes is **precomputed** in `register`/`onSchedule`. A plugin that must check input the moment it is made declares **actions** (since 0.20.0): host-owned endpoints that call a function the backend registered — still not a route. See [Realtime](#realtime--actions-channels--timers-since-0200).
 
 ## Relational storage — `ctx.schema` (since 0.4.0; frontend since 0.7.0)
 
@@ -609,6 +623,77 @@ if (told.length < participants.length) prune(participants, told);
 Test with `makeMockNotify({ notifiable, perUserPerDay })` / `FakeNotifier`. `FakeNotifier` reads
 eligibility from the doc store rather than a seeded list, so it cannot drift from the host's rule: give a
 user a row and they become notifiable, exactly as they became a participant.
+
+## Realtime — actions, channels & timers (since 0.20.0)
+
+For anything taking turns: a move checked the moment it is made, every participant seeing it within a second,
+a different view per user, clocks that run out in seconds. Also typing indicators (tiny, frequent, never
+stored) and buzzers (arrival order decides). ARCHITECTURE §7.9.
+
+```json
+"actions":  { "callableBy": "fan", "names": { "join": {}, "move": {}, "start": { "callableBy": "podcaster" } },
+              "perUserPerMinute": 120 },
+"channels": { "subscribableBy": "fan", "perUserSubscriptions": 4 },
+"data":     { "readableBy": "fan", "writableBy": "podcaster", "backendPrivate": ["game:*"] }
+```
+
+```java
+public void register(PluginContext ctx) {
+    ctx.actions().handle("move", call -> {
+        synchronized (lock) {                                   // handlers, timers and callbacks run concurrently
+            Game game = load(ctx.store(), call.scope());        // the store is the truth, memory a cache
+            if (!game.turn().equals(call.caller().userId())) {
+                throw new ActionRejectedException("not-your-turn");          // → 422 with `code`
+            }
+            game.apply(call.payload(Move.class));
+            ctx.store().put(call.scope(), "game:state", game);  // backendPrivate: no client reads it raw
+            ctx.channels().channel(call.scope(), "game").publish("moved", game.publicView());
+            if (turnClock != null) turnClock.cancel();
+            turnClock = ctx.runAfter(Duration.ofSeconds(30), () -> timeOut(ctx, call.scope()));
+            return game.publicView();                           // → JSON body; null → 204
+        }
+    });
+    ctx.channels().authorize((caller, ref) -> isPlayer(ref, caller.userId()));   // none → all refused
+}
+```
+
+```ts
+const sub = ctx.channels!.subscribe('game', (e) => apply(e), {
+  onReset: () => void load(),                       // events were missed: fetch state again
+  onStatus: (s) => showStatus(s),                   // connecting | open | refused | closed
+});
+await load();                                       // subscribe first, then fetch through an action
+try {
+  await ctx.actions!.call('move', { cell: 3 });
+} catch (e) {
+  if (isActionRejected(e)) notice(t(`error.${e.problem.code}`));
+  else if (isRateLimited(e)) retryIn(e.problem.retryAfterMs ?? 1000);
+  else throw e;
+}
+```
+
+- **Actions are functions, not routes.** The host owns the endpoint, auth, CSRF, the 16 KiB body cap, rate
+  limits (429 `tooManyRequests`, `retryAfterMs`) and the error shape, and checks the floor and the scope
+  before the handler runs. `call.caller()` is host-resolved, never from the payload; `call.receivedAt()` is
+  stamped before queueing, so it orders a buzzer. Every refusal has its own `PROBLEM_TYPES` entry.
+- **`call.store()` reaches the caller's `user` partition**, the one place a backend can. That partition stays
+  the user's — they can overwrite it over HTTP — so it is never authoritative. Accepted state goes in a shared
+  scope under `backendPrivate`.
+- **Channels never store events.** A late subscriber gets nothing from before; `publishTo(userId, …)` gives a
+  per-user view on a shared channel; `onJoin` / `onLeave` fire per user, not per tab. Subscriptions end as
+  `closed` when access changes (sign-out, account erasure, role, site access) and as `refused` when the authorizer, the
+  floor or a `kick` says no. Event names follow the action grammar, data ≤ 8 KiB.
+- **Timers are in memory.** `ctx.runAfter(delay, task)` has no floor and returns `Scheduled.cancel()`; a
+  restart drops them, so persist deadlines and re-arm in `register`.
+- How events travel is the host's business: nothing in the SDK names a transport.
+
+Test with `new FakePluginContext().withActions("join", "move").withChannels()`: `ctx.actions().call(caller,
+name, scope, payload)` as any `Callers.fan()` / `.podcaster()` / `.admin()`, `ctx.channels().subscribe(caller,
+ref)` (a refusal throws `SubscriptionRefusedException`) and read `events()` or `published(ref)`, and
+`ctx.advanceTimers(Duration)` to run timers. The kit is synchronous: executor, deadlines and rate limits are
+the host's to test. In TypeScript, `makeMockActions({ move: (payload, { scope }) => … })` (throw
+`actionRejection(code)` or `rateLimited(ms)`) and `makeMockChannels()` with `emit` / `reset` / `refuse` /
+`end`.
 
 ## Deep links & navigation — `ctx.route` (navigate since 0.7.0)
 

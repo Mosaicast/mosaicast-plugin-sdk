@@ -1,4 +1,18 @@
-# Migrating a plugin to `platformApi` 0.19.2
+# Migrating a plugin to `platformApi` 0.20.0
+
+## 0.19.x → 0.20.0: realtime, opt-in
+
+**Nothing has to change** beyond the version: every addition is opt-in, and an undeclared `actions` /
+`channels` block leaves `ctx.actions()` / `ctx.channels()` (`ctx.actions` / `ctx.channels`) `null`. Bump
+`platformApi` to `"0.20.0"` and the SDK to `0.20.0` in npm and Gradle — a minor: core matches `major.minor`, so a
+`"0.19.x"` manifest no longer loads on a 0.20 host.
+
+- **A test stub implementing `PluginContext` by hand** needs `actions()`, `channels()` (both may return `null`)
+  and `runAfter(Duration, Runnable)`. `FakePluginContext` already has them.
+- **A `makeMockCtx`-built context** gains `actions: null` and `channels: null`; nothing to do.
+- **Polling the doc store for another user's input?** That is what actions and channels replace — see the
+  README's Realtime section and ARCHITECTURE §7.9. State only the backend should read goes under
+  `data.backendPrivate`.
 
 ## 0.19.1 → 0.19.2: drop the GitHub Packages block
 

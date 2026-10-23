@@ -7,6 +7,69 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] — 2026-10-23
+
+Realtime plugin features: **actions** (request-time calls into the backend), **channels** (live events to
+subscribed browsers), one-shot **timers**, and **`data.backendPrivate`** keys no client reaches (ARCHITECTURE
+§7.9). A **minor** bump, for the reason 0.19.0 was one: core ignores unknown manifest keys, so a 0.19 host would
+load a plugin declaring `backendPrivate` and serve its private state at the plugin floor, and the new Java
+methods would fail to link. **Core must pin `mosaicastSdk = "0.20.0"`** in the release that implements §7.9
+(core#298, core 0.10.0).
+
+### Added
+
+- **`actions`** manifest block (#115) and `PluginContext.actions()` → `Actions.handle(name, ActionHandler)`. A handler
+  gets an `ActionCall` — host-resolved `caller()` (`Caller(userId, role)`), host-checked `scope()`,
+  `payload()`, `receivedAt()` (stamped before queueing) and `store()`, whose `USER` scope resolves to the
+  caller. Its return value is the JSON answer (`null` → 204); `ActionRejectedException(code[, detail])` is a 422
+  with the plugin's `code`; a payload `payload(Class)` cannot read, escaping the handler, is a 400
+  `bad-request`. `Actions.NAME_PATTERN` / `MAX_BODY_BYTES`. TS: `ctx.actions: ActionsClient | null`,
+  `call(name, payload?, { scope? })`; signed out, it rejects with a 401 `unauthorized` without sending a
+  request. The host checks in a fixed order, each refusal with its own problem type: the block and the name
+  (404 `not-found` / `unknown-action`), signed in (401), the name's `callableBy` (403), the body cap (413), the
+  scope (404 `not-found`), the rate limits (429, `retryAfterMs`), a registered handler (503
+  `action-unavailable`); then a full queue is 503 `action-busy` and an overrun deadline 504 `action-timeout`.
+- **`channels`** manifest block and `PluginContext.channels()` → `Channels.channel(scope, name)`, `authorize`,
+  `onJoin` / `onLeave` (`ChannelListener(ChannelRef, Caller)`); `Channel.publish`, `publishTo`, `subscribers`,
+  `kick`, `ref`; `ChannelRef`, `Channels.NAME_PATTERN`, `Channel.MAX_EVENT_BYTES`. TS: `ctx.channels:
+  ChannelsClient | null`, `subscribe(name, onEvent, { scope?, onReset?, onStatus? })` → `ChannelSubscription`,
+  `ChannelEvent { event, data, at }`, `ChannelStatus`. `refused` (the floor, the authorizer, the subscription
+  cap, a `kick`, or signed out — then without a request) and `closed` (sign-out, account erasure, a role or
+  site-access change) are terminal; a 429 is not — the subscription stays `connecting` and retries after
+  `retryAfterMs`. Subscriptions are session-bound. Transport-neutral: nothing names how events travel.
+- **`PluginContext.runAfter(Duration, Runnable)`** → `Scheduled.cancel()`: one-shot, in memory, no floor; a
+  zero delay runs as soon as possible, a negative or `null` one is an `IllegalArgumentException`.
+- **Size caps are measured on UTF-8 JSON**: 16 KiB for an action's whole `{ scope, payload }` body, 8 KiB for
+  an event's serialized `data` (`publish` refuses more with an `IllegalArgumentException`).
+- **`data.backendPrivate`**: a single client `GET` / `PUT` / `DELETE` is a 403 `backend-private-key`, listings
+  drop the keys, batches leave them absent; ignored for `user` scopes and for `ctx.store()`. Checked after the
+  plugin floor: a write goes plugin floor → `backendPrivate` → `backendOwned` → key floor, a read plugin floor →
+  `backendPrivate` → key floor.
+- TS: `PROBLEM_TYPES` gains `badRequest`, `backendPrivateKey`, `notFound`, `unknownAction`, `payloadTooLarge`,
+  `tooManyRequests`, `actionUnavailable`, `actionRejected`, `actionBusy`, `actionTimeout`; `ProblemDetail` gains
+  `code` and `retryAfterMs`; helpers `isActionRejected` and `isRateLimited` (429 or a busy plugin's 503);
+  `ACTION_NAME_PATTERN`, `CHANNEL_NAME_PATTERN`, `ACTION_BODY_LIMIT`, `CHANNEL_EVENT_LIMIT`; manifest types
+  `PluginActionsDeclaration`, `PluginActionNameDeclaration`, `PluginChannelsDeclaration`.
+- Test kit, Java: `FakePluginContext.withActions(names…)` / `withChannels()`, `FakeActions.call(caller, name,
+  scope, payload)` with `withCallableBy` / `withNameFloor`, `FakeChannels.subscribe(caller, ref)` →
+  `FakeSubscription` (refusal throws `SubscriptionRefusedException` with a `reason()`), `published(ref)`,
+  `endAccess(userId)`, `Callers.fan()/podcaster()/admin()`, a fake clock (`now()`, `advanceTimers(Duration)`,
+  `pendingTimers()`), `InMemoryDocStore.withBackendPrivate(...)`. Synchronous by design: no executor, deadline
+  or rate limit.
+- Test kit, TS: `makeMockActions(handlers, { scope?, signedIn? })`, `makeMockChannels({ scope?, signedIn? })`
+  with `emit` / `reset` / `refuse` / `end`, `actionRejection(code)`, `rateLimited(ms)`; `makeMockDocs` honours
+  `backendPrivate`. `makeMockCtx` keeps `actions` and `channels` `null` unless passed.
+
+### Changed
+
+- **`PluginContext` gains three abstract methods** (`actions()`, `channels()`, `runAfter(...)`). Only the host
+  and `FakePluginContext` implement it; a plugin's own stub of the interface must add them.
+- **`docs/ARCHITECTURE.md`** synced from mosaicast-core f876541 (core#298): the new §7.9 plus §7.2, §7.4, §7.5, §7.6,
+  §13 and §14 for 0.20.0, and core's changes since f8dd752 — §18 site access and the edge, §19 anonymous
+  counting, the session store, `--mc-accent-2`.
+- Docs: "the backend cannot write a `USER` partition" now names its one exception, `ActionCall.store()`, and
+  the `backendOwned` rationale for ignoring `USER` scopes is reworded (the partition is its owner's).
+
 ## [0.19.2] — 2026-10-19
 
 The first release on **Maven Central**. No contract or API change; `platformApi` 0.19 keeps loading.

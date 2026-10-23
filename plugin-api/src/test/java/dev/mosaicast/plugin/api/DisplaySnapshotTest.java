@@ -90,12 +90,15 @@ class DisplaySnapshotTest {
             @Override public Users users() { return null; }
             @Override public Notifier notifier() { return null; }
             @Override public CrossUserStore allUsers() { return null; }
+            @Override public Actions actions() { return null; }
+            @Override public Channels channels() { return null; }
             @Override public Locales locales() { return null; }
             @Override public Translation translation() { return null; }
             @Override public PluginConfig config() { return null; }
             @Override public FeedAccess feeds() { return null; }
             @Override public org.slf4j.Logger logger() { return null; }
             @Override public void onSchedule(Supplier<java.time.Duration> every, Runnable task) { }
+            @Override public Scheduled runAfter(java.time.Duration delay, Runnable task) { return () -> false; }
         };
     }
 }
