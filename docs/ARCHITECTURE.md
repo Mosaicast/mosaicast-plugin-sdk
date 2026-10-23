@@ -503,8 +503,8 @@ class ActionRejectedException extends RuntimeException {     // → 422 …/prob
 | the block declares `name` | 404 `…/unknown-action` |
 | a signed-in caller | 401 `unauthorized` |
 | the name's `callableBy` | 403 `forbidden` |
-| the scope exists and this caller may see it (§4.3, §10) | 404 `not-found` — absence, never "you may not" |
 | body ≤ 16 KiB | 413 `…/payload-too-large` |
+| the scope exists and this caller may see it (§4.3, §10) | 404 `not-found` — absence, never "you may not" |
 | per-user and per-plugin budget | 429 `too-many-requests`, `Retry-After` + `retryAfterMs` |
 | a handler is registered for the name | 503 `…/action-unavailable` — the author's wiring bug, worded apart from a typo |
 

@@ -42,8 +42,9 @@ package dev.mosaicast.plugin.api;
  *       name is not declared;</li>
  *   <li>401 {@code unauthorized} — not signed in; 403 {@code forbidden} — below the name's
  *       {@code callableBy};</li>
+ *   <li>413 {@code payload-too-large} — the body exceeds {@link #MAX_BODY_BYTES} (checked before the scope,
+ *       which travels inside the body);</li>
  *   <li>404 {@code not-found} — the scope does not exist or is not visible to the caller;</li>
- *   <li>413 {@code payload-too-large} — the body exceeds {@link #MAX_BODY_BYTES};</li>
  *   <li>429 {@code too-many-requests} with {@code Retry-After} and {@code retryAfterMs} — over a budget;</li>
  *   <li>503 {@code action-unavailable} — declared but no handler registered: the author's wiring bug;</li>
  *   <li>then the handler: its value as JSON, {@code null} as 204, {@link ActionRejectedException} as 422

@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -145,7 +146,8 @@ public final class FakeActions implements Actions {
      * @param caller  who calls; never {@code null}
      * @param name    the action; never {@code null}
      * @param scope   the scope the call is made in; never {@code null}, never {@link ScopeType#USER}
-     * @param payload the payload, serialized as the browser would send it; may be {@code null}
+     * @param payload the payload, serialized as the browser would send it; may be {@code null}. Measured with
+     *                its scope as the {@code { scope, payload }} body the host caps
      * @return the handler's answer as the JSON body, or {@code null} for a 204
      * @throws ActionRejectedException  as the handler threw it (the host's 422)
      * @throws IllegalStateException    where the host refuses before the handler: an undeclared name (404),
@@ -165,14 +167,18 @@ public final class FakeActions implements Actions {
             throw new IllegalStateException("a " + caller.role() + " cannot call '" + name + "': its callableBy is "
                     + floor + " (the host answers 403)");
         }
-        if (scope.type() == ScopeType.USER) {
-            throw new IllegalArgumentException("an action is called in a page scope, never USER");
-        }
+        // The size before the scope, as the host checks: the scope travels inside the bounded body.
         ObjectMapper mapper = store.mapper();
         JsonNode body = payload == null ? NullNode.getInstance() : mapper.valueToTree(payload);
-        if (mapper.writeValueAsBytes(body).length > MAX_BODY_BYTES) {
-            throw new IllegalStateException("action '" + name + "': the payload exceeds " + MAX_BODY_BYTES
-                    + " bytes (the host answers 413)");
+        Map<String, Object> envelope = Map.of(
+                "scope", Map.of("type", scope.type().name().toLowerCase(Locale.ROOT), "id", scope.id()),
+                "payload", body);
+        if (mapper.writeValueAsBytes(envelope).length > MAX_BODY_BYTES) {
+            throw new IllegalStateException("action '" + name + "': the body exceeds " + MAX_BODY_BYTES
+                    + " bytes as UTF-8 JSON (the host answers 413)");
+        }
+        if (scope.type() == ScopeType.USER) {
+            throw new IllegalArgumentException("an action is called in a page scope, never USER");
         }
         ActionHandler handler = handlers.get(name);
         if (handler == null) {
