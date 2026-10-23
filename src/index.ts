@@ -21,7 +21,7 @@
  * rejects a mismatch at startup (ARCHITECTURE §7.2). While the SDK is pre-1.0 a breaking change is
  * therefore a *minor* bump; from `1.0.0` on, breaking means major.
  */
-export const PLATFORM_API_VERSION = '0.19.2' as const;
+export const PLATFORM_API_VERSION = '0.20.0' as const;
 
 /** A user's role (ARCHITECTURE §8.5). Anonymous visitors have no role (`user` is `null`). */
 export type Role = 'admin' | 'podcaster' | 'fan';
@@ -357,6 +357,21 @@ export interface ProblemDetail {
   detail?: string;
   /** A URI identifying this specific occurrence. */
   instance?: string;
+  /**
+   * The plugin's reason on a 422 `actionRejected` — the `code` of the Java `ActionRejectedException`, in the
+   * {@link ACTION_NAME_PATTERN} grammar. Map it to a message in the reader's language; {@link detail} is for
+   * developers. Read it through {@link isActionRejected}.
+   *
+   * @since 0.20.0
+   */
+  code?: string;
+  /**
+   * How long to wait before trying again, in milliseconds — on a 429 `tooManyRequests` and a 503
+   * `actionBusy`. The `Retry-After` header carries the same in seconds. Read it through {@link isRateLimited}.
+   *
+   * @since 0.20.0
+   */
+  retryAfterMs?: number;
 }
 
 /**
@@ -424,6 +439,11 @@ export function isPluginApiError(e: unknown): e is PluginApiError {
  * `unauthorized` is the 401 of an anonymous `user`-scope request. A plain `===` comparison is enough: the host
  * sends these strings verbatim.
  *
+ * Since 0.20.0 a fourth 403 — **`backendPrivateKey`**, a key in `data.backendPrivate` that no client reaches —
+ * and the answers of {@link ActionsClient.call}: `notFound`, `unknownAction`, `payloadTooLarge`,
+ * `tooManyRequests`, `actionUnavailable`, `actionRejected`, `actionBusy` and `actionTimeout`. Two helpers
+ * narrow the ones a UI reacts to: {@link isActionRejected} and {@link isRateLimited}.
+ *
  * @since 0.19.0
  */
 export const PROBLEM_TYPES = Object.freeze({
@@ -435,7 +455,86 @@ export const PROBLEM_TYPES = Object.freeze({
   backendOwnedKey: 'https://mosaicast.dev/problems/backend-owned-key',
   /** 403 — a single read or write of a key whose `data.keyFloors` floor is above the caller's role. */
   keyFloor: 'https://mosaicast.dev/problems/key-floor',
+  /** 403 — a single read or write of a `data.backendPrivate` key, whoever asks (since 0.20.0). */
+  backendPrivateKey: 'https://mosaicast.dev/problems/backend-private-key',
+  /**
+   * 404 — the address does not exist for this caller: no `actions` block, or a scope that does not exist or
+   * that the caller may not see — answered as absence, never as "you may not" (since 0.20.0).
+   */
+  notFound: 'https://mosaicast.dev/problems/not-found',
+  /** 404 — an action name the manifest does not declare: a typo (since 0.20.0). */
+  unknownAction: 'https://mosaicast.dev/problems/unknown-action',
+  /** 413 — an action payload over {@link ACTION_BODY_LIMIT} bytes (since 0.20.0). */
+  payloadTooLarge: 'https://mosaicast.dev/problems/payload-too-large',
+  /** 429 — over a rate limit; the body carries `retryAfterMs` (since 0.20.0). */
+  tooManyRequests: 'https://mosaicast.dev/problems/too-many-requests',
+  /** 503 — a declared action with no handler registered: the plugin author's wiring bug (since 0.20.0). */
+  actionUnavailable: 'https://mosaicast.dev/problems/action-unavailable',
+  /** 422 — the plugin refused the call; the body carries its `code` (since 0.20.0). */
+  actionRejected: 'https://mosaicast.dev/problems/action-rejected',
+  /** 503 — the plugin's queue is full; the body carries `retryAfterMs` (since 0.20.0). */
+  actionBusy: 'https://mosaicast.dev/problems/action-busy',
+  /** 504 — the plugin's handler overran its deadline (since 0.20.0). */
+  actionTimeout: 'https://mosaicast.dev/problems/action-timeout',
 } as const);
+
+/**
+ * Whether a caught value is the plugin refusing an action call — a 422 {@link PROBLEM_TYPES}`.actionRejected`
+ * carrying the plugin's {@link ProblemDetail.code}.
+ *
+ * Structural, like {@link isPluginApiError}, and for the same reason: there is no subclass to `instanceof`,
+ * because the error crosses a bundle boundary from the host.
+ *
+ * ```ts
+ * try {
+ *   await ctx.actions!.call('move', { cell });
+ * } catch (e) {
+ *   if (isActionRejected(e)) return showNotice(i18n.t(`error.${e.problem.code}`));   // 'not-your-turn'
+ *   throw e;
+ * }
+ * ```
+ *
+ * @param e the caught value
+ * @returns whether it is a rejection, narrowed so `e.problem.code` is a string
+ * @since 0.20.0
+ */
+export function isActionRejected(
+  e: unknown,
+): e is PluginApiError & { readonly problem: ProblemDetail & { code: string } } {
+  return (
+    isPluginApiError(e) &&
+    e.status === 422 &&
+    e.problem?.type === PROBLEM_TYPES.actionRejected &&
+    typeof e.problem.code === 'string'
+  );
+}
+
+/**
+ * Whether a caught value says "not now, try again shortly" — a 429 {@link PROBLEM_TYPES}`.tooManyRequests` or
+ * a 503 {@link PROBLEM_TYPES}`.actionBusy`.
+ *
+ * Both mean the same thing to a UI, so one helper covers both: wait {@link ProblemDetail.retryAfterMs} and
+ * retry, or tell the user to slow down. Neither is the plugin's answer to the call — that is
+ * {@link isActionRejected}.
+ *
+ * ```ts
+ * catch (e) {
+ *   if (isRateLimited(e)) return setTimeout(retry, e.problem.retryAfterMs ?? 1000);
+ *   throw e;
+ * }
+ * ```
+ *
+ * @param e the caught value
+ * @returns whether it is a rate limit or a busy plugin, narrowed so `e.problem` is present
+ * @since 0.20.0
+ */
+export function isRateLimited(e: unknown): e is PluginApiError & { readonly problem: ProblemDetail } {
+  if (!isPluginApiError(e) || !e.problem) return false;
+  return (
+    (e.status === 429 && e.problem.type === PROBLEM_TYPES.tooManyRequests) ||
+    (e.status === 503 && e.problem.type === PROBLEM_TYPES.actionBusy)
+  );
+}
 
 /**
  * The pattern every doc-store key must match — mirror of the Java `DocStore.KEY_PATTERN`.
@@ -2157,9 +2256,28 @@ export interface PluginDataDeclaration {
    * Declare a key here **and write it in your backend's `register`**, not only on a schedule: the
    * declaration refuses new client writes but does not remove a value a client wrote before it existed, so
    * a forged document otherwise survives until the next tick. It is ignored for `user` partitions, which
-   * the backend cannot write at all — even a bare `*` leaves those to their owner.
+   * stay their owner's whatever is declared — even a bare `*` leaves those to them.
    */
   backendOwned?: string[];
+  /**
+   * Keys **no client reaches at all**, admins included — only the backend's `ctx.store()` reads or writes
+   * them. State a plugin keeps between calls but shows nobody as stored: a game in progress, who was invited.
+   *
+   * {@link backendOwned} protects writes and leaves reads to the floor, and the highest {@link keyFloors}
+   * floor is still `admin`; this is the rule for "nobody over HTTP". A single {@link DocClient.get},
+   * `put` or `remove` rejects with a 403 whose type is `PROBLEM_TYPES.backendPrivateKey`;
+   * {@link DocClient.list} leaves the key out before paging; {@link DocClient.getMany} leaves it absent. The
+   * frontend learns about that state only through what an action answers ({@link ActionsClient}).
+   *
+   * Same {@link DOC_KEY_SELECTOR_PATTERN} grammar; ignored for the `user` scope, like the other per-key rules.
+   *
+   * ```json
+   * "data": { "readableBy": "fan", "writableBy": "podcaster", "backendPrivate": ["game:*", "invites:*"] }
+   * ```
+   *
+   * @since 0.20.0
+   */
+  backendPrivate?: string[];
   /**
    * Whether this plugin's **backend** may read every user's `user` partition at once — the Java
    * `ctx.allUsers()`, which is `null` without this.
@@ -2428,6 +2546,64 @@ export interface PluginNotificationsDeclaration {
    * the plugin actually needs and expect less. Omit it to take whatever the install's default is.
    */
   perUserPerDay?: number;
+}
+
+/**
+ * The `actions` block of `plugin.json`: request-time calls into the plugin's backend (ARCHITECTURE §7.9).
+ *
+ * Declared, never derived, like the blocks around it: absent means `ctx.actions` is `null` and the endpoint
+ * 404s. `names` is the closed set a client may call.
+ *
+ * ```json
+ * "actions": { "callableBy": "fan",
+ *              "names": { "join": {}, "move": {}, "start": { "callableBy": "podcaster" } },
+ *              "perUserPerMinute": 120, "perPluginPerMinute": 2000 }
+ * ```
+ *
+ * @since 0.20.0
+ */
+export interface PluginActionsDeclaration {
+  /**
+   * The lowest role that may call any action. Defaults to `fan`; `anonymous` is refused at load — an action
+   * runs plugin code on the caller's behalf, and a caller with no account is one nothing can hold to account.
+   */
+  callableBy?: Exclude<DataAccessRole, 'anonymous'>;
+  /** The callable names, each matching {@link ACTION_NAME_PATTERN}, with an optional per-name floor. */
+  names: Record<string, PluginActionNameDeclaration>;
+  /** Calls per user per minute this plugin is **asking** for; the operator caps it. */
+  perUserPerMinute?: number;
+  /** Calls per minute across all users this plugin is **asking** for; the operator caps it. */
+  perPluginPerMinute?: number;
+}
+
+/**
+ * One entry of {@link PluginActionsDeclaration.names}.
+ *
+ * @since 0.20.0
+ */
+export interface PluginActionNameDeclaration {
+  /** Raises this name's floor above the block's `callableBy` — raise-only, like `keyFloors`. */
+  callableBy?: Exclude<DataAccessRole, 'anonymous'>;
+}
+
+/**
+ * The `channels` block of `plugin.json`: live events from the backend to subscribed browsers
+ * (ARCHITECTURE §7.9).
+ *
+ * Absent means `ctx.channels` is `null`. How events travel is the host's business and is not in the
+ * manifest.
+ *
+ * ```json
+ * "channels": { "subscribableBy": "fan", "perUserSubscriptions": 4 }
+ * ```
+ *
+ * @since 0.20.0
+ */
+export interface PluginChannelsDeclaration {
+  /** The lowest role that may subscribe. Defaults to `fan`; `anonymous` is refused at load in this version. */
+  subscribableBy?: Exclude<DataAccessRole, 'anonymous'>;
+  /** Concurrent subscriptions per user to this plugin it is **asking** for; the operator caps it. */
+  perUserSubscriptions?: number;
 }
 
 /**
@@ -2762,6 +2938,10 @@ export interface PluginManifest {
   identity?: PluginIdentityDeclaration;
   /** Opt-in sending of notifications. Absent means `ctx.notify` is `null`. */
   notifications?: PluginNotificationsDeclaration;
+  /** Opt-in request-time calls into the backend (since 0.20.0). Absent means `ctx.actions` is `null`. */
+  actions?: PluginActionsDeclaration;
+  /** Opt-in live events to subscribed browsers (since 0.20.0). Absent means `ctx.channels` is `null`. */
+  channels?: PluginChannelsDeclaration;
   /** Opt-in use of admin-configured third-party services. Absent means `ctx.translation` is `null`. */
   external?: PluginExternalDeclaration;
   /** Config fields core renders as an admin form; plugins never build their own config UI. */
@@ -2888,6 +3068,176 @@ export interface TranslationClient {
   translate(request: TranslationRequest): Promise<TranslationResult>;
   /** Whether a call would even be attempted. Disable your button on this rather than letting a click 409. */
   available(): boolean;
+}
+
+/**
+ * The grammar of an action name, also used for channel event names and rejection codes — mirror of the Java
+ * `Actions.NAME_PATTERN`.
+ *
+ * @since 0.20.0
+ */
+export const ACTION_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * The grammar of a channel name — mirror of the Java `Channels.NAME_PATTERN`. The plugin gives a name its
+ * meaning: `game:42`, `inbox`.
+ *
+ * @since 0.20.0
+ */
+export const CHANNEL_NAME_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
+
+/**
+ * The largest action request body the host accepts, in bytes (the JSON of `{ scope, payload }`); above it
+ * a call rejects with 413 {@link PROBLEM_TYPES}`.payloadTooLarge`. Mirror of the Java `Actions.MAX_BODY_BYTES`.
+ *
+ * @since 0.20.0
+ */
+export const ACTION_BODY_LIMIT = 16384;
+
+/**
+ * The largest channel event payload, as JSON, in bytes — the backend cannot publish more. Mirror of the
+ * Java `Channel.MAX_EVENT_BYTES`.
+ *
+ * @since 0.20.0
+ */
+export const CHANNEL_EVENT_LIMIT = 8192;
+
+/**
+ * Options of {@link ActionsClient.call}.
+ *
+ * @since 0.20.0
+ */
+export interface ActionCallOptions {
+  /** The scope to call in. Defaults to `ctx.scope`; a site-wide action passes `{ type: 'site', id: 'main' }`. */
+  scope?: Scope;
+}
+
+/**
+ * Calls into the plugin's own backend at request time — `ctx.actions`, present when the manifest declares an
+ * `actions` block (ARCHITECTURE §7.9).
+ *
+ * An action is a function the backend registered under a name the manifest declares (Java
+ * `ctx.actions().handle(name, handler)`). The host authenticates the call, checks the floors and the scope,
+ * applies the rate limits and only then runs the handler — which sees the caller as the host resolved it,
+ * never as the payload claims.
+ *
+ * ```ts
+ * const board = await ctx.actions!.call<Board>('move', { cell: 3 });
+ * ```
+ *
+ * @since 0.20.0
+ */
+export interface ActionsClient {
+  /**
+   * Calls one action.
+   *
+   * Signed out, it rejects at once with a 401 {@link PROBLEM_TYPES}`.unauthorized` and makes no request:
+   * there is no anonymous caller.
+   *
+   * @param name    a name the manifest declares, matching {@link ACTION_NAME_PATTERN}
+   * @param payload anything JSON-serializable, up to {@link ACTION_BODY_LIMIT} bytes with its envelope
+   * @param opts    the scope to call in; defaults to `ctx.scope`
+   * @returns the handler's answer, or `null` when it answered nothing (204)
+   * @throws PluginApiError — test it with {@link isActionRejected} (422, the plugin's `code`) and
+   *         {@link isRateLimited} (429 or a busy plugin's 503, with `retryAfterMs`). The rest are bugs or
+   *         outages: 404 `notFound` / `unknownAction`, 401, 403 `forbidden`, 413, 503 `actionUnavailable`,
+   *         504 `actionTimeout`, 500.
+   */
+  call<T = unknown>(name: string, payload?: unknown, opts?: ActionCallOptions): Promise<T | null>;
+}
+
+/**
+ * Where a channel subscription stands, reported through {@link ChannelSubscribeOptions.onStatus}.
+ *
+ * - `connecting` — not delivering yet: the first connect, a dropped connection being resumed, or waiting out a
+ *   rate limit (`retryAfterMs`). Not terminal; the shell keeps trying.
+ * - `open` — delivering events.
+ * - `refused` — **terminal**. The floor, the plugin's authorizer or the subscription cap said no, the plugin
+ *   kicked this user, or the visitor is signed out (then without a request).
+ * - `closed` — **terminal**. {@link ChannelSubscription.close}, or the host ended it because access changed:
+ *   sign-out, a ban, a role change, a site-access change, the plugin disabled.
+ *
+ * @since 0.20.0
+ */
+export type ChannelStatus = 'connecting' | 'open' | 'refused' | 'closed';
+
+/**
+ * One event a backend published, as `onEvent` receives it.
+ *
+ * @since 0.20.0
+ */
+export interface ChannelEvent {
+  /** The event name the backend gave, matching {@link ACTION_NAME_PATTERN}. */
+  event: string;
+  /** The payload, parsed from JSON; `null` when the backend sent none. */
+  data: unknown;
+  /** When the host published it, ISO-8601. */
+  at: string;
+}
+
+/**
+ * Options of {@link ChannelsClient.subscribe}.
+ *
+ * @since 0.20.0
+ */
+export interface ChannelSubscribeOptions {
+  /** The scope of the channel. Defaults to `ctx.scope`. */
+  scope?: Scope;
+  /**
+   * Called when events may have been missed and cannot be replayed — a long disconnect, a host restart. Fetch
+   * state again through an action, exactly as on the first load.
+   */
+  onReset?: () => void;
+  /** Called on every {@link ChannelStatus} change, starting with `connecting`. */
+  onStatus?: (status: ChannelStatus) => void;
+}
+
+/**
+ * A handle on one subscription.
+ *
+ * @since 0.20.0
+ */
+export interface ChannelSubscription {
+  /** Ends the subscription. Idempotent; reports `closed` once. Call it when the component unmounts. */
+  close(): void;
+}
+
+/**
+ * Live events from the plugin's backend — `ctx.channels`, present when the manifest declares a `channels`
+ * block (ARCHITECTURE §7.9).
+ *
+ * **Events are notifications of change, not the state.** The host never stores them: a subscriber gets what
+ * is published while it is subscribed, and nothing from before. So the pattern is always the same —
+ * subscribe first, then fetch the state through an action, then apply events, skipping any your own version
+ * numbers say you have already seen — and `onReset` means "fetch again":
+ *
+ * ```ts
+ * let state: Game | null = null;
+ * const load = async () => { state = await ctx.actions!.call<Game>('state'); render(state); };
+ * const sub = ctx.channels!.subscribe('game:42', (e) => {
+ *   if (e.event === 'moved' && state && (e.data as Game).version > state.version) render((state = e.data as Game));
+ * }, { onReset: load, onStatus: (s) => showStatus(s) });
+ * await load();
+ * // on unmount: sub.close();
+ * ```
+ *
+ * How events travel is the host's business; nothing here depends on it.
+ *
+ * @since 0.20.0
+ */
+export interface ChannelsClient {
+  /**
+   * Subscribes to one of this plugin's channels.
+   *
+   * Returns at once; the outcome arrives through `onStatus`. Signed out, the status goes straight to
+   * `refused` without a request.
+   *
+   * @param name    the channel, matching {@link CHANNEL_NAME_PATTERN}
+   * @param onEvent called with each event, in publish order
+   * @param opts    the scope, and the reset and status callbacks
+   * @returns the subscription, to close on unmount
+   */
+  subscribe(name: string, onEvent: (e: ChannelEvent) => void, opts?: ChannelSubscribeOptions): ChannelSubscription;
 }
 
 /**
@@ -3048,6 +3398,20 @@ export interface PluginContext {
    * @since 0.14.0
    */
   notify: NotifyClient | null;
+  /**
+   * Request-time calls into this plugin's backend, or **`null`** when the manifest declares no `actions`
+   * block (ARCHITECTURE §7.9). See {@link ActionsClient}.
+   *
+   * @since 0.20.0
+   */
+  actions: ActionsClient | null;
+  /**
+   * Live events from this plugin's backend, or **`null`** when the manifest declares no `channels` block
+   * (ARCHITECTURE §7.9). See {@link ChannelsClient}.
+   *
+   * @since 0.20.0
+   */
+  channels: ChannelsClient | null;
   /**
    * Read access to this plugin's provisioned relational tables, or **`null`** when the manifest declares
    * no `storage.schema` (ARCHITECTURE §7.6).

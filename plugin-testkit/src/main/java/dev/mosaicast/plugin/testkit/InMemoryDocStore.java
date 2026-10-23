@@ -56,6 +56,10 @@ import tools.jackson.databind.json.JsonMapper;
  * assertTrue(store.asAnonymous().query(Scope.site(), "import:").isEmpty());   // a visitor does not see it
  * }</pre>
  *
+ * <p>And {@code data.backendPrivate} (since 0.20.0): declare it with {@link #withBackendPrivate(String...)} and
+ * no client view reaches a matching key at all — a single read or write throws where the host answers 403, and
+ * {@link #query(Scope, String)} leaves it out — while this store, the backend's, reads and writes it freely.
+ *
  * <pre>{@code
  * InMemoryDocStore store = new InMemoryDocStore();
  * UUID alice = UUID.randomUUID();
@@ -81,9 +85,12 @@ public final class InMemoryDocStore implements DocStore {
     private final List<String> backendOwned;
     // Shared with every view: the manifest's data.keyFloors, which bind clients, not the backend.
     private final List<KeyFloor> keyFloors;
+    // Shared with every view: the manifest's data.backendPrivate patterns, which no client reaches.
+    private final List<String> backendPrivate;
     // Whether this is a client view (asUser / asAnonymous) rather than the backend's store.
     private final boolean client;
-    // Non-null only on an asUser(...) view: the caller a USER scope resolves to.
+    // Non-null on an asUser(...) view and on the store an action hands its handler: the caller a USER scope
+    // resolves to.
     private final UUID caller;
     // The client view's role; null for the backend and for an anonymous view.
     private final Role role;
@@ -104,19 +111,21 @@ public final class InMemoryDocStore implements DocStore {
         this.userData = new LinkedHashMap<>();
         this.backendOwned = new ArrayList<>();
         this.keyFloors = new ArrayList<>();
+        this.backendPrivate = new ArrayList<>();
         this.client = false;
         this.caller = null;
         this.role = null;
     }
 
-    /** A client view sharing the backing store's maps by reference — a write through it is a write to both. */
-    private InMemoryDocStore(InMemoryDocStore backing, UUID caller, Role role) {
+    /** A view sharing the backing store's maps by reference — a write through it is a write to both. */
+    private InMemoryDocStore(InMemoryDocStore backing, boolean client, UUID caller, Role role) {
         this.mapper = backing.mapper;
         this.data = backing.data;
         this.userData = backing.userData;
         this.backendOwned = backing.backendOwned;
         this.keyFloors = backing.keyFloors;
-        this.client = true;
+        this.backendPrivate = backing.backendPrivate;
+        this.client = client;
         this.caller = caller;
         this.role = role;
     }
@@ -131,7 +140,8 @@ public final class InMemoryDocStore implements DocStore {
      * {@link #acrossUsers()}.
      *
      * <p>Note this is a <em>test</em> affordance with no counterpart in the contract: no production
-     * {@code DocStore} can write into another user's partition.
+     * {@code DocStore} can write into another user's partition. (The store an action hands its handler,
+     * {@code ActionCall.store()}, reaches the <em>caller's</em>; {@link FakeActions} wires that up itself.)
      *
      * <p>The caller is a {@link Role#FAN} — the ordinary signed-in listener — which only matters once a
      * {@link #withKeyFloor(String, String, String) key floor} is declared; use {@link #asUser(UUID, Role)} to
@@ -158,7 +168,7 @@ public final class InMemoryDocStore implements DocStore {
     public InMemoryDocStore asUser(UUID userId, Role role) {
         Objects.requireNonNull(userId, "userId");
         Objects.requireNonNull(role, "role");
-        return new InMemoryDocStore(this, userId, role);
+        return new InMemoryDocStore(this, true, userId, role);
     }
 
     /**
@@ -171,7 +181,20 @@ public final class InMemoryDocStore implements DocStore {
      * @since 0.19.0
      */
     public InMemoryDocStore asAnonymous() {
-        return new InMemoryDocStore(this, null, null);
+        return new InMemoryDocStore(this, true, null, null);
+    }
+
+    /**
+     * The backend's store as an action handler sees it: every rule a backend skips is skipped, and
+     * {@link ScopeType#USER} resolves to {@code userId} — {@code ActionCall.store()}.
+     */
+    InMemoryDocStore actingFor(UUID userId) {
+        return new InMemoryDocStore(this, false, Objects.requireNonNull(userId, "userId"), null);
+    }
+
+    /** The mapper values round-trip through, shared with the fakes that serialize like the host. */
+    ObjectMapper mapper() {
+        return mapper;
     }
 
     /**
@@ -199,6 +222,31 @@ public final class InMemoryDocStore implements DocStore {
             Objects.requireNonNull(pattern, "pattern");
             requireSelector(pattern, "backendOwned");
             backendOwned.add(pattern);
+        }
+        return this;
+    }
+
+    /**
+     * Declares keys only this plugin's backend reaches, as the manifest's {@code data.backendPrivate} does.
+     *
+     * <p>A client view — {@link #asUser(UUID, Role)}, {@link #asAnonymous()} — cannot read, write or delete a
+     * matching key, whatever its role: {@link #get}, {@link #put} and {@link #delete} throw
+     * {@link IllegalStateException} where the host answers 403 ({@code …/problems/backend-private-key}), and
+     * {@link #query} leaves the key out, as the host's listing does. This store, the backend's, is unaffected,
+     * and {@link ScopeType#USER} scopes are exempt, as in production.
+     *
+     * @param patterns the keys — each an exact key, a prefix ending in {@code *}, or the bare {@code *}
+     *                 ({@link DocStore#KEY_SELECTOR_PATTERN}); never {@code null}
+     * @return this instance, for chaining
+     * @throws IllegalArgumentException if a pattern is malformed
+     * @since 0.20.0
+     */
+    public InMemoryDocStore withBackendPrivate(String... patterns) {
+        Objects.requireNonNull(patterns, "patterns");
+        for (String pattern : patterns) {
+            Objects.requireNonNull(pattern, "pattern");
+            requireSelector(pattern, "backendPrivate");
+            backendPrivate.add(pattern);
         }
         return this;
     }
@@ -263,6 +311,7 @@ public final class InMemoryDocStore implements DocStore {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(type, "type");
+        refuseIfBackendPrivate(scope, key, "read");
         refuseBelowKeyFloor(scope, key, true);
         JsonNode node = documents(scope, false).get(key);
         if (node == null) {
@@ -281,6 +330,7 @@ public final class InMemoryDocStore implements DocStore {
                     "key '" + key + "' does not match " + KEY_PATTERN
                             + " — it would not be addressable from the frontend");
         }
+        refuseIfBackendPrivate(scope, key, "write");
         refuseIfBackendOwned(scope, key, "write");
         refuseBelowKeyFloor(scope, key, false);
         documents(scope, true).put(key, mapper.valueToTree(value));
@@ -290,6 +340,7 @@ public final class InMemoryDocStore implements DocStore {
     public boolean delete(Scope scope, String key) {
         Objects.requireNonNull(scope, "scope");
         Objects.requireNonNull(key, "key");
+        refuseIfBackendPrivate(scope, key, "delete");
         refuseIfBackendOwned(scope, key, "delete");
         refuseBelowKeyFloor(scope, key, false);
         return documents(scope, false).remove(key) != null;
@@ -301,8 +352,10 @@ public final class InMemoryDocStore implements DocStore {
         Objects.requireNonNull(keyPrefix, "keyPrefix");
         List<DocEntry> out = new ArrayList<>();
         for (Map.Entry<String, JsonNode> e : documents(scope, false).entrySet()) {
-            // Below the reader's key floor: left out of the page rather than failing it, as the host lists.
-            if (e.getKey().startsWith(keyPrefix) && !belowKeyFloor(scope, e.getKey(), true)) {
+            // Backend-private, or below the reader's key floor: left out of the page rather than failing it,
+            // as the host lists.
+            if (e.getKey().startsWith(keyPrefix) && !isBackendPrivate(scope, e.getKey())
+                    && !belowKeyFloor(scope, e.getKey(), true)) {
                 out.add(new DocEntry(e.getKey(), e.getValue()));
             }
         }
@@ -340,7 +393,7 @@ public final class InMemoryDocStore implements DocStore {
      * Refuses a client write to a backend-owned key, as the host's 403 does.
      *
      * <p>Only a client is bound: the backend store is not a client view, so its write goes
-     * through. {@code USER} scopes are exempt, since the backend cannot write one at all.
+     * through. {@code USER} scopes are exempt, since the partition is its owner's whatever is declared.
      *
      * @param scope  the scope addressed
      * @param key    the key addressed
@@ -357,6 +410,28 @@ public final class InMemoryDocStore implements DocStore {
                                 + pattern + "' (the host answers 403)");
             }
         }
+    }
+
+    /** Refuses any client access to a backend-private key, as the host's 403 does. */
+    private void refuseIfBackendPrivate(Scope scope, String key, String action) {
+        if (isBackendPrivate(scope, key)) {
+            throw new IllegalStateException(
+                    "a client cannot " + action + " '" + key + "': it is backend-private (data.backendPrivate), "
+                            + "so only the backend reaches it (the host answers 403)");
+        }
+    }
+
+    /** Whether a client view addresses a backend-private key; never for the backend or a USER scope. */
+    private boolean isBackendPrivate(Scope scope, String key) {
+        if (!client || scope.type() == ScopeType.USER) {
+            return false;
+        }
+        for (String pattern : backendPrivate) {
+            if (covers(pattern, key)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Refuses a client read or write below the key's floor, as the host's key-floor 403 does. */

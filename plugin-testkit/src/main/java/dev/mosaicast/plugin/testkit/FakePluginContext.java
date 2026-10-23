@@ -12,11 +12,13 @@ import dev.mosaicast.plugin.api.Notifier;
 import dev.mosaicast.plugin.api.PluginBlobs;
 import dev.mosaicast.plugin.api.PluginConfig;
 import dev.mosaicast.plugin.api.PluginContext;
+import dev.mosaicast.plugin.api.Scheduled;
 import dev.mosaicast.plugin.api.SchemaStore;
 import dev.mosaicast.plugin.api.Tags;
 import dev.mosaicast.plugin.api.Translation;
 import dev.mosaicast.plugin.api.Users;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -34,6 +36,10 @@ import java.util.function.Supplier;
  * and {@link #scheduledPeriods()} re-reads what period each task would run at now. Release and phase
  * listeners are kept, not called, until a test fires one with {@link #fireEpisodeReleased(String)} or
  * {@link #fireEpisodePhaseChanged(String, EpisodePhase)}.
+ *
+ * <p>Realtime (since 0.20.0): {@link #withActions(String...)} and {@link #withChannels()} stand in for the
+ * manifest's {@code actions} and {@code channels} blocks, and {@link #runAfter(Duration, Runnable)} waits on a
+ * fake clock that only {@link #advanceTimers(Duration)} moves — so a turn clock is tested without sleeping.
  *
  * <p>By default {@link #schema()} returns {@code null} (no schema declared, like most plugins); pass a
  * {@link SchemaStore} to the full constructor to test a schema-declaring plugin. Not thread-safe.
@@ -58,6 +64,14 @@ public final class FakePluginContext implements PluginContext {
     private final List<ScheduledTask> scheduled = new ArrayList<>();
     private final List<Consumer<String>> releaseListeners = new ArrayList<>();
     private final List<BiConsumer<String, EpisodePhase>> phaseListeners = new ArrayList<>();
+    private FakeActions actions;
+    private FakeChannels channels;
+    private Instant now = START;
+    private long timerSeq;
+    private final List<Timer> timers = new ArrayList<>();
+
+    /** Where the fake clock starts: a fixed instant, so a test's timestamps are the same on every run. */
+    public static final Instant START = Instant.parse("2026-01-01T00:00:00Z");
 
     /** Creates a context with an empty doc store, empty config, empty feeds, no schema and no blobs. */
     public FakePluginContext() {
@@ -524,6 +538,149 @@ public final class FakePluginContext implements PluginContext {
     public int episodeReleasedListenerCount() {
         return releaseListeners.size();
     }
+
+    /**
+     * Stands in for a manifest declaring an {@code actions} block with these {@code names}, so
+     * {@link #actions()} is a {@link FakeActions} the plugin can register handlers on. Calling it again adds
+     * names.
+     *
+     * <p>Off by default, as the declaration is: {@link #actions()} stays {@code null}, so a backend that forgot
+     * the block fails in its tests.
+     *
+     * @param names the declared action names, each matching {@link dev.mosaicast.plugin.api.Actions#NAME_PATTERN}
+     * @return this instance, for chaining
+     * @throws IllegalArgumentException if a name is malformed
+     * @since 0.20.0
+     */
+    public FakePluginContext withActions(String... names) {
+        if (actions == null) {
+            actions = new FakeActions(store, () -> now, names);
+        } else {
+            actions.declare(names);
+        }
+        return this;
+    }
+
+    /**
+     * The fake action registry, or {@code null} unless {@link #withActions(String...)} was called — the same
+     * {@code null} a plugin that declares no {@code actions} block sees from the host.
+     *
+     * @return the actions, or {@code null}
+     * @since 0.20.0
+     */
+    @Override
+    public FakeActions actions() {
+        return actions;
+    }
+
+    /**
+     * Stands in for a manifest declaring a {@code channels} block, so {@link #channels()} is a
+     * {@link FakeChannels}. Idempotent.
+     *
+     * @return this instance, for chaining
+     * @since 0.20.0
+     */
+    public FakePluginContext withChannels() {
+        if (channels == null) {
+            channels = new FakeChannels(store.mapper(), () -> now, logger);
+        }
+        return this;
+    }
+
+    /**
+     * The fake channel registry, or {@code null} unless {@link #withChannels()} was called — the same
+     * {@code null} a plugin that declares no {@code channels} block sees from the host.
+     *
+     * @return the channels, or {@code null}
+     * @since 0.20.0
+     */
+    @Override
+    public FakeChannels channels() {
+        return channels;
+    }
+
+    /**
+     * Keeps the task until the fake clock reaches its due time — nothing runs until
+     * {@link #advanceTimers(Duration)} moves the clock, not even a zero delay.
+     *
+     * <p>There is no pending cap here; the host's is an operator setting.
+     *
+     * @param delay how long to wait; zero or positive
+     * @param task  the task; never {@code null}
+     * @return a handle that cancels it
+     * @throws IllegalArgumentException if {@code delay} is {@code null} or negative, as on the host
+     * @since 0.20.0
+     */
+    @Override
+    public Scheduled runAfter(Duration delay, Runnable task) {
+        if (delay == null || delay.isNegative()) {
+            throw new IllegalArgumentException("runAfter delay must be zero or positive: " + delay);
+        }
+        Objects.requireNonNull(task, "task");
+        Timer timer = new Timer(now.plus(delay), timerSeq++, task);
+        timers.add(timer);
+        return () -> timers.remove(timer);
+    }
+
+    /**
+     * Moves the fake clock forward, running every {@code runAfter} task that falls due on the way, in due-time
+     * order (ties in the order they were scheduled) — including tasks those tasks schedule inside the window.
+     * The clock reads each task's due time while it runs, so {@link #now()} and
+     * {@link dev.mosaicast.plugin.api.ActionCall#receivedAt()} inside it are what the host would show.
+     *
+     * <p>A task that throws is logged to {@link #logger()} and the rest still run, as on the host.
+     *
+     * @param by how far to move; zero runs what is due now, never negative or {@code null}
+     * @throws IllegalArgumentException if {@code by} is negative
+     * @since 0.20.0
+     */
+    public void advanceTimers(Duration by) {
+        Objects.requireNonNull(by, "by");
+        if (by.isNegative()) {
+            throw new IllegalArgumentException("time does not run backwards: " + by);
+        }
+        Instant until = now.plus(by);
+        while (true) {
+            Timer next = timers.stream()
+                    .filter(t -> !t.due().isAfter(until))
+                    .min(java.util.Comparator.comparing(Timer::due).thenComparingLong(Timer::seq))
+                    .orElse(null);
+            if (next == null) {
+                break;
+            }
+            timers.remove(next);
+            now = next.due();
+            try {
+                next.task().run();
+            } catch (RuntimeException e) {
+                logger.error("runAfter task failed", e);
+            }
+        }
+        now = until;
+    }
+
+    /**
+     * The fake clock: {@link #START} until {@link #advanceTimers(Duration)} moves it.
+     *
+     * @return the current fake instant
+     * @since 0.20.0
+     */
+    public Instant now() {
+        return now;
+    }
+
+    /**
+     * How many {@code runAfter} tasks are waiting — for asserting a timer was armed, or cancelled.
+     *
+     * @return the pending count
+     * @since 0.20.0
+     */
+    public int pendingTimers() {
+        return timers.size();
+    }
+
+    /** One pending {@code runAfter} task. */
+    private record Timer(Instant due, long seq, Runnable task) {}
 
     /** One registered task and the supplier the host would re-read before each of its ticks. */
     private record ScheduledTask(Supplier<Duration> every, Runnable task) {}

@@ -7,6 +7,53 @@ released together (see the "Releasing" section in the README).
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] — Unreleased
+
+Realtime plugin features: **actions** (request-time calls into the backend), **channels** (live events to
+subscribed browsers), one-shot **timers**, and **`data.backendPrivate`** keys no client reaches (ARCHITECTURE
+§7.9). A **minor** bump, for the reason 0.19.0 was one: core ignores unknown manifest keys, so a 0.19 host would
+load a plugin declaring `backendPrivate` and serve its private state at the plugin floor, and the new Java
+methods would fail to link. **Core must pin `mosaicastSdk = "0.20.0"`** in the release that implements §7.9
+(core 0.10.0).
+
+### Added
+
+- **`actions`** manifest block and `PluginContext.actions()` → `Actions.handle(name, ActionHandler)`. A handler
+  gets an `ActionCall` — host-resolved `caller()` (`Caller(userId, role)`), host-checked `scope()`,
+  `payload()`, `receivedAt()` (stamped before queueing) and `store()`, whose `USER` scope resolves to the
+  caller. Its return value is the JSON answer (`null` → 204); `ActionRejectedException(code[, detail])` is a 422
+  with the plugin's `code`. `Actions.NAME_PATTERN` / `MAX_BODY_BYTES`. TS: `ctx.actions: ActionsClient | null`,
+  `call(name, payload?, { scope? })`.
+- **`channels`** manifest block and `PluginContext.channels()` → `Channels.channel(scope, name)`, `authorize`,
+  `onJoin` / `onLeave` (`ChannelListener(ChannelRef, Caller)`); `Channel.publish`, `publishTo`, `subscribers`,
+  `kick`, `ref`; `ChannelRef`, `Channels.NAME_PATTERN`, `Channel.MAX_EVENT_BYTES`. TS: `ctx.channels:
+  ChannelsClient | null`, `subscribe(name, onEvent, { scope?, onReset?, onStatus? })` → `ChannelSubscription`,
+  `ChannelEvent { event, data, at }`, `ChannelStatus`. Transport-neutral: nothing names how events travel.
+- **`PluginContext.runAfter(Duration, Runnable)`** → `Scheduled.cancel()`: one-shot, in memory, no floor.
+- **`data.backendPrivate`**: a single client `GET` / `PUT` / `DELETE` is a 403 `backend-private-key`, listings
+  drop the keys, batches leave them absent; ignored for `user` scopes and for `ctx.store()`.
+- TS: `PROBLEM_TYPES` gains `backendPrivateKey`, `notFound`, `unknownAction`, `payloadTooLarge`,
+  `tooManyRequests`, `actionUnavailable`, `actionRejected`, `actionBusy`, `actionTimeout`; `ProblemDetail` gains
+  `code` and `retryAfterMs`; helpers `isActionRejected` and `isRateLimited` (429 or a busy plugin's 503);
+  `ACTION_NAME_PATTERN`, `CHANNEL_NAME_PATTERN`, `ACTION_BODY_LIMIT`, `CHANNEL_EVENT_LIMIT`; manifest types
+  `PluginActionsDeclaration`, `PluginActionNameDeclaration`, `PluginChannelsDeclaration`.
+- Test kit, Java: `FakePluginContext.withActions(names…)` / `withChannels()`, `FakeActions.call(caller, name,
+  scope, payload)` with `withCallableBy` / `withNameFloor`, `FakeChannels.subscribe(caller, ref)` →
+  `FakeSubscription` (refusal throws `SubscriptionRefusedException` with a `reason()`), `published(ref)`,
+  `endAccess(userId)`, `Callers.fan()/podcaster()/admin()`, a fake clock (`now()`, `advanceTimers(Duration)`,
+  `pendingTimers()`), `InMemoryDocStore.withBackendPrivate(...)`. Synchronous by design: no executor, deadline
+  or rate limit.
+- Test kit, TS: `makeMockActions(handlers, { scope?, signedIn? })`, `makeMockChannels({ scope?, signedIn? })`
+  with `emit` / `reset` / `refuse` / `end`, `actionRejection(code)`, `rateLimited(ms)`; `makeMockDocs` honours
+  `backendPrivate`. `makeMockCtx` keeps `actions` and `channels` `null` unless passed.
+
+### Changed
+
+- **`PluginContext` gains three abstract methods** (`actions()`, `channels()`, `runAfter(...)`). Only the host
+  and `FakePluginContext` implement it; a plugin's own stub of the interface must add them.
+- Docs: "the backend cannot write a `USER` partition" now names its one exception, `ActionCall.store()`, and
+  the `backendOwned` rationale for ignoring `USER` scopes is reworded (the partition is its owner's).
+
 ## [0.19.2] — 2026-10-19
 
 The first release on **Maven Central**. No contract or API change; `platformApi` 0.19 keeps loading.

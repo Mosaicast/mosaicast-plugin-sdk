@@ -11,10 +11,17 @@
  */
 
 import type {
+  ActionCallOptions,
+  ActionsClient,
   BlobClient,
   BlobInfo,
   BlobPage,
   BlobQuota,
+  ChannelEvent,
+  ChannelStatus,
+  ChannelSubscribeOptions,
+  ChannelSubscription,
+  ChannelsClient,
   ConsentApi,
   DataAccessRole,
   DisplaySnapshot,
@@ -35,6 +42,7 @@ import type {
   NotifyMessage,
   ProblemDetail,
   Role,
+  Scope,
   SchemaClient,
   SchemaPage,
   SchemaPredicate,
@@ -49,6 +57,9 @@ import type {
   UserRef,
 } from './index.js';
 import {
+  ACTION_BODY_LIMIT,
+  ACTION_NAME_PATTERN,
+  CHANNEL_NAME_PATTERN,
   DISPLAY_BATCH_LIMIT,
   DOC_KEY_PATTERN,
   DOC_KEY_SELECTOR_PATTERN,
@@ -1091,7 +1102,7 @@ export interface DocCallRecord {
  * @since 0.19.0
  */
 export interface MockDocAccess {
-  /** The manifest's `data` block: its floors, `backendOwned` and `keyFloors`. */
+  /** The manifest's `data` block: its floors, `backendOwned`, `keyFloors` and `backendPrivate`. */
   data: PluginDataDeclaration;
   /** The caller's role — usually `ctx.user?.role ?? 'anonymous'`. */
   viewer: DataAccessRole;
@@ -1157,7 +1168,8 @@ function requireDocKey(key: string): string {
  * What it enforces, on every partition but `'self'`: the read floor (`readableBy`, else `writableBy`) and the
  * write floor as 403 {@link PROBLEM_TYPES}`.forbidden`; a write to a `backendOwned` key as 403
  * `backendOwnedKey`; and `keyFloors` — left out of `list`, absent from `getMany`, 403 `keyFloor` on `get`,
- * `put` and `remove`. `'self'` is the caller's own whatever the floors say, and a 401 `unauthorized` for an
+ * `put` and `remove`; and `backendPrivate` (since 0.20.0) — the same, but for every viewer and with 403
+ * `backendPrivateKey`. `'self'` is the caller's own whatever the floors say, and a 401 `unauthorized` for an
  * anonymous viewer. Seed documents through `initial` — they are not writes and pass no check. A declaration
  * the host would reject at load (a malformed selector, a key floor below the plugin's, an anonymous write
  * floor) throws here.
@@ -1250,15 +1262,19 @@ function selects(selector: string, key: string): boolean {
 }
 
 /**
- * The doc store's access rules, checked as the host checks them: the plugin floors, `backendOwned`, and
- * `keyFloors`. The `user` partition is exempt from all three. Throws on a declaration the host rejects at load.
+ * The doc store's access rules, checked as the host checks them: the plugin floors, `backendOwned`,
+ * `keyFloors` and `backendPrivate`. The `user` partition is exempt from all four. Throws on a declaration the host rejects at load.
  */
 function docGuard({ data, viewer }: MockDocAccess) {
   const write = ROLE_RANK[data.writableBy];
   const read = ROLE_RANK[data.readableBy ?? data.writableBy];
   const rank = ROLE_RANK[viewer];
   if (write === 0) throw new Error('data.writableBy may not be anonymous — the host rejects the manifest');
-  for (const selector of [...(data.backendOwned ?? []), ...(data.keyFloors ?? []).flatMap((f) => f.keys)]) {
+  for (const selector of [
+    ...(data.backendOwned ?? []),
+    ...(data.backendPrivate ?? []),
+    ...(data.keyFloors ?? []).flatMap((f) => f.keys),
+  ]) {
     if (!DOC_KEY_SELECTOR_PATTERN.test(selector)) {
       throw new Error(`key selector ${JSON.stringify(selector)} does not match ${DOC_KEY_SELECTOR_PATTERN.source}`);
     }
@@ -1289,6 +1305,8 @@ function docGuard({ data, viewer }: MockDocAccess) {
     return toApiError(apiError(status, { type, detail: `${viewer} refused` }), method, path);
   };
 
+  const isPrivate = (key: string): boolean => (data.backendPrivate ?? []).some((sel) => selects(sel, key));
+
   /** Throws the 401 for an anonymous `user` call; answers whether the call is exempt (it is `'self'`). */
   const self = (target: DocTarget, method: string, key: string | undefined): boolean => {
     if (target !== 'self') return false;
@@ -1301,22 +1319,24 @@ function docGuard({ data, viewer }: MockDocAccess) {
     read(target: DocTarget, key: string | undefined, method: string): void {
       if (self(target, method, key)) return;
       if (rank < read) throw refuse(403, PROBLEM_TYPES.forbidden, method, target, key);
+      if (key !== undefined && isPrivate(key)) throw refuse(403, PROBLEM_TYPES.backendPrivateKey, method, target, key);
       if (key !== undefined && rank < keyFloor(key, 'readableBy')) {
         throw refuse(403, PROBLEM_TYPES.keyFloor, method, target, key);
       }
     },
-    /** A write: the plugin floor, then `backendOwned`, then the key's own floor. */
+    /** A write: the plugin floor, then `backendPrivate`, then `backendOwned`, then the key's own floor. */
     write(target: DocTarget, key: string, method: string): void {
       if (self(target, method, key)) return;
       if (rank < write) throw refuse(403, PROBLEM_TYPES.forbidden, method, target, key);
+      if (isPrivate(key)) throw refuse(403, PROBLEM_TYPES.backendPrivateKey, method, target, key);
       if ((data.backendOwned ?? []).some((sel) => selects(sel, key))) {
         throw refuse(403, PROBLEM_TYPES.backendOwnedKey, method, target, key);
       }
       if (rank < keyFloor(key, 'writableBy')) throw refuse(403, PROBLEM_TYPES.keyFloor, method, target, key);
     },
-    /** Whether a key is below the viewer's read floor — left out of a listing or a batch, not refused. */
+    /** Whether a key is private or below the viewer's read floor — left out of a listing or a batch, not refused. */
     hidden(target: DocTarget, key: string): boolean {
-      return target !== 'self' && rank < keyFloor(key, 'readableBy');
+      return target !== 'self' && (isPrivate(key) || rank < keyFloor(key, 'readableBy'));
     },
   };
 }
@@ -1324,6 +1344,258 @@ function docGuard({ data, viewer }: MockDocAccess) {
 /** Escapes a string for literal use inside a `RegExp` — the non-wildcard parts of a `like` pattern. */
 function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * A canned 422 {@link PROBLEM_TYPES}`.actionRejected` — what the host answers when a handler throws the Java
+ * `ActionRejectedException`. Throw or return it from a {@link makeMockActions} handler.
+ *
+ * ```ts
+ * makeMockActions({ move: () => { throw actionRejection('not-your-turn'); } });
+ * ```
+ *
+ * @param code   the plugin's reason, matching {@link ACTION_NAME_PATTERN}
+ * @param detail the developer-facing explanation, if any
+ * @returns a marker the mock turns into a rejection
+ * @since 0.20.0
+ */
+export function actionRejection(code: string, detail?: string): CannedApiError {
+  if (!ACTION_NAME_PATTERN.test(code)) {
+    throw new Error(`rejection code must match ${ACTION_NAME_PATTERN.source}, got: ${JSON.stringify(code)}`);
+  }
+  return apiError(422, { type: PROBLEM_TYPES.actionRejected, code, ...(detail === undefined ? {} : { detail }) });
+}
+
+/**
+ * A canned 429 {@link PROBLEM_TYPES}`.tooManyRequests` with `retryAfterMs` — throw or return it from a
+ * {@link makeMockActions} handler to test the "slow down" path.
+ *
+ * @param retryAfterMs how long the host says to wait
+ * @returns a marker the mock turns into a rejection
+ * @since 0.20.0
+ */
+export function rateLimited(retryAfterMs = 1000): CannedApiError {
+  return apiError(429, { type: PROBLEM_TYPES.tooManyRequests, retryAfterMs });
+}
+
+/**
+ * A stand-in for one backend action handler: gets the payload as the host would deliver it (after a JSON
+ * round trip) and the resolved scope, answers with a value — or throws or returns an {@link apiError},
+ * {@link actionRejection} or {@link rateLimited} to fail the call.
+ *
+ * @since 0.20.0
+ */
+export type MockActionHandler = (payload: unknown, opts: { scope: Scope }) => unknown;
+
+/** One call a component made through {@link MockActionsClient}. @since 0.20.0 */
+export interface ActionCallRecord {
+  /** The action name. */
+  name: string;
+  /** The payload, after the JSON round trip — `null` when none was sent. */
+  payload: unknown;
+  /** The scope, with the default applied. */
+  scope: Scope;
+}
+
+/** An {@link ActionsClient} double: canned handlers and recorded calls. @since 0.20.0 */
+export interface MockActionsClient extends ActionsClient {
+  /** Every call made, in order — refused ones included. */
+  readonly calls: ActionCallRecord[];
+  /** The handlers, by name — replace one mid-test to change what the backend answers. */
+  handlers: Record<string, MockActionHandler>;
+}
+
+/**
+ * An {@link ActionsClient} double for `ctx.actions`.
+ *
+ * Each name maps to a handler standing in for the backend's. A call is answered the way the host answers it:
+ * signed out it rejects with 401 `unauthorized` without reaching a handler; a name with no handler rejects
+ * with 404 `unknownAction`; a body over {@link ACTION_BODY_LIMIT} with 413 `payloadTooLarge`; then the
+ * handler runs. What it returns is the answer (`undefined` and `null` are a 204, resolved as `null`); a canned
+ * error it throws or returns rejects with that {@link PluginApiError}. Payload and answer both make a JSON
+ * round trip, so a `Date` or a `Map` arrives as it would over the wire. Any other throw rejects as is.
+ *
+ * ```ts
+ * const actions = makeMockActions({
+ *   state: () => ({ version: 1, board: [] }),
+ *   move:  (p) => ((p as { cell: number }).cell > 8 ? actionRejection('off-board') : null),
+ * });
+ * const ctx = makeMockCtx({ actions });
+ * await mount(ctx);
+ * expect(actions.calls.map((c) => c.name)).toEqual(['state']);
+ * ```
+ *
+ * The default scope is the site, as `makeMockCtx`'s `scope` is; pass `scope` when the test mounts elsewhere,
+ * so a call without one records the scope the host would have used.
+ *
+ * @param handlers the backend's answers, by action name
+ * @param opts     `scope`: what `ctx.scope` is in this test; `signedIn: false` for a signed-out visitor
+ * @returns the double, with its `calls`
+ * @since 0.20.0
+ */
+export function makeMockActions(
+  handlers: Record<string, MockActionHandler> = {},
+  opts: { scope?: Scope; signedIn?: boolean } = {},
+): MockActionsClient {
+  const calls: ActionCallRecord[] = [];
+  const defaultScope = opts.scope ?? { type: 'site', id: 'main' };
+  const signedIn = opts.signedIn ?? true;
+  const client: MockActionsClient = {
+    calls,
+    handlers: { ...handlers },
+    async call<T = unknown>(name: string, payload?: unknown, callOpts?: ActionCallOptions): Promise<T | null> {
+      const scope = callOpts?.scope ?? defaultScope;
+      const path = `actions/${name}`;
+      const fail = (status: number, type: string): never => {
+        throw toApiError(apiError(status, { type }), 'post', path);
+      };
+      const wire = payload === undefined ? null : (JSON.parse(JSON.stringify(payload)) as unknown);
+      calls.push({ name, payload: wire, scope });
+      if (!signedIn) fail(401, PROBLEM_TYPES.unauthorized);
+      const handler = client.handlers[name];
+      if (!handler) fail(404, PROBLEM_TYPES.unknownAction);
+      if (new TextEncoder().encode(JSON.stringify({ scope, payload: wire })).length > ACTION_BODY_LIMIT) {
+        fail(413, PROBLEM_TYPES.payloadTooLarge);
+      }
+      let answer: unknown;
+      try {
+        answer = await handler(wire, { scope });
+      } catch (e) {
+        if (isCannedApiError(e)) throw toApiError(e, 'post', path);
+        throw e;
+      }
+      if (isCannedApiError(answer)) throw toApiError(answer, 'post', path);
+      return answer === undefined || answer === null ? null : (JSON.parse(JSON.stringify(answer)) as T);
+    },
+  };
+  return client;
+}
+
+/** One subscription a component opened through {@link MockChannelsClient}. @since 0.20.0 */
+export interface ChannelSubscriptionRecord {
+  /** The channel name. */
+  name: string;
+  /** The scope, with the default applied. */
+  scope: Scope;
+  /** Every status reported so far, in order — the last one is where it stands. */
+  statuses: ChannelStatus[];
+  /** The events delivered to it, in order. */
+  events: ChannelEvent[];
+}
+
+/** A {@link ChannelsClient} double: a test pushes events, resets and refusals in by hand. @since 0.20.0 */
+export interface MockChannelsClient extends ChannelsClient {
+  /** Every subscription ever opened, in order — closed and refused ones included. */
+  readonly subscriptions: ChannelSubscriptionRecord[];
+  /**
+   * Delivers an event to every open subscription on `name` (in `opts.scope`, when given), as the backend's
+   * `publish` would. The data makes a JSON round trip; `at` defaults to now.
+   */
+  emit(name: string, event: string, data?: unknown, opts?: { scope?: Scope; at?: string }): void;
+  /** Calls `onReset` on every open subscription on `name`, as the host does when it cannot replay. */
+  reset(name: string, opts?: { scope?: Scope }): void;
+  /**
+   * Ends every open subscription on `name` as `refused` — a kick, or the authorizer saying no — and refuses
+   * every later subscribe to it.
+   */
+  refuse(name: string, opts?: { scope?: Scope }): void;
+  /**
+   * Ends every open subscription on `name` as `closed`, as the host does when access changes (sign-out, a
+   * ban, a role change).
+   */
+  end(name: string, opts?: { scope?: Scope }): void;
+}
+
+/**
+ * A {@link ChannelsClient} double for `ctx.channels`.
+ *
+ * Synchronous, so tests stay deterministic: `subscribe` reports `connecting` then `open` before it returns
+ * (signed out, or on a name {@link MockChannelsClient.refuse | refused} earlier, straight to `refused`), and
+ * {@link MockChannelsClient.emit | emit} delivers before it returns. A malformed channel or event name throws,
+ * as a malformed doc key does in {@link makeMockDocs}.
+ *
+ * ```ts
+ * const channels = makeMockChannels();
+ * const ctx = makeMockCtx({ channels, actions: makeMockActions({ state: () => ({ version: 1 }) }) });
+ * await mount(ctx);
+ * channels.emit('game:1', 'moved', { version: 2 });
+ * expect(root.textContent).toContain('version 2');
+ * channels.reset('game:1');                          // the component should fetch state again
+ * ```
+ *
+ * @param opts `scope`: what `ctx.scope` is in this test (default: the site); `signedIn: false` for a
+ *             signed-out visitor
+ * @returns the double, with its `subscriptions`
+ * @since 0.20.0
+ */
+export function makeMockChannels(opts: { scope?: Scope; signedIn?: boolean } = {}): MockChannelsClient {
+  const defaultScope = opts.scope ?? { type: 'site', id: 'main' };
+  const signedIn = opts.signedIn ?? true;
+  const subscriptions: ChannelSubscriptionRecord[] = [];
+  const refused = new Set<string>();
+  const live = new Map<ChannelSubscriptionRecord, { onEvent: (e: ChannelEvent) => void; opts?: ChannelSubscribeOptions }>();
+
+  const keyOf = (name: string, scope: Scope): string => `${scope.type}/${scope.id}/${name}`;
+  const status = (record: ChannelSubscriptionRecord, next: ChannelStatus): void => {
+    record.statuses.push(next);
+    live.get(record)?.opts?.onStatus?.(next);
+  };
+  const matching = (name: string, scope?: Scope): ChannelSubscriptionRecord[] =>
+    [...live.keys()].filter(
+      (r) => r.name === name && (!scope || (r.scope.type === scope.type && r.scope.id === scope.id)),
+    );
+  const finish = (record: ChannelSubscriptionRecord, how: 'refused' | 'closed'): void => {
+    status(record, how);
+    live.delete(record);
+  };
+
+  return {
+    subscriptions,
+    subscribe(name: string, onEvent: (e: ChannelEvent) => void, subOpts?: ChannelSubscribeOptions): ChannelSubscription {
+      if (!CHANNEL_NAME_PATTERN.test(name)) {
+        throw new Error(`channel name must match ${CHANNEL_NAME_PATTERN.source}, got: ${JSON.stringify(name)}`);
+      }
+      const scope = subOpts?.scope ?? defaultScope;
+      const record: ChannelSubscriptionRecord = { name, scope, statuses: [], events: [] };
+      subscriptions.push(record);
+      live.set(record, { onEvent, opts: subOpts });
+      if (!signedIn || refused.has(name) || refused.has(keyOf(name, scope))) {
+        finish(record, 'refused');
+      } else {
+        status(record, 'connecting');
+        status(record, 'open');
+      }
+      return {
+        close: () => {
+          if (live.has(record)) finish(record, 'closed');
+        },
+      };
+    },
+    emit(name, event, data, emitOpts) {
+      if (!ACTION_NAME_PATTERN.test(event)) {
+        throw new Error(`event name must match ${ACTION_NAME_PATTERN.source}, got: ${JSON.stringify(event)}`);
+      }
+      const e: ChannelEvent = {
+        event,
+        data: data === undefined ? null : (JSON.parse(JSON.stringify(data)) as unknown),
+        at: emitOpts?.at ?? new Date().toISOString(),
+      };
+      for (const record of matching(name, emitOpts?.scope)) {
+        record.events.push(e);
+        live.get(record)?.onEvent(e);
+      }
+    },
+    reset(name, resetOpts) {
+      for (const record of matching(name, resetOpts?.scope)) live.get(record)?.opts?.onReset?.();
+    },
+    refuse(name, refuseOpts) {
+      refused.add(refuseOpts?.scope ? keyOf(name, refuseOpts.scope) : name);
+      for (const record of matching(name, refuseOpts?.scope)) finish(record, 'refused');
+    },
+    end(name, endOpts) {
+      for (const record of matching(name, endOpts?.scope)) finish(record, 'closed');
+    },
+  };
 }
 
 /** Default theme tokens (neutral light values) used when a test does not override them. */
@@ -1630,6 +1902,10 @@ export function makeMockCtx(overrides: MockCtxOverrides = {}): MockPluginContext
     // component written against a notifier that is always there both breaks on every plugin that
     // declares no `notifications` block and hides the one surface an operator is most likely to withhold.
     notify: null,
+    // Null, like every declared capability: a component written against actions or channels that are always
+    // there breaks on the plugin that declares neither. Pass makeMockActions / makeMockChannels.
+    actions: null,
+    channels: null,
     // Null, not a client: a plugin only has one if its manifest declares `storage.schema`, and a
     // component written against a schema that is always there never handles the doc-store case.
     schema: null,

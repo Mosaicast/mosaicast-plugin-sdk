@@ -28,7 +28,8 @@ import java.util.Optional;
  * {@link UnsupportedOperationException} when handed a {@code USER} scope — reads included, since
  * resolving "me" without a caller would have to pick someone, and any pick is wrong. To aggregate over
  * users, declare {@code data.readsAllUsers} and use {@link PluginContext#allUsers()}, which is explicit
- * about having no single owner.
+ * about having no single owner. The one exception is the store an action hands its handler
+ * ({@link ActionCall#store()}): a caller exists there, and {@code USER} resolves to them.
  *
  * <p><strong>A shared-scope document has no owner.</strong> Anything above the plugin's
  * {@code writableBy} floor can overwrite or delete any key in a {@link ScopeType#SITE},
@@ -54,8 +55,9 @@ import java.util.Optional;
  * up a value a client wrote before the declaration existed: the row stays until your backend overwrites
  * it, so <strong>write your computed keys in {@link PluginBackend#register(PluginContext)} as well as on
  * a schedule</strong> — otherwise a forged value survives until the next tick. And the declaration is
- * ignored for {@link ScopeType#USER} scopes, where the backend cannot write at all; a partition stays
- * writable by its owner even under a bare {@code "*"}.
+ * ignored for {@link ScopeType#USER} scopes: a partition is its owner's, writable by them even under a bare
+ * {@code "*"} and whatever the backend does there (even an action writing it through
+ * {@link ActionCall#store()}), so reserving a key in it would protect nothing.
  *
  * <p><strong>Per-key floors</strong> (since 0.19.0). {@code readableBy} / {@code writableBy} cover every key,
  * and {@code backendOwned} can only narrow a write to "backend only". When some keys need a stricter floor
@@ -92,6 +94,20 @@ import java.util.Optional;
  * ignored and every key served at the plugin floor — which is why it shipped in a {@code platformApi} minor,
  * so a plugin that declares one only ever loads on a host that enforces it.
  *
+ * <p><strong>Backend-private keys</strong> (since 0.20.0). {@code backendOwned} protects writes and leaves
+ * reads to the floor, and the highest key floor is still {@code admin}. State a plugin keeps between calls
+ * but shows nobody as stored — a game in progress, who was invited — is declared {@code backendPrivate}:
+ *
+ * <pre>{@code
+ * "data": { "readableBy": "fan", "writableBy": "podcaster", "backendPrivate": ["game:*", "invites:*"] }
+ * }</pre>
+ *
+ * <p>Same {@link #KEY_SELECTOR_PATTERN} grammar. No client reaches such a key, admins included: a single
+ * {@code GET}, {@code PUT} or {@code DELETE} is a 403 with its own problem type
+ * ({@code …/problems/backend-private-key}), a listing drops the keys before paging, and a batch read leaves
+ * them absent. Clients learn about the state only through what an {@link Actions action} chooses to answer.
+ * Ignored for {@link ScopeType#USER} scopes, like the other per-key rules, and this store is unaffected.
+ *
  * <p><strong>This is the plugin's sole persistence path</strong> (unless the manifest declares a
  * {@link SchemaStore schema}), and it is shared with the plugin's frontend: the host exposes a fixed,
  * generic, per-plugin-namespaced HTTP surface over it, which the Web Component reaches via
@@ -125,8 +141,8 @@ public interface DocStore {
     String KEY_PATTERN = "^[A-Za-z0-9._:-]{1,200}$";
 
     /**
-     * The grammar of one key selector in the manifest's {@code data} block — a {@code backendOwned} entry,
-     * or one of a {@code keyFloors[].keys} entry: {@value}.
+     * The grammar of one key selector in the manifest's {@code data} block — a {@code backendOwned} or
+     * {@code backendPrivate} entry, or one of a {@code keyFloors[].keys} entry: {@value}.
      *
      * <p>An exact key, a {@link #KEY_PATTERN}-legal prefix followed by a single trailing {@code *}, or the
      * bare {@code *} meaning every key. Nothing else: no {@code *} in the middle, no empty entry, and the
@@ -140,8 +156,8 @@ public interface DocStore {
      * <p>A bare {@code *} is deliberately legal here, unlike in {@code consent.storage[]}: under
      * {@code backendOwned} it means "the whole doc store is authored by my backend, clients read only", which
      * is a coherent thing for a plugin whose data is entirely computed. Note what it does <em>not</em> cover —
-     * a {@link ScopeType#USER} partition stays writable by its owner, since the backend cannot write one, and
-     * no key floor reaches a {@code USER} partition either.
+     * a {@link ScopeType#USER} partition stays writable by its owner, and no key floor or
+     * {@code backendPrivate} entry reaches a {@code USER} partition either.
      *
      * @since 0.19.0
      */
@@ -179,7 +195,8 @@ public interface DocStore {
      * @param value the value to store, serialized to JSON by the host; never {@code null}
      * @throws IllegalArgumentException      if {@code key} does not match {@link #KEY_PATTERN}
      * @throws UnsupportedOperationException if {@code scope} is a {@link ScopeType#USER} scope — a
-     *         backend has no calling user, and cannot write into anyone's partition
+     *         backend has no calling user, and cannot write into anyone's partition (except through
+     *         {@link ActionCall#store()})
      */
     void put(Scope scope, String key, Object value);
 

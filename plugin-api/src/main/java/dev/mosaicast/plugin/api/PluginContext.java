@@ -19,8 +19,10 @@ import org.slf4j.Logger;
  * host draws.
  *
  * <p><strong>This context is the whole server-side surface.</strong> Note what is not on it: there is no
- * way to register an HTTP route or handler. v1 plugins do not define endpoints — they persist through
- * {@link #store()} and precompute through {@link #onSchedule(Duration, Runnable)}. See
+ * way to register an HTTP route or handler. Plugins do not define endpoints — they persist through
+ * {@link #store()} and precompute through {@link #onSchedule(Duration, Runnable)}. Since 0.20.0 a plugin
+ * that declares it may run code at request time through {@link #actions()} — a function the host calls on
+ * its own fixed endpoint, not a route — and push events through {@link #channels()}. See
  * {@link PluginBackend} and {@link #store()}.
  */
 public interface PluginContext {
@@ -63,7 +65,8 @@ public interface PluginContext {
      * one the frontend reads at {@code GET /api/plugins/{id}/data/{scopeType}/{scopeId}/{key}} — backend
      * and frontend see one store, not two. The exception is the {@code USER} scope, which exists only on
      * this HTTP surface: a backend has no calling user, so it writes none, and reads them only through
-     * {@link #allUsers()} — which the manifest has to declare.
+     * {@link #allUsers()} — which the manifest has to declare. The one place a backend does have a caller is
+     * an action: {@link ActionCall#store()} resolves {@code USER} to them.
      *
      * <p>The host enforces the boundaries on that surface: data is hard-scoped to the plugin id (a plugin
      * only ever sees its own), the scope must exist (and its feed be enabled), and the call carries the
@@ -234,6 +237,34 @@ public interface PluginContext {
      * @since 0.16.0
      */
     CrossUserStore allUsers();
+
+    /**
+     * Request-time calls into this backend, for plugins whose manifest declares an {@code actions} block
+     * (ARCHITECTURE §7.9).
+     *
+     * <p>{@code null} without the declaration, like {@link #notifier()} and the other declared capabilities.
+     * Register a handler per declared name in {@link PluginBackend#register(PluginContext)}. Declare it when
+     * a user's input has to be checked the moment it is made — a move, a vote, an edit that must be
+     * validated before it is stored — rather than on the next {@link #onSchedule(Duration, Runnable) tick}.
+     * See {@link Actions}.
+     *
+     * @return the action registry, or {@code null} when the manifest declares no {@code actions} block
+     * @since 0.20.0
+     */
+    Actions actions();
+
+    /**
+     * Live events to subscribed browsers, for plugins whose manifest declares a {@code channels} block
+     * (ARCHITECTURE §7.9).
+     *
+     * <p>{@code null} without the declaration. Usually paired with {@link #actions()}: a client subscribes,
+     * fetches state through an action, and the backend publishes each change as it happens. See
+     * {@link Channels}.
+     *
+     * @return the channel registry, or {@code null} when the manifest declares no {@code channels} block
+     * @since 0.20.0
+     */
+    Channels channels();
 
     /**
      * Which languages this site has, and which content may be authored in (ARCHITECTURE §12.7).
@@ -486,4 +517,27 @@ public interface PluginContext {
     default void onEpisodePhaseChanged(BiConsumer<String, EpisodePhase> listener) {
         Objects.requireNonNull(listener, "listener");
     }
+
+    /**
+     * Runs a task once, after a delay — a turn clock, a 30-second vote (ARCHITECTURE §7.9).
+     *
+     * <p>Unlike {@link #onSchedule(Duration, Runnable)} there is no floor: it is one-shot, so a short delay
+     * cannot become a busy loop. A zero delay runs the task as soon as possible. The task runs on the plugin's
+     * executor, concurrently with action handlers and channel callbacks; the plugin synchronises its own
+     * state.
+     *
+     * <p><strong>In memory only.</strong> Not persisted and not coordinated across instances: a restart drops
+     * every pending task, so persist the deadline itself (a turn's end time in the store) and re-arm the timer
+     * from it in {@link PluginBackend#register(PluginContext)}. Stopping the plugin cancels every pending task.
+     * Ungated — no manifest declaration — but the host caps how many may be pending per plugin.
+     *
+     * @param delay how long to wait; zero or positive, never {@code null}
+     * @param task  the task; never {@code null}
+     * @return a handle to cancel it with; never {@code null}
+     * @throws IllegalArgumentException if {@code delay} is {@code null} or negative
+     * @throws NullPointerException     if {@code task} is {@code null}
+     * @throws IllegalStateException    if the plugin already has as many pending tasks as the host allows
+     * @since 0.20.0
+     */
+    Scheduled runAfter(Duration delay, Runnable task);
 }
