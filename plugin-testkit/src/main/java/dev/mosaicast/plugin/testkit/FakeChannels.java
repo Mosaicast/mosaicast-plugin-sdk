@@ -153,7 +153,7 @@ public final class FakeChannels implements Channels {
     }
 
     /**
-     * Ends every subscription a user holds, on every channel, as the host does on sign-out, a ban, a role
+     * Ends every subscription a user holds, on every channel, as the host does on sign-out, account erasure, a role
      * change or a site-access change. Each ends as closed, not refused, and {@code onLeave} fires per channel.
      *
      * @param userId the user; never {@code null}

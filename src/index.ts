@@ -440,7 +440,7 @@ export function isPluginApiError(e: unknown): e is PluginApiError {
  * sends these strings verbatim.
  *
  * Since 0.20.0 a fourth 403 — **`backendPrivateKey`**, a key in `data.backendPrivate` that no client reaches —
- * and the answers of {@link ActionsClient.call}: `notFound`, `unknownAction`, `payloadTooLarge`,
+ * and the answers of {@link ActionsClient.call}: `badRequest`, `notFound`, `unknownAction`, `payloadTooLarge`,
  * `tooManyRequests`, `actionUnavailable`, `actionRejected`, `actionBusy` and `actionTimeout`. Two helpers
  * narrow the ones a UI reacts to: {@link isActionRejected} and {@link isRateLimited}.
  *
@@ -455,6 +455,8 @@ export const PROBLEM_TYPES = Object.freeze({
   backendOwnedKey: 'https://mosaicast.dev/problems/backend-owned-key',
   /** 403 — a single read or write of a key whose `data.keyFloors` floor is above the caller's role. */
   keyFloor: 'https://mosaicast.dev/problems/key-floor',
+  /** 400 — a malformed request; for an action, a payload the handler could not read (since 0.20.0). */
+  badRequest: 'https://mosaicast.dev/problems/bad-request',
   /** 403 — a single read or write of a `data.backendPrivate` key, whoever asks (since 0.20.0). */
   backendPrivateKey: 'https://mosaicast.dev/problems/backend-private-key',
   /**
@@ -3140,8 +3142,8 @@ export interface ActionsClient {
    * @returns the handler's answer, or `null` when it answered nothing (204)
    * @throws PluginApiError — test it with {@link isActionRejected} (422, the plugin's `code`) and
    *         {@link isRateLimited} (429 or a busy plugin's 503, with `retryAfterMs`). The rest are bugs or
-   *         outages: 404 `notFound` / `unknownAction`, 401, 403 `forbidden`, 413, 503 `actionUnavailable`,
-   *         504 `actionTimeout`, 500.
+   *         outages: 400 `badRequest` (a payload the handler could not read), 404 `notFound` /
+   *         `unknownAction`, 401, 403 `forbidden`, 413, 503 `actionUnavailable`, 504 `actionTimeout`, 500.
    */
   call<T = unknown>(name: string, payload?: unknown, opts?: ActionCallOptions): Promise<T | null>;
 }
@@ -3155,7 +3157,7 @@ export interface ActionsClient {
  * - `refused` — **terminal**. The floor, the plugin's authorizer or the subscription cap said no, the plugin
  *   kicked this user, or the visitor is signed out (then without a request).
  * - `closed` — **terminal**. {@link ChannelSubscription.close}, or the host ended it because access changed:
- *   sign-out, a ban, a role change, a site-access change, the plugin disabled.
+ *   sign-out, account erasure, a role change, a site-access change, the plugin disabled.
  *
  * @since 0.20.0
  */
@@ -3221,7 +3223,8 @@ export interface ChannelSubscription {
  * // on unmount: sub.close();
  * ```
  *
- * How events travel is the host's business; nothing here depends on it.
+ * How events travel is the host's business; nothing here depends on it. A subscription is bound to the browser
+ * session, so it ends on sign-out like everything else the session grants.
  *
  * @since 0.20.0
  */

@@ -48,7 +48,9 @@ import tools.jackson.databind.node.NullNode;
  * to test, not the plugin's — so a 503 {@code action-busy}, 504 {@code action-timeout} or 429 never happens
  * here. Where the host refuses before any plugin code runs, this throws {@link IllegalStateException} naming
  * the status it would answer. {@link ActionRejectedException} propagates as thrown, and so does anything else
- * a handler throws (the host's 500), so a test sees the bug.
+ * a handler throws, so a test sees it: the {@link IllegalArgumentException} of an unreadable
+ * {@link dev.mosaicast.plugin.api.ActionCall#payload(Class) payload} (the host's 400 {@code bad-request}) and
+ * any other exception (the host's 500).
  *
  * @since 0.20.0
  */

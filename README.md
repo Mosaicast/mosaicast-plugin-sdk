@@ -681,7 +681,7 @@ try {
   scope under `backendPrivate`.
 - **Channels never store events.** A late subscriber gets nothing from before; `publishTo(userId, …)` gives a
   per-user view on a shared channel; `onJoin` / `onLeave` fire per user, not per tab. Subscriptions end as
-  `closed` when access changes (sign-out, ban, role, site access) and as `refused` when the authorizer, the
+  `closed` when access changes (sign-out, account erasure, role, site access) and as `refused` when the authorizer, the
   floor or a `kick` says no. Event names follow the action grammar, data ≤ 8 KiB.
 - **Timers are in memory.** `ctx.runAfter(delay, task)` has no floor and returns `Scheduled.cancel()`; a
   restart drops them, so persist deadlines and re-arm in `register`.

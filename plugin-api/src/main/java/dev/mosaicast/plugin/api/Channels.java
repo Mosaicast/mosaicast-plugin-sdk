@@ -29,9 +29,10 @@ package dev.mosaicast.plugin.api;
  * channels.channel(Scope.site(), "inbox").publishTo(bob, "invited", i); // one user, on a shared channel
  * }</pre>
  *
- * <p><strong>Subscriptions end when access does.</strong> Sign-out, a ban, a role change, a site-access
+ * <p><strong>Subscriptions end when access does.</strong> Sign-out, account erasure, a role change, a site-access
  * change and the plugin being disabled close them; a refusal or {@link Channel#kick(java.util.UUID)} ends
- * them as refused. Either way {@link #onLeave(ChannelListener)} fires for the user's last one.
+ * them as refused. Either way {@link #onLeave(ChannelListener)} fires for the user's last one. A subscription
+ * is bound to a browser session, so a personal access token cannot open one: nothing would end it on revoke.
  *
  * <p><strong>Concurrency.</strong> The authorizer and the join/leave listeners run concurrently with action
  * handlers and timers; the plugin synchronises its own state. See {@link Actions}.

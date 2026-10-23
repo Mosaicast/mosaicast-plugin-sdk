@@ -47,13 +47,16 @@ package dev.mosaicast.plugin.api;
  *   <li>429 {@code too-many-requests} with {@code Retry-After} and {@code retryAfterMs} — over a budget;</li>
  *   <li>503 {@code action-unavailable} — declared but no handler registered: the author's wiring bug;</li>
  *   <li>then the handler: its value as JSON, {@code null} as 204, {@link ActionRejectedException} as 422
- *       {@code action-rejected} with {@code code}, anything else thrown as 500 (logged to the plugin's
- *       log);</li>
+ *       {@code action-rejected} with {@code code}, a payload {@link ActionCall#payload(Class)} could not read
+ *       as 400 {@code bad-request}, anything else thrown as 500 (logged to the plugin's log);</li>
  *   <li>503 {@code action-busy} with {@code retryAfterMs} — the plugin's queue is full; 504
  *       {@code action-timeout} — the handler overran its deadline (it keeps running; the caller is
  *       answered).</li>
  * </ul>
  * Every type is {@code https://mosaicast.dev/problems/<slug>}.
+ *
+ * <p>Both size caps are measured on the UTF-8 JSON: the whole {@code { scope, payload }} body here, the
+ * serialized {@code data} for a {@link Channel channel event}.
  *
  * <p><strong>Concurrency.</strong> Handlers run on a bounded executor of the plugin's own, with a deadline —
  * never on the request thread. They run concurrently with each other, with

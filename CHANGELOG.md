@@ -32,7 +32,7 @@ methods would fail to link. **Core must pin `mosaicastSdk = "0.20.0"`** in the r
 - **`PluginContext.runAfter(Duration, Runnable)`** → `Scheduled.cancel()`: one-shot, in memory, no floor.
 - **`data.backendPrivate`**: a single client `GET` / `PUT` / `DELETE` is a 403 `backend-private-key`, listings
   drop the keys, batches leave them absent; ignored for `user` scopes and for `ctx.store()`.
-- TS: `PROBLEM_TYPES` gains `backendPrivateKey`, `notFound`, `unknownAction`, `payloadTooLarge`,
+- TS: `PROBLEM_TYPES` gains `badRequest`, `backendPrivateKey`, `notFound`, `unknownAction`, `payloadTooLarge`,
   `tooManyRequests`, `actionUnavailable`, `actionRejected`, `actionBusy`, `actionTimeout`; `ProblemDetail` gains
   `code` and `retryAfterMs`; helpers `isActionRejected` and `isRateLimited` (429 or a busy plugin's 503);
   `ACTION_NAME_PATTERN`, `CHANNEL_NAME_PATTERN`, `ACTION_BODY_LIMIT`, `CHANNEL_EVENT_LIMIT`; manifest types
@@ -51,6 +51,9 @@ methods would fail to link. **Core must pin `mosaicastSdk = "0.20.0"`** in the r
 
 - **`PluginContext` gains three abstract methods** (`actions()`, `channels()`, `runAfter(...)`). Only the host
   and `FakePluginContext` implement it; a plugin's own stub of the interface must add them.
+- **`docs/ARCHITECTURE.md`** synced from mosaicast-core (core 0.10.0 draft on top of 97ecab6): the new §7.9
+  plus §7.2, §7.4, §7.5, §7.6, §13 and §14 for 0.20.0, and core's changes since f8dd752: §18 site access and the edge, §19 anonymous
+  counting, the session store, `--mc-accent-2`.
 - Docs: "the backend cannot write a `USER` partition" now names its one exception, `ActionCall.store()`, and
   the `backendOwned` rationale for ignoring `USER` scopes is reworded (the partition is its owner's).
 

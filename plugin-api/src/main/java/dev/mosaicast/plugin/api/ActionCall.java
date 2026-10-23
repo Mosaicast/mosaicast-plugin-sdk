@@ -47,9 +47,9 @@ public interface ActionCall {
      * @param type the target type; never {@code null}
      * @param <T>  the target type
      * @return the converted payload, or {@code null} when the client sent none
-     * @throws IllegalArgumentException if the payload cannot be converted. Escaping the handler it is a 500
-     *                                  like any other throw; catch it and throw an
-     *                                  {@link ActionRejectedException} if malformed input deserves a 422
+     * @throws IllegalArgumentException if the payload cannot be converted. Escaping the handler it is a 400
+     *                                  {@code bad-request} — the caller sent it; catch it to answer your own
+     *                                  way, e.g. with an {@link ActionRejectedException}
      */
     <T> T payload(Class<T> type);
 

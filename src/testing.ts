@@ -1500,8 +1500,8 @@ export interface MockChannelsClient extends ChannelsClient {
    */
   refuse(name: string, opts?: { scope?: Scope }): void;
   /**
-   * Ends every open subscription on `name` as `closed`, as the host does when access changes (sign-out, a
-   * ban, a role change).
+   * Ends every open subscription on `name` as `closed`, as the host does when access changes (sign-out,
+   * account erasure, a role change).
    */
   end(name: string, opts?: { scope?: Scope }): void;
 }
