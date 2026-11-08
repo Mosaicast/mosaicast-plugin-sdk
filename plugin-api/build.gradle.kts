@@ -24,7 +24,7 @@
 // it explicit.
 
 dependencies {
-    api("org.pf4j:pf4j:3.16.0")
+    api("org.pf4j:pf4j:3.16.1")
     api("tools.jackson.core:jackson-databind:3.2.3")
     api("org.slf4j:slf4j-api:2.0.20")
 }
